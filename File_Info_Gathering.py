@@ -24,6 +24,7 @@ file_types = [ft.strip() for ft in file_types_input.split(',') if ft.strip()]
 ## User input: specify the separator(s) used in filenames and folder names
 print("Do not pick separators that are part of material or condition terms.")
 separator_input = input("Enter separator(s) used in filenames and folder names (e.g. _ or space or -): ").strip()
+print("Separators:", separator_input)
 if separator_input.lower() == 'space':
     separators = [' ']
 else:
@@ -32,6 +33,7 @@ else:
 ## User input: list the material terms to search for
 material_terms = input("Enter material terms separated by commas (e.g. CPC,t-PVDF,t-PVF,o-PVF,PPE,J-BOX#1,J-BOX#2,PO): ").split(',')
 material_terms = [term.strip() for term in material_terms]
+print("Material terms:", material_terms)
 
 ## User input: list the condition terms to search for
 conditions_terms = input("Enter condition terms separated by commas (e.g. A3,A4,A5,ARC,OPN,KKCE,0.5X,1X,2.5X,5X): ").split(',')
@@ -117,7 +119,5 @@ for dirpath, _, filenames in os.walk(root_dir):
         }
         print(f"Appending row: {data_row}")
         data.append(data_row)
-df = pd.DataFrame(data)
-print(df)
-
-
+dataframe = pd.DataFrame(data)
+print(dataframe)
