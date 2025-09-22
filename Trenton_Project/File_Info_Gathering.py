@@ -38,6 +38,7 @@ def find_term(term, text):
     return re.search(rf'(?<!\S){re.escape(term)}(?!\S)', f' {text} ', re.IGNORECASE) is not None
 
 def gather_file_info(file_types, separators, material_terms, conditions_terms, root_dir, append_missing, missing_txt_path=None):
+   
     """
     Helper function that gathers file information from a specified root directory and its subdirectories.
     Extracts details from filenames and parent folder names to create a structured dataframe.
@@ -60,9 +61,36 @@ def gather_file_info(file_types, separators, material_terms, conditions_terms, r
 
     data = []
     grouped_files = {}
+    ## Load existing dataframe and build set of processed files
+    ## This prevents re-processing files that are already in the dataframe
+    processed_files = set()
+    csv_path = "dataframe.csv"
+    if os.path.exists(csv_path):
+        try:
+            existing_dataframe = pd.read_csv(csv_path)
+            for _, row in existing_dataframe.iterrows():
+                processed_files.add((row["file location"], row["file name"]))
+        except Exception:
+            pass
+    ## Track files already written to missing_txt_path to avoid duplicates
+    already_missing = set()
+    if missing_txt_path and os.path.exists(missing_txt_path):
+        with open(missing_txt_path, 'r') as file:
+            for line in file:
+                try:
+                    entry = eval(line.strip())
+                    key = (entry.get("file location"), entry.get("file name"))
+                    already_missing.add(key)
+                except Exception:
+                    continue
     for dirpath, _, filenames in os.walk(root_dir):
         parent_folder = os.path.basename(dirpath)
         for filename in filenames:
+            ## Skip files already in dataframe
+            if (dirpath, filename) in processed_files:
+                continue
+            first_col_list = []
+            second_col_list = []
             ## Skip hidden files, system files, and files with 'ignore' in the name
             if filename.startswith('.'):
                 continue
@@ -71,6 +99,20 @@ def gather_file_info(file_types, separators, material_terms, conditions_terms, r
             ## Skip files that do not match the specified file types
             if not any(filename.lower().endswith(file_type.lower()) for file_type in file_types):
                 continue
+            ## Read first and second columns from the file, save as lists of floats
+            file_path = os.path.join(dirpath, filename)
+            try:
+                with open(file_path, 'r') as data_file:
+                    for line in data_file:
+                        parts = line.strip().split()
+                        if len(parts) >= 2:
+                            try:
+                                first_col_list.append(float(parts[0]))
+                                second_col_list.append(float(parts[1]))
+                            except ValueError:
+                                continue
+            except Exception:
+                pass
             ## Group files by base name (filename without trailing _1, _2, etc. and without extension), case insensitive
             ## This finds replicate measurements and places their names in a dictionary
             base_name = filename
@@ -124,22 +166,27 @@ def gather_file_info(file_types, separators, material_terms, conditions_terms, r
                 print(f"ValueError: Missing value for file '{filename}'. Results: date={date}, conditions={conditions}, material={material}, time={time}")
                 ## Optionally write missing row to text file for later review-- default filename is missing_data.txt
                 if missing_txt_path:
-                    with open(missing_txt_path, 'a') as f:
-                        f.write(str({
-                            "file location": dirpath,
-                            "file name": filename,
-                            "date": date,
-                            "conditions": conditions,
-                            "material": material,
-                            "time": time
-                        }) + '\n')
+                    key = (dirpath, filename)
+                    if key not in already_missing:
+                        with open(missing_txt_path, 'a') as f:
+                            f.write(str({
+                                "file location": dirpath,
+                                "file name": filename,
+                                "date": date,
+                                "conditions": conditions,
+                                "material": material,
+                                "time": time
+                            }) + '\n')
+                        already_missing.add(key)
             data_row = {
                 "file location": dirpath,
                 "file name": filename,
                 "date": date,
                 "conditions": conditions,
                 "material": material,
-                "time": time
+                "time": time,
+                "first column list": first_col_list,
+                "second column list": second_col_list
             }
             if append_missing:
                 #print(f"Appending row: {data_row}")
@@ -258,10 +305,16 @@ def file_info_extractor(file_types=None, separators=None, material_terms=None, c
 
     data, grouped_files = gather_file_info(file_types, separators, material_terms, conditions_terms, root_dir, append_missing, missing_txt_path)
     #print_grouped_files(grouped_files)
-    dataframe = pd.DataFrame(data)
-    ## print dataframe and save to .csv
-    print(dataframe)
-    dataframe.to_csv("dataframe.csv", index=False)
+    ## Save or append to CSV file named dataframe.csv in the current working directory
+    new_dataframe = pd.DataFrame(data)
+    csv_path = "dataframe.csv"
+    if os.path.exists(csv_path):
+        ## Only append new rows, since gather_file_info already skips existing ones
+        updated_dataframe = pd.concat([pd.read_csv(csv_path), new_dataframe], ignore_index=True)
+        updated_dataframe.drop_duplicates(subset=["file location", "file name"], inplace=True)
+        updated_dataframe.to_csv(csv_path, index=False)
+    else:
+        new_dataframe.to_csv(csv_path, index=False)
     #print("Finished gathering file info.")
 
 ## General Use:
@@ -270,4 +323,4 @@ def file_info_extractor(file_types=None, separators=None, material_terms=None, c
 
 ## Specific Project Example Use:
 if __name__ == "__main__":
-    file_info_extractor(file_types=".dpt", separators="_", material_terms="CPC,PPE,PO,J-BOX#1,J-BOX#2,t-PVDF,t-PVF,o-PVF,PMMA", conditions_terms="A3,A4,A5,ARC,OPN,KKCE,0.5X,1X,2.5X,5X,unexposed", root_dir=r"Y:\5200\Packaging Reliability\Durability Tool\Ray Tracing and Activation Spectrum\ATR-FTIR Data", append_missing=False, save_missing_txt=False)
+    file_info_extractor(file_types=".dpt", separators="_", material_terms="CPC,PPE,PO,J-BOX#1,J-BOX#2,t-PVDF,t-PVF,o-PVF,PMMA", conditions_terms="A3,A4,A5,ARC,OPN,KKCE,0.5X,1X,2.5X,5X,unexposed", root_dir=r"Y:\5200\Packaging Reliability\Durability Tool\Ray Tracing and Activation Spectrum\ATR-FTIR Data", append_missing=False, save_missing_txt=True)
