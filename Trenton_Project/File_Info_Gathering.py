@@ -185,8 +185,8 @@ def gather_file_info(file_types, separators, material_terms, conditions_terms, r
                 "conditions": conditions,
                 "material": material,
                 "time": time,
-                "first column list": first_col_list,
-                "second column list": second_col_list
+                "X-Axis": first_col_list,
+                "Raw Data": second_col_list
             }
             if append_missing:
                 #print(f"Appending row: {data_row}")
