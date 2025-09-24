@@ -1,5 +1,8 @@
 #Temporary file for the purpose of modifying the existing CSV Dataframe
 import pandas as pd
+import sys
+import os
+sys.path.append(r"C:\Users\twells\Documents\GitHub\FTIR-data-analysis-PV")
 
 def parse_parameters(param_str):
     """
@@ -124,7 +127,7 @@ def prompt_parameters(function_name, material=None):
     params = cast_param_types(function_name, params)
     return params
 
-def modify_dataframe(file_path):
+def baseline_selection(file_path):
     """
     Modify the DataFrame by adding baseline function and parameters based on user input. Save the results back to the CSV file.
     
@@ -184,6 +187,158 @@ def modify_dataframe(file_path):
     # Save the modified DataFrame back to a CSV file
     dataframe.to_csv(file_path, index=False)
 
+def delete_columns(file_path, columns_to_delete=None):
+    """
+    Delete specified columns from the DataFrame and save the results back to the CSV file.
+
+    Parameters
+    ----------
+    file_path : str
+        The path to the CSV file to modify.
+    columns_to_delete : list of str
+        A list of column names to delete from the DataFrame.
+
+    Returns
+    -------
+    None
+    """
+    # Read the existing CSV file into a DataFrame
+    dataframe = pd.read_csv(file_path)
+    if columns_to_delete is None:
+        # Get Columns to delete from user
+        columns_to_delete = input("Enter the column names to delete, separated by commas: ").strip().split(',')
+    # State which columns will be deleted
+    print("Columns requested for deletion:", columns_to_delete)
+    # Delete specified columns if they exist
+    for col in columns_to_delete:
+        if col in dataframe.columns:
+            dataframe.drop(col, axis=1, inplace=True)
+            print(f"Deleted column: {col}")
+        else:
+            print(f"Column not found, cannot delete: {col}")
+
+    # Save the modified DataFrame back to a CSV file
+    dataframe.to_csv(file_path, index=False)
+
+def object_class_changer(file_path):
+    """
+    Detect and print the class types of objects in each column of the DataFrame.
+    Give options to recast columns to specific types.
+
+    Parameters
+    ----------
+    file_path : str
+        The path to the CSV file to analyze.
+    
+    Returns
+    -------
+    None
+    """
+    import ast
+    import numpy as np
+    dataframe = pd.read_csv(file_path)
+    for column in dataframe.columns:
+        print(f"Column: {column}")
+        value = dataframe[column].iloc[0]
+        print(f" Row 0: Type: {type(value)}, Value: {value}")
+        print("\n")
+        recast = input(f"Would you like to recast column '{column}' as a different type? (y/n): ").strip().lower()
+        if recast == 'y':
+            print("Options: string, float, integer, list, array, dictionary")
+            dtype = input("Enter type to recast to: ").strip().lower()
+            if dtype == 'string':
+                dataframe[column] = dataframe[column].astype(str)
+            elif dtype == 'float':
+                dataframe[column] = pd.to_numeric(dataframe[column], errors='coerce')
+            elif dtype == 'integer':
+                dataframe[column] = pd.to_numeric(dataframe[column], errors='coerce').astype('Int64')
+            elif dtype == 'list':
+                dataframe[column] = dataframe[column].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else list(x) if hasattr(x, '__iter__') and not isinstance(x, str) else [x])
+            elif dtype == 'array':
+                dataframe[column] = dataframe[column].apply(lambda x: np.array(ast.literal_eval(x)) if isinstance(x, str) else np.array(x) if hasattr(x, '__iter__') and not isinstance(x, str) else np.array([x]))
+            elif dtype == 'dictionary':
+                dataframe[column] = dataframe[column].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else dict(x) if isinstance(x, dict) else {})
+            else:
+                print("Unknown type. Skipping recast.")
+            print(f"Column '{column}' recast to {dtype}.")
+    # Save the modified DataFrame back to a CSV file
+    dataframe.to_csv(file_path, index=False)
+
+def baseline_correction(file_path):
+    """
+    Baseline correction function accesses the dataframe and applies baseline correction based on user-specified functions and parameters.
+    Then saves the baseline and baseline-corrected spectra back to the CSV file.
+
+    Parameters
+    ----------
+    file_path : str
+        The path to the CSV file to modify.
+
+    Returns
+    -------
+    None
+    """
+    import ast
+    from Trenton_Project.Baseline_Correction_GIFTS import baseline_correction as gifts_baseline
+    from Trenton_Project.Baseline_Correction_IRSQR import irsqr as irsqr_baseline
+    from pybaselines import Baseline
+
+    dataframe = pd.read_csv(file_path)
+
+    # Add new columns for Baseline Function and Parameters if they don't exist
+    if 'Baseline' not in dataframe.columns:
+        dataframe['Baseline'] = None
+    if 'Corrected' not in dataframe.columns:
+        dataframe['Corrected'] = None
+
+    for idx, row in dataframe.iterrows():
+        baseline_name = row['Baseline Function']
+        param_dict = ast.literal_eval(row['Baseline Parameters']) if row['Baseline Parameters'] else {}
+        # Example: get y-data (Raw Data) and x-data (X-Axis)
+        try:
+            y_data = ast.literal_eval(row['Raw Data'])
+        except Exception:
+            y_data = row['Raw Data']
+
+        baseline = None
+        baseline_corrected = None
+
+        if baseline_name == 'GIFTS':
+            # Call GIFTS baseline correction
+            baseline = gifts_baseline(y_data, **param_dict)
+            baseline_corrected = [y - b for y, b in zip(y_data, baseline)]
+        elif baseline_name == 'IRSQR':
+            # Call IRSQR baseline correction
+            baseline, _ = irsqr_baseline(None, y_data, **param_dict)  # Pass None for self if using as standalone
+            baseline_corrected = [y - b for y, b in zip(y_data, baseline)]
+        elif baseline_name == 'FABC':
+            # Call FABC baseline correction
+            baseline_obj = Baseline()
+            baseline, _ = baseline_obj.fabc(y_data, **param_dict)
+            baseline_corrected = [y - b for y, b in zip(y_data, baseline)]
+        elif baseline_name == 'MANUAL':
+            ### Manual baseline correction logic here
+            pass
+        else:
+            print(f"Unknown baseline function: {baseline_name} for row {idx}")
+            continue
+        # Save results back to DataFrame
+        # Cast all baseline values to float before saving
+        if baseline is not None:
+            baseline_floats = [float(val) for val in baseline]
+            dataframe.at[idx, 'Baseline'] = (baseline_floats)
+        else:
+           dataframe.at[idx, 'Baseline'] = None
+        # Cast all corrected values to float before saving
+        if baseline_corrected is not None:
+           corrected_floats = [float(val) for val in baseline_corrected]
+           dataframe.at[idx, 'Corrected'] = (corrected_floats)
+        else:
+           dataframe.at[idx, 'Corrected'] = None
+
+
+    # Save updated DataFrame
+    dataframe.to_csv(file_path, index=False)
 if __name__ == "__main__":
-    file_path = r"C:\Users\twells\Documents\GitHub\FTIR-data-analysis-PV\Trenton_Project\dataframe.csv"
-    modify_dataframe(file_path)
+    #baseline_selection(file_path=r"C:\Users\twells\Documents\GitHub\FTIR-data-analysis-PV\Trenton_Project\dataframe.csv")
+    baseline_correction(file_path=r"C:\Users\twells\Documents\GitHub\FTIR-data-analysis-PV\Trenton_Project\dataframe.csv")

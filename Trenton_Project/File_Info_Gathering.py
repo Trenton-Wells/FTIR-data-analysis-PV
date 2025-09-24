@@ -17,6 +17,7 @@
 import os
 import re
 import pandas as pd
+import numpy as np
 
 def find_term(term, text):
     """
@@ -99,7 +100,7 @@ def gather_file_info(file_types, separators, material_terms, conditions_terms, r
             ## Skip files that do not match the specified file types
             if not any(filename.lower().endswith(file_type.lower()) for file_type in file_types):
                 continue
-            ## Read first and second columns from the file, save as lists of floats
+            ## Read first and second columns from the file, save as list of floats
             file_path = os.path.join(dirpath, filename)
             try:
                 with open(file_path, 'r') as data_file:
@@ -113,6 +114,7 @@ def gather_file_info(file_types, separators, material_terms, conditions_terms, r
                                 continue
             except Exception:
                 pass
+            
             ## Group files by base name (filename without trailing _1, _2, etc. and without extension), case insensitive
             ## This finds replicate measurements and places their names in a dictionary
             base_name = filename
@@ -217,7 +219,7 @@ def print_grouped_files(grouped_files):
 
 def file_info_extractor(file_types=None, separators=None, material_terms=None, conditions_terms=None, root_dir=None, append_missing=None, save_missing_txt=None):
     """
-    Main function to gather file information and print the resulting dataframe and grouped replicates. Handles user input for all parameters.
+    Main function to gather file information and save the resulting dataframe. Handles user input for all parameters.
 
     Parameters:
     -----------
@@ -234,25 +236,7 @@ def file_info_extractor(file_types=None, separators=None, material_terms=None, c
 
     Returns:
     -----------
-    DataFrame : pd.DataFrame
-        DataFrame containing the gathered file information.
-        Also prints the dataframe to console.
-    Columns:
-        file location : str or None
-            Full path to the file.
-        file name : str or None
-            Name of the file.
-        date : str or None
-            Date of the scan extracted from filename or parent folder (format: MM-DD-YYYY or
-        conditions : str or None
-            Condition term extracted from filename or parent folder.
-        material : str or None
-            Material term extracted from filename or parent folder.
-        time : float or None
-            Duration in hours extracted from filename or parent folder.
-    Grouped files : dict or None
-        For purposes of identifying repeated measurements.
-        Also prints grouped files to console.
+    None
     """
 
     ## User input: appending missing data to dataframe y/n
@@ -305,11 +289,12 @@ def file_info_extractor(file_types=None, separators=None, material_terms=None, c
 
     data, grouped_files = gather_file_info(file_types, separators, material_terms, conditions_terms, root_dir, append_missing, missing_txt_path)
     #print_grouped_files(grouped_files)
+
     ## Save or append to CSV file named dataframe.csv in the current working directory
     new_dataframe = pd.DataFrame(data)
     csv_path = "dataframe.csv"
     if os.path.exists(csv_path):
-        ## Only append new rows, since gather_file_info already skips existing ones
+        ## Only append new rows
         updated_dataframe = pd.concat([pd.read_csv(csv_path), new_dataframe], ignore_index=True)
         updated_dataframe.drop_duplicates(subset=["file location", "file name"], inplace=True)
         updated_dataframe.to_csv(csv_path, index=False)
