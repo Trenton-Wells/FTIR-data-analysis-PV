@@ -33,6 +33,7 @@
         "alias": "CPC",
         "time": [0, 500, 1000, 2000, 4000],
         "time_condition_X": [],
+        "anchor_points": [],
         "peaks": {
             "1": {
                 "name": "",
@@ -77,7 +78,8 @@
         "name": "Transparent PVDF (pure PVDF)",
         "alias": "t-PVDF",
         "time": [0, 500, 1000, 2000, 4000],
-         "time_condition_X": [],
+        "time_condition_X": [],
+        "anchor_points": [],
         "peaks": {
             "1": {
                 "name": "undecided",
@@ -124,6 +126,7 @@
         "alias": "t-PVF",
         "time": [0, 500, 1000, 2000, 4000],
         "time_condition_X": [],
+        "anchor_points": [],
         "peaks": {
             "1": {
                 "name": "",
@@ -169,6 +172,7 @@
         "alias": "o-PVF",
         "time": [0, 500, 1000, 2000, 4000],
         "time_condition_X": [],
+        "anchor_points": [],
         "peaks": {
             "1": {
                 "name": "",
@@ -215,6 +219,7 @@
         "alias": "PPE",
         "time": [0, 500, 1000, 2000, 4000],
         "time_condition_X": [],
+        "anchor_points": [],
         "peaks": {
             "1": {
                 "name": "",
@@ -261,6 +266,7 @@
         "alias": "J-Box#1",
         "time": [0, 500, 1000, 2000, 4000],
         "time_condition_X": [],
+        "anchor_points": [],
         "peaks": {
             "1": {
                 "name": "",
@@ -307,6 +313,7 @@
         "alias": "J-Box#2",
         "time": [0, 500, 1000, 2000, 4000],
         "time_condition_X": [],
+        "anchor_points": [],
         "peaks": {
             "1": {
                 "name": "",
@@ -353,6 +360,7 @@
         "alias": "PO",
         "time": [0, 500, 1000, 2000, 4000],
         "time_condition_X": [],
+        "anchor_points": [],
         "peaks": {
             "1": {
                 "name": "",
@@ -399,6 +407,7 @@
         "alias": "PMMA",
         "time": [0, 500, 1000, 2000, 4000],
         "time_condition_X": [],
+        "anchor_points": [],
         "peaks": {
             "1": {
                 "name": "",

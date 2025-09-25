@@ -279,8 +279,8 @@ def baseline_correction(file_path):
     None
     """
     import ast
-    from Trenton_Project.Baseline_Correction_GIFTS import baseline_correction as gifts_baseline
-    from Trenton_Project.Baseline_Correction_IRSQR import irsqr as irsqr_baseline
+    from Trenton_Project.Baseline_GIFTS import baseline_correction as gifts_baseline
+    from Trenton_Project.Baseline_IRSQR import irsqr as irsqr_baseline
     from pybaselines import Baseline
 
     dataframe = pd.read_csv(file_path)
@@ -317,8 +317,15 @@ def baseline_correction(file_path):
             baseline, _ = baseline_obj.fabc(y_data, **param_dict)
             baseline_corrected = [y - b for y, b in zip(y_data, baseline)]
         elif baseline_name == 'MANUAL':
-            ### Manual baseline correction logic here
-            pass
+            # Call Manual baseline correction
+            from scipy.interpolate import CubicSpline
+            anchor_points = param_dict.get('anchor_points', [])
+            x_axis = ast.literal_eval(row['X-Axis']) if isinstance(row['X-Axis'], str) else row['X-Axis']
+            # For each anchor point, find the index of the closest value in X-Axis
+            # This ensures that the anchor points correspond to actual data points in each spectrum
+            anchor_indices = [min(range(len(x_axis)), key=lambda i: abs(x_axis[i] - ap)) for ap in anchor_points]
+            y_anchor = [y_data[i] for i in anchor_indices]
+            baseline = CubicSpline(x=anchor_points, y=y_anchor, extrapolate=True)(x_axis)
         else:
             print(f"Unknown baseline function: {baseline_name} for row {idx}")
             continue

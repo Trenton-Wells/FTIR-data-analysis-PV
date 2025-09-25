@@ -38,7 +38,7 @@ if __name__ == "__main__":
             break
         else:
             print("Invalid option. Please enter 'new' or 'append'.")
-    # Baseline correction
+    # Baseline correction options
     while True:
         modify_choice = input("Do you want to modify the baseline function and parameters in the dataframe? (y/n): ").lower()
         if modify_choice == 'quit':
