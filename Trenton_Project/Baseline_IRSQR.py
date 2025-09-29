@@ -5,7 +5,7 @@ from pybaselines import _weighting, Baseline
 import pandas as pd
 import ast
 
-def irsqr(self, data, lam=100, quantile=0.05, num_knots=100, spline_degree=3,
+def irsqr(self, data, lam=1e6, quantile=0.05, num_knots=100, spline_degree=3,
               diff_order=3, max_iter=100, tol=1e-6, weights=None, eps=None):
         """
         Iterative Reweighted Spline Quantile Regression (IRSQR).
@@ -68,6 +68,7 @@ def irsqr(self, data, lam=100, quantile=0.05, num_knots=100, spline_degree=3,
         Science and Control Engineering (ICISCE), 2018, 280-284.
 
         """
+
         if not 0 < quantile < 1:
             raise ValueError('quantile must be between 0 and 1')
 

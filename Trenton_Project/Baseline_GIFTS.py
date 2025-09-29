@@ -18,6 +18,13 @@ def baseline_correction(y, lam=1e6, p=0.01, n_iter=10):
     Returns:
         baseline (array): Estimated baseline.
     """
+    if lam is None:
+        lam = 1e6  # Default smoothness parameter
+    if p is None:
+        p = 0.01  # Default asymmetry parameter
+    if n_iter is None:
+        n_iter = 10  # Default number of iterations
+
     L = len(y)
     D = diags([1, -2, 1], [0, -1, -2], shape=(L, L - 2))
     D = lam * D.dot(D.T)  # Precompute the smoothness matrix
