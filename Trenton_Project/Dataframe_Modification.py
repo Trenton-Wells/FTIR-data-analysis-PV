@@ -1,4 +1,8 @@
- #Temporary file for the purpose of modifying the existing CSV Dataframe
+#Created: 9-23-2025
+#Author: Trenton Wells
+#Organization: NREL
+#NREL Contact: trenton.wells@nrel.gov
+#Personal Contact: trentonwells73@gmail.com
 import pandas as pd
 import sys
 import os
@@ -95,15 +99,23 @@ def cast_parameter_types(function_name, parameters):
         if 'min_length' in parameters: parameters['min_length'] = int(parameters['min_length'])
     return parameters
 
-def baseline_selection(dataframe_path, baseline_function=None, materials_to_use=None, parameter_dictionary=None):
+def baseline_selection(dataframe_path, materials_to_use=None, baseline_function=None, parameter_dictionary=None):
     """
-    Modify the DataFrame by adding baseline function and parameters based on user input. Save the results back to the CSV file.
+    Add baseline function and parameters to a DataFrame for specified materials.
     
     Parameters
     ----------
     dataframe_path : str
-        The path to the CSV file to modify.
-
+        Path to the CSV file.
+    materials_to_use : list of str or dict, optional
+        Materials to apply baseline function to. Can be:
+        - List of material names (same parameters for all)
+        - Dict mapping material names to parameter dictionaries
+    baseline_function : str, optional
+        Baseline function to use.
+    parameter_dictionary : dict, optional
+        Parameters for baseline function (used when materials_to_use is a list).
+    
     Returns
     -------
     None
@@ -120,22 +132,40 @@ def baseline_selection(dataframe_path, baseline_function=None, materials_to_use=
 
     # User provides a list of materials to use
     if materials_to_use is None:
-        materials_input = input("Enter a comma-separated list of materials to apply the baseline function to: ").strip()
-        materials_to_use = [m.strip() for m in materials_input.split(',') if m.strip()]
-
-    # Set the baseline function for only the selected materials
-    for material in materials_to_use:
-        dataframe.loc[dataframe['material'] == material, 'Baseline Function'] = baseline_function
-
-    # Parameter assignment logic for selected materials
-    for material in materials_to_use:
+        materials_input = input("Enter materials to apply baseline function to (comma-separated): ").strip()
+        materials_to_use = [mat.strip() for mat in materials_input.split(',')]
+    
+    # Get baseline function
+    if baseline_function is None:
+        baseline_function = input("Enter baseline function (GIFTS, IRSQR, FABC, Manual): ").strip()
+    
+    # Handle different parameter scenarios
+    if isinstance(materials_to_use, dict):
+        # Materials_to_use is a dictionary mapping materials to parameters
+        for material, material_parameters in materials_to_use.items():
+            if material_parameters is None:
+                material_parameters = get_default_parameters(baseline_function)
+            
+            # Apply to rows with this material
+            mask = dataframe['material'] == material
+            dataframe.loc[mask, 'Baseline Function'] = baseline_function
+            dataframe.loc[mask, 'Baseline Parameters'] = str(material_parameters)
+            print(f"Applied {baseline_function} with parameters {material_parameters} to material: {material}")
+    
+    else:
+        # Materials_to_use is a list - same parameters for all materials
         if parameter_dictionary is None:
             parameter_dictionary = get_default_parameters(baseline_function)
-        parameters = cast_parameter_types(baseline_function, parameter_dictionary)
-        dataframe.loc[dataframe['material'] == material, 'Baseline Parameters'] = str(parameters)
-
-    # Save the modified DataFrame back to a CSV file
+        
+        for material in materials_to_use:
+            mask = dataframe['material'] == material
+            dataframe.loc[mask, 'Baseline Function'] = baseline_function
+            dataframe.loc[mask, 'Baseline Parameters'] = str(parameter_dictionary)
+            print(f"Applied {baseline_function} with parameters {parameter_dictionary} to material: {material}")
+    
+    # Save the modified DataFrame
     dataframe.to_csv(dataframe_path, index=False)
+    print(f"Updated DataFrame saved to {dataframe_path}")
 
 def baseline_selection_quick(dataframe_path, baseline_function=None, parameter_dictionary=None):
     """
@@ -166,7 +196,7 @@ def baseline_selection_quick(dataframe_path, baseline_function=None, parameter_d
         dataframe.at[idx, 'Baseline Function'] = baseline_function
 
     if parameter_dictionary is None:
-        parameter_dictionary = get_default_params(baseline_function)
+        parameter_dictionary = get_default_parameters(baseline_function)
     for idx in dataframe.index:
         dataframe.at[idx, 'Baseline Parameters'] = str(parameter_dictionary)
 

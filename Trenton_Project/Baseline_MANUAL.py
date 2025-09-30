@@ -85,7 +85,7 @@ def select_anchor_points_from_file():
 
 	# Ask user to accept or redo via y/n input
 	while True:
-		user_response = input("Accept baselie interpolation? (y/n): ").strip().lower()
+		user_response = input("Accept baseline interpolation? (y/n): ").strip().lower()
 		if user_response == 'y':
 			return anchor_points_x
 		elif user_response == 'n':
