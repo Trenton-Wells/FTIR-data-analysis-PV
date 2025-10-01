@@ -73,7 +73,7 @@ def _haar(num_points, scale=2):
     # the 1/sqrt(scale) is a normalization
     return wavelet / (np.sqrt(scale))
 
-def _iter_threshold(power, num_std=3.0):
+def _iteration_threshold(power, num_std=3.0):
     """
     Iteratively thresholds a power spectrum based on the mean and standard deviation.
 
@@ -219,118 +219,119 @@ def _cwt(data, wavelet, widths, dtype=None, **kwargs):
         output[ind] = convolve(data, wavelet_data, mode='same')
     return output
 
-def fabc(self, data, lam=1e6, scale=None, num_std=3.0, diff_order=2, min_length=2,
-             weights=None, weights_as_mask=False, pad_kwargs=None, **kwargs):
-        """
-        Fully automatic baseline correction (fabc).
 
-        Similar to Dietrich's method, except that the derivative is estimated using a
-        continuous wavelet transform and the baseline is calculated using Whittaker
-        smoothing through the identified baseline points.
+def baseline_fabc(self, data, lam=1e6, scale=None, num_std=3.0, diff_order=2, min_length=2,
+                    weights=None, weights_as_mask=False, pad_kwargs=None, **kwargs):
+    """
+    Fully automatic baseline correction (fabc).
 
-        Parameters
-        ----------
-        data : array-like, shape (N,)
-            The y-values of the measured data, with N data points.
-        lam : float, optional
-            The smoothing parameter. Larger values will create smoother baselines.
-            Default is 1e6.
-        scale : int, optional
-            The scale at which to calculate the continuous wavelet transform. Should be
-            approximately equal to the index-based full-width-at-half-maximum of the peaks
-            or features in the data. Default is None, which will use half of the value from
-            :func:`.optimize_window`, which is not always a good value, but at least scales
-            with the number of data points and gives a starting point for tuning the parameter.
-        num_std : float, optional
-            The number of standard deviations to include when thresholding. Higher values
-            will assign more points as baseline. Default is 3.0.
-        diff_order : int, optional
-            The order of the differential matrix. Must be greater than 0. Default is 2
-            (second order differential matrix). Typical values are 2 or 1.
-        min_length : int, optional
-            Any region of consecutive baseline points less than `min_length` is considered
-            to be a false positive and all points in the region are converted to peak points.
-            A higher `min_length` ensures less points are falsely assigned as baseline points.
-            Default is 2, which only removes lone baseline points.
-        weights : array-like, shape (N,), optional
-            The weighting array, used to override the function's baseline identification
-            to designate peak points. Only elements with 0 or False values will have
-            an effect; all non-zero values are considered baseline points. If None
-            (default), then will be an array with size equal to N and all values set to 1.
-        weights_as_mask : bool, optional
-            If True, signifies that the input `weights` is the mask to use for fitting,
-            which skips the continuous wavelet calculation and just smooths the input data.
-            Default is False.
-        pad_kwargs : dict, optional
-            A dictionary of keyword arguments to pass to :func:`.pad_edges` for padding
-            the edges of the data to prevent edge effects from convolution for the
-            continuous wavelet transform. Default is None.
-        **kwargs
+    Similar to Dietrich's method, except that the derivative is estimated using a
+    continuous wavelet transform and the baseline is calculated using Whittaker
+    smoothing through the identified baseline points.
 
-            .. deprecated:: 1.2.0
-                Passing additional keyword arguments is deprecated and will be removed in version
-                1.4.0. Pass keyword arguments using `pad_kwargs`.
+    Parameters
+    ----------
+    data : array-like, shape (N,)
+        The y-values of the measured data, with N data points.
+    lam : float, optional
+        The smoothing parameter. Larger values will create smoother baselines.
+        Default is 1e6.
+    scale : int, optional
+        The scale at which to calculate the continuous wavelet transform. Should be
+        approximately equal to the index-based full-width-at-half-maximum of the peaks
+        or features in the data. Default is None, which will use half of the value from
+        :func:`.optimize_window`, which is not always a good value, but at least scales
+        with the number of data points and gives a starting point for tuning the parameter.
+    num_std : float, optional
+        The number of standard deviations to include when thresholding. Higher values
+        will assign more points as baseline. Default is 3.0.
+    diff_order : int, optional
+        The order of the differential matrix. Must be greater than 0. Default is 2
+        (second order differential matrix). Typical values are 2 or 1.
+    min_length : int, optional
+        Any region of consecutive baseline points less than `min_length` is considered
+        to be a false positive and all points in the region are converted to peak points.
+        A higher `min_length` ensures less points are falsely assigned as baseline points.
+        Default is 2, which only removes lone baseline points.
+    weights : array-like, shape (N,), optional
+        The weighting array, used to override the function's baseline identification
+        to designate peak points. Only elements with 0 or False values will have
+        an effect; all non-zero values are considered baseline points. If None
+        (default), then will be an array with size equal to N and all values set to 1.
+    weights_as_mask : bool, optional
+        If True, signifies that the input `weights` is the mask to use for fitting,
+        which skips the continuous wavelet calculation and just smooths the input data.
+        Default is False.
+    pad_kwargs : dict, optional
+        A dictionary of keyword arguments to pass to :func:`.pad_edges` for padding
+        the edges of the data to prevent edge effects from convolution for the
+        continuous wavelet transform. Default is None.
+    **kwargs
 
-        Returns
-        -------
-        baseline : numpy.ndarray, shape (N,)
-            The calculated baseline.
-        params : dict
-            A dictionary with the following items:
+        .. deprecated:: 1.2.0
+            Passing additional keyword arguments is deprecated and will be removed in version
+            1.4.0. Pass keyword arguments using `pad_kwargs`.
 
-            * 'mask': numpy.ndarray, shape (N,)
-                The boolean array designating baseline points as True and peak points
-                as False.
-            * 'weights': numpy.ndarray, shape (N,)
-                The weight array used for fitting the data.
+    Returns
+    -------
+    baseline : numpy.ndarray, shape (N,)
+        The calculated baseline.
+    parameters : dict
+        A dictionary with the following items:
 
-        Notes
-        -----
-        The classification of baseline points is similar to :meth:`~.Baseline.dietrich`, except that
-        this method approximates the first derivative using a continous wavelet transform
-        with the Haar wavelet, which is more robust than the numerical derivative in
-        Dietrich's method.
+        * 'mask': numpy.ndarray, shape (N,)
+            The boolean array designating baseline points as True and peak points
+            as False.
+        * 'weights': numpy.ndarray, shape (N,)
+            The weight array used for fitting the data.
 
-        References
-        ----------
-        Cobas, J., et al. A new general-purpose fully automatic baseline-correction
-        procedure for 1D and 2D NMR data. Journal of Magnetic Resonance, 2006, 183(1),
-        145-151.
+    Notes
+    -----
+    The classification of baseline points is similar to :meth:`~.Baseline.dietrich`, except that
+    this method approximates the first derivative using a continous wavelet transform
+    with the Haar wavelet, which is more robust than the numerical derivative in
+    Dietrich's method.
 
-        """
-        self._deprecate_pad_kwargs(**kwargs)
+    References
+    ----------
+    Cobas, J., et al. A new general-purpose fully automatic baseline-correction
+    procedure for 1D and 2D NMR data. Journal of Magnetic Resonance, 2006, 183(1),
+    145-151.
 
-        if weights_as_mask:
-            y, whittaker_weights, whittaker_system = self._setup_whittaker(
-                data, lam, diff_order, weights
-            )
-            mask = whittaker_weights.astype(bool)
-        else:
-            y, weight_array = self._setup_classification(data, weights)
-            if scale is None:
-                # optimize_window(y) / 2 gives an "okay" estimate that at least scales
-                # with data size
-                scale = ceil(optimize_window(y) / 2)
-            half_window = scale * 2
-            pad_kwargs = pad_kwargs if pad_kwargs is not None else {}
-            wavelet_cwt = _cwt(pad_edges(y, half_window, **pad_kwargs, **kwargs), _haar, [scale])
-            power = wavelet_cwt[0, half_window:-half_window]**2
+    """
+    self._deprecate_pad_kwargs(**kwargs)
 
-            mask = _refine_mask(_iter_threshold(power, num_std), min_length)
-            np.logical_and(mask, weight_array, out=mask)
-
-            _, whittaker_weights, whittaker_system = self._setup_whittaker(y, lam, diff_order, mask)
-            if self._sort_order is not None:
-                whittaker_weights = whittaker_weights[self._inverted_order]
-
-        whittaker_weights = whittaker_weights.astype(float)
-        baseline = whittaker_system.solve(
-            whittaker_system.add_diagonal(whittaker_weights), whittaker_weights * y,
-            overwrite_b=True, overwrite_ab=True
+    if weights_as_mask:
+        y, whittaker_weights, whittaker_system = self._setup_whittaker(
+            data, lam, diff_order, weights
         )
-        params = {'mask': mask, 'weights': whittaker_weights}
+        mask = whittaker_weights.astype(bool)
+    else:
+        y, weight_array = self._setup_classification(data, weights)
+        if scale is None:
+            # optimize_window(y) / 2 gives an "okay" estimate that at least scales
+            # with data size
+            scale = ceil(optimize_window(y) / 2)
+        half_window = scale * 2
+        pad_kwargs = pad_kwargs if pad_kwargs is not None else {}
+        wavelet_cwt = _cwt(pad_edges(y, half_window, **pad_kwargs, **kwargs), _haar, [scale])
+        power = wavelet_cwt[0, half_window:-half_window]**2
 
-        return baseline, params
+        mask = _refine_mask(_iteration_threshold(power, num_std), min_length)
+        np.logical_and(mask, weight_array, out=mask)
+
+        _, whittaker_weights, whittaker_system = self._setup_whittaker(y, lam, diff_order, mask)
+        if self._sort_order is not None:
+            whittaker_weights = whittaker_weights[self._inverted_order]
+
+    whittaker_weights = whittaker_weights.astype(float)
+    baseline = whittaker_system.solve(
+        whittaker_system.add_diagonal(whittaker_weights), whittaker_weights * y,
+        overwrite_b=True, overwrite_ab=True
+    )
+    parameters = {'mask': mask, 'weights': whittaker_weights}
+
+    return baseline, parameters
 
 if __name__ == "__main__":
     df = pd.read_csv(r"C:\Users\twells\Documents\GitHub\FTIR-data-analysis-PV\Trenton_Project\dataframe.csv")

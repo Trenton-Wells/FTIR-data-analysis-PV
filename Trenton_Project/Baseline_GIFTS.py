@@ -4,8 +4,9 @@ from scipy.sparse import diags
 from scipy.sparse.linalg import spsolve
 import pandas as pd
 import ast
+from Dataframe_Modification import baseline_correction
 
-def baseline_correction(y, lam=1e6, p=0.01, n_iter=10):
+def baseline_gifts(y, lam=1e6, p=0.01, iterations=10):
     """
     Perform baseline correction using Asymmetric Least Squares (ALS) method.
 
@@ -13,7 +14,7 @@ def baseline_correction(y, lam=1e6, p=0.01, n_iter=10):
         y (array): Input spectrum (intensity values).
         lam (float): Smoothness parameter (higher = smoother baseline).
         p (float): Asymmetry parameter (0 < p < 1).
-        n_iter (int): Number of iterations.
+        number_iterations (int): Number of iterations.
 
     Returns:
         baseline (array): Estimated baseline.
@@ -22,15 +23,15 @@ def baseline_correction(y, lam=1e6, p=0.01, n_iter=10):
         lam = 1e6  # Default smoothness parameter
     if p is None:
         p = 0.01  # Default asymmetry parameter
-    if n_iter is None:
-        n_iter = 10  # Default number of iterations
+    if iterations is None:
+        iterations = 10  # Default number of iterations
 
     L = len(y)
     D = diags([1, -2, 1], [0, -1, -2], shape=(L, L - 2))
     D = lam * D.dot(D.T)  # Precompute the smoothness matrix
     w = np.ones(L)
 
-    for _ in range(n_iter):
+    for _ in range(iterations):
         W = diags(w, 0)
         Z = W + D
         baseline = spsolve(Z, w * y)

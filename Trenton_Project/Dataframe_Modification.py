@@ -47,8 +47,8 @@ def get_default_parameters(function_name):
         A dictionary of default parameters for the given function.
     """
     BASELINE_DEFAULTS = {
-    'GIFTS': {'lam': 1e6, 'p': 0.01, 'n_iter': 10},
-    'IRSQR': {'lam': 1e6, 'quantile': 0.05, 'num_knots': 100, 'spline_degree': 3, 'diff_order': 3, 'max_iter': 100, 'tol': 1e-6},
+    'GIFTS': {'lam': 1e6, 'p': 0.01, 'iterations': 10},
+    'IRSQR': {'lam': 1e6, 'quantile': 0.05, 'num_knots': 100, 'spline_degree': 3, 'diff_order': 3, 'max_iterations': 100, 'tolerance': 1e-6, 'weights': None, 'eps': None},
     'FABC': {'lam': 1e6, 'scale': None, 'num_std': 3.0, 'diff_order': 2, 'min_length': 2},
     'MANUAL': {}
     }
@@ -71,22 +71,22 @@ def cast_parameter_types(function_name, parameters):
     parameters : dict
         The dictionary with casted parameter types.
     """
-    fn = function_name.upper()
-    if fn == 'GIFTS':
+    function = function_name.upper()
+    if function == 'GIFTS':
         # lam: float, p: float, n_iter: int
         if 'lam' in parameters: parameters['lam'] = float(parameters['lam'])
         if 'p' in parameters: parameters['p'] = float(parameters['p'])
-        if 'n_iter' in parameters: parameters['n_iter'] = int(parameters['n_iter'])
-    elif fn == 'IRSQR':
+        if 'iterations' in parameters: parameters['iterations'] = int(parameters['iterations'])
+    elif function == 'IRSQR':
         # lam: float, quantile: float, num_knots: int, spline_degree: int, diff_order: int, max_iter: int, tol: float
         if 'lam' in parameters: parameters['lam'] = float(parameters['lam'])
         if 'quantile' in parameters: parameters['quantile'] = float(parameters['quantile'])
         if 'num_knots' in parameters: parameters['num_knots'] = int(parameters['num_knots'])
         if 'spline_degree' in parameters: parameters['spline_degree'] = int(parameters['spline_degree'])
         if 'diff_order' in parameters: parameters['diff_order'] = int(parameters['diff_order'])
-        if 'max_iter' in parameters: parameters['max_iter'] = int(parameters['max_iter'])
-        if 'tol' in parameters: parameters['tol'] = float(parameters['tol'])
-    elif fn == 'FABC':
+        if 'max_iterations' in parameters: parameters['max_iterations'] = int(parameters['max_iterations'])
+        if 'tolerance' in parameters: parameters['tolerance'] = float(parameters['tolerance'])
+    elif function == 'FABC':
         # lam: float, scale: int or None, num_std: float, diff_order: int, min_length: int
         if 'lam' in parameters: parameters['lam'] = float(parameters['lam'])
         if 'scale' in parameters:
@@ -309,7 +309,7 @@ def baseline_correction(dataframe_path):
 
     for idx, row in dataframe.iterrows():
         baseline_name = row['Baseline Function']
-        param_dict = ast.literal_eval(row['Baseline Parameters']) if row['Baseline Parameters'] else {}
+        parameter_dictionary = ast.literal_eval(row['Baseline Parameters']) if row['Baseline Parameters'] else {}
         # Example: get y-data (Raw Data) and x-data (X-Axis)
         try:
             y_data = ast.literal_eval(row['Raw Data'])
@@ -321,21 +321,21 @@ def baseline_correction(dataframe_path):
 
         if baseline_name == 'GIFTS':
             # Call GIFTS baseline correction
-            baseline = gifts_baseline(y_data, **param_dict)
+            baseline = gifts_baseline(y_data, **parameter_dictionary)
             baseline_corrected = [y - b for y, b in zip(y_data, baseline)]
         elif baseline_name == 'IRSQR':
             # Call IRSQR baseline correction
-            baseline, _ = irsqr_baseline(None, y_data, **param_dict)  # Pass None for self if using as standalone
+            baseline, _ = irsqr_baseline(None, y_data, **parameter_dictionary)  # Pass None for self if using as standalone
             baseline_corrected = [y - b for y, b in zip(y_data, baseline)]
         elif baseline_name == 'FABC':
             # Call FABC baseline correction
             baseline_obj = Baseline()
-            baseline, _ = baseline_obj.fabc(y_data, **param_dict)
+            baseline, _ = baseline_obj.fabc(y_data, **parameter_dictionary)
             baseline_corrected = [y - b for y, b in zip(y_data, baseline)]
         elif baseline_name == 'MANUAL':
             # Call Manual baseline correction
             from scipy.interpolate import CubicSpline
-            anchor_points = param_dict.get('anchor_points', [])
+            anchor_points = parameter_dictionary.get('anchor_points', [])
             x_axis = ast.literal_eval(row['X-Axis']) if isinstance(row['X-Axis'], str) else row['X-Axis']
             # For each anchor point, find the index of the closest value in X-Axis
             # This ensures that the anchor points correspond to actual data points in each spectrum
