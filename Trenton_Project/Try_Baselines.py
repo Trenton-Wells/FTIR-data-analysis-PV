@@ -11,7 +11,7 @@ import numpy as np
 from Baseline_GIFTS import baseline_gifts
 from Baseline_IRSQR import baseline_irsqr
 from pybaselines import Baseline
-from Dataframe_Modification import get_default_parameters, parse_parameters, cast_parameter_types
+from Trenton_Project.Analysis import get_default_parameters, parse_parameters, cast_parameter_types
 
 def try_baseline(dataframe_path, material, baseline_function, parameter_string=None):
     """

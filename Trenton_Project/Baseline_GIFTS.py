@@ -4,7 +4,7 @@ from scipy.sparse import diags
 from scipy.sparse.linalg import spsolve
 import pandas as pd
 import ast
-from Dataframe_Modification import baseline_correction
+from Trenton_Project.Analysis import baseline_correction
 
 def baseline_gifts(y, lam=1e6, p=0.01, iterations=10):
     """

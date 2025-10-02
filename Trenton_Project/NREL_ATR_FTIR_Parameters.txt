@@ -1,0 +1,5 @@
+directory = "Y:\5200\Packaging Reliability\Durability Tool\Ray Tracing and Activation Spectrum\ATR-FTIR Data"
+file_types = ".dpt"
+separators = "_"
+material_terms = ["CPC", "t-PVDF", "t-PVF", "o-PVF", "PPE", "J-BOX#1", "J-BOX#2", "PO", "PMMA"]
+conditions_terms = ["A3", "A4", "A5", "0.5X", "1X", "2.5X", "5X", "ARC", "OPN", "KKCE", "unexposed"]
