@@ -1,10 +1,6 @@
 import numpy as np
-import matplotlib.pyplot as plt
 from scipy.sparse import diags
 from scipy.sparse.linalg import spsolve
-import pandas as pd
-import ast
-from Trenton_Project.Analysis import baseline_correction
 
 def baseline_gifts(y, lam=1e6, p=0.01, iterations=10):
     """
@@ -39,23 +35,3 @@ def baseline_gifts(y, lam=1e6, p=0.01, iterations=10):
 
     return baseline
 
-if __name__ == "__main__":
-    df = pd.read_csv(r"C:\Users\twells\Documents\GitHub\FTIR-data-analysis-PV\Trenton_Project\dataframe.csv")
-    for idx, row in df.iterrows():
-        # Get x-axis data from column before data_list (column 6, index 6)
-        x_data = ast.literal_eval(row.iloc[6])
-        # Convert string list to actual list for y-axis
-        data_list = ast.literal_eval(row.iloc[7])
-        baseline = baseline_correction(data_list)
-        # Calculate baseline-corrected data
-        baseline_corrected = np.array(data_list) - baseline
-        # Plot using x_data for x-axis
-        plt.plot(x_data, data_list, label='Original Data')
-        plt.plot(x_data, baseline, label='Baseline', linestyle='--')
-        #plt.plot(x_data, baseline_corrected, label='Baseline_Corrected', linestyle=(0, (1, 1)))
-        plt.xlabel('Wavenumber (cm$^{-1}$)')
-        plt.ylabel('Absorbance')
-        # Use filename from second column (index 1)
-        plt.title(str(row.iloc[1]))
-        plt.legend()
-        plt.show()

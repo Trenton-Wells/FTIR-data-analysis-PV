@@ -38,7 +38,7 @@ def find_term(term, text):
     """
     return re.search(rf'(?<!\S){re.escape(term)}(?!\S)', f' {text} ', re.IGNORECASE) is not None
 
-def gather_file_info(dataframe_path, FTIR_dataframe, file_types, separators, material_terms, conditions_terms, directory, append_missing, save_missing_txt, missing_txt_path=None, track_replicates=False):
+def gather_file_info(dataframe_path, FTIR_dataframe, file_types, separators, material_terms, conditions_terms, directory, append_missing, track_replicates=False):
    
     """
     Helper function that gathers file information from a specified root directory and its subdirectories.
@@ -72,17 +72,6 @@ def gather_file_info(dataframe_path, FTIR_dataframe, file_types, separators, mat
     if os.path.exists(dataframe_path):
         for _, row in FTIR_dataframe.iterrows():
             processed_files.add((row["file location"], row["file name"]))
-    ## Track files already written to missing_txt_path to avoid duplicates
-    already_missing = set()
-    if save_missing_txt and os.path.exists(missing_txt_path):
-        with open(missing_txt_path, 'r') as file:
-            for line in file:
-                try:
-                    entry = eval(line.strip())
-                    key = (entry.get("file location"), entry.get("file name"))
-                    already_missing.add(key)
-                except Exception:
-                    continue
     for file_path, _, filenames in os.walk(directory):
         parent_folder = os.path.basename(file_path)
         for filename in filenames:
@@ -114,17 +103,6 @@ def gather_file_info(dataframe_path, FTIR_dataframe, file_types, separators, mat
             except Exception:
                 pass
             
-            ## Group files by base name (filename without trailing _1, _2, etc. and without extension), case insensitive
-            ## This finds replicate measurements and places their names in a dictionary
-            base_name = filename
-            for file_type in file_types:
-                pattern = rf"_(\d)\{file_type}$"
-                if re.search(pattern, filename):
-                    base_name = re.sub(pattern, file_type, filename)
-                    break
-            base_name_lower = base_name.lower()
-            group_key = base_name_lower
-            grouped_files.setdefault(group_key, []).append(filename)
             ## Normalize filename and parent folder by removing file extension and replacing separators with spaces
             ## Makes for easier term-finding
             filename_no_ext = filename
@@ -165,20 +143,6 @@ def gather_file_info(dataframe_path, FTIR_dataframe, file_types, separators, mat
             ## Print a warning if any value is missing
             if missing_any:
                 print(f"ValueError: Missing value for file '{filename}'. Results: date={date}, conditions={conditions}, material={material}, time={time}")
-                ## Optionally write missing row to text file for later review-- default filename is missing_data.txt
-                if save_missing_txt:
-                    key = (file_path, filename)
-                    if key not in already_missing:
-                        with open(missing_txt_path, 'a') as f:
-                            f.write(str({
-                                "file location": file_path,
-                                "file name": filename,
-                                "date": date,
-                                "conditions": conditions,
-                                "material": material,
-                                "time": time
-                            }) + '\n')
-                        already_missing.add(key)
             data_row = {
                 "File Location": file_path,
                 "File Name": filename,
@@ -197,20 +161,32 @@ def gather_file_info(dataframe_path, FTIR_dataframe, file_types, separators, mat
                     #print(f"Appending row: {data_row}")
                     data.append(data_row)
 
-    ## Optionally write replicate groups to a .txt file
+    # Group files by (material, conditions, time) after all files are processed
+
+
+    # Optionally print replicate groups to the console
     if track_replicates is None:
-        track_replicates = input("Do you want to save a text file listing groups of replicate files? (y/n): ").strip().lower()
+        track_replicates = input("Do you want to print groups of replicate files? (y/n): ").strip().lower()
         track_replicates = True if track_replicates == 'y' else False
     if track_replicates:
-        replicate_txt_path = 'replicates.txt'
-        with open(replicate_txt_path, 'w') as repfile:
-            for group_key, file_list in grouped_files.items():
-                if len(file_list) > 1:
-                    repfile.write(f"Replicate group '{group_key}': {file_list}\n")
+        replicate_groups = {}
+        for row in data:
+            mat = row.get('Material', None)
+            cond = row.get('Conditions', None)
+            t = row.get('Time', None)
+            group_key = (mat, cond, t)
+            # Store both file name and parent folder
+            replicate_groups.setdefault(group_key, []).append((row['File Name'], os.path.basename(row['File Location'])))
+        print("Replicate groups (groups with more than one file):")
+        for group_key, file_list in replicate_groups.items():
+            if len(file_list) > 1:
+                # Format: [(file, parent_folder), ...]
+                formatted = [f"{fname} (parent folder: {pfolder})" for fname, pfolder in file_list]
+                print(f"Replicate group {group_key}: {formatted}")
 
     return data, grouped_files
 
-def file_info_extractor(FTIR_dataframe, dataframe_path, file_types=None, separators=None, material_terms=None, conditions_terms=None, directory=None, append_missing=None, save_missing_txt=None, track_replicates=False):
+def file_info_extractor(FTIR_dataframe, dataframe_path, file_types=None, separators=None, material_terms=None, conditions_terms=None, directory=None, append_missing=None, track_replicates=False):
     """
     Main function to gather file information and update the provided FTIR_dataframe in memory. Handles user input for all parameters.
 
@@ -230,8 +206,8 @@ def file_info_extractor(FTIR_dataframe, dataframe_path, file_types=None, separat
         The root directory to scan. If None, prompts user for input.
     append_missing : bool or None
         Whether to append rows with missing values. If None, prompts user for input.
-    save_missing_txt : bool or None
-        Whether to save missing data rows to a text file. If None, prompts user for input.
+    track_replicates : bool or None
+        Whether to print groups of replicate files. If None, prompts user for input.
 
     Returns:
     --------
@@ -252,15 +228,6 @@ def file_info_extractor(FTIR_dataframe, dataframe_path, file_types=None, separat
         append_missing = input("Do you want to append rows with missing values into the dataframe? (y/n): ").strip().lower()
         append_missing = True if append_missing == 'y' else False
 
-    ## User input: saving missing data and the associated filename and path to a text file y/n
-    if save_missing_txt is None:
-        save_missing_txt = input("Do you want to save missing data rows to a text file for later review? (y/n): ").strip().lower()
-        save_missing_txt = True if save_missing_txt == 'y' else False
-    missing_txt_path = None
-    if save_missing_txt:
-        missing_txt_path = input("Enter the path for the missing data text file (default: missing_data.txt): ").strip()
-        if not missing_txt_path:
-            missing_txt_path = "missing_data.txt"
     ## Get file types
     if file_types is None:
         file_types = input("Enter file types to scan, separated by commas (e.g. .csv,.0,.dpt): ").strip()
@@ -298,8 +265,6 @@ def file_info_extractor(FTIR_dataframe, dataframe_path, file_types=None, separat
         conditions_terms=conditions_terms,
         directory=directory,
         append_missing=append_missing,
-        save_missing_txt=save_missing_txt,
-        missing_txt_path=missing_txt_path,
         track_replicates=track_replicates
     )
 
@@ -315,7 +280,3 @@ def file_info_extractor(FTIR_dataframe, dataframe_path, file_types=None, separat
 ## General Use:
 ## if __name__ == "__main__":
 ##    file_info_extractor()
-
-## Specific Project Example Use:
-if __name__ == "__main__":
-    file_info_extractor(file_types=".dpt", separators="_", material_terms="CPC,PPE,PO,J-BOX#1,J-BOX#2,t-PVDF,t-PVF,o-PVF,PMMA", conditions_terms="A3,A4,A5,ARC,OPN,KKCE,0.5X,1X,2.5X,5X,unexposed", directory=r"Y:\5200\Packaging Reliability\Durability Tool\Ray Tracing and Activation Spectrum\ATR-FTIR Data", append_missing=False, save_missing_txt=True)

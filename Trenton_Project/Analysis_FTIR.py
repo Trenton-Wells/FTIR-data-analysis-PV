@@ -7,6 +7,10 @@ import pandas as pd
 import sys
 import os
 import matplotlib.pyplot as plt
+import numpy as np
+from Baseline_GIFTS import baseline_gifts
+from Baseline_IRSQR import baseline_irsqr
+from pybaselines import Baseline
 sys.path.append(r"C:\Users\twells\Documents\GitHub\FTIR-data-analysis-PV")
 
 def parse_parameters(parameter_str):
@@ -363,7 +367,7 @@ def baseline_correction(dataframe_path):
     # Save updated DataFrame
     dataframe.to_csv(dataframe_path, index=False)
 
-def plot_grouped_spectra(FTIR_dataframe, material, condition, time, raw_data=True, baseline=False, baseline_corrected=False):
+def plot_grouped_spectra(FTIR_dataframe, materials, conditions, times, raw_data=True, baseline=False, baseline_corrected=False, separate_plots=False, include_replicates=True):
     """
     Plot grouped spectra based on material, condition, and time. Accepts lists or 'any' for each category.
 
@@ -383,6 +387,10 @@ def plot_grouped_spectra(FTIR_dataframe, material, condition, time, raw_data=Tru
         Whether to plot the baseline (default is False).
     baseline_corrected : bool, optional
         Whether to plot the baseline-corrected data (default is False).
+    separate_plots : bool, optional
+        Whether to create separate plots for each spectrum (default is False).
+    include_replicates : bool, optional
+        Whether to include all replicates or just the first of each group (default is True).
 
     Returns
     -------
@@ -390,16 +398,16 @@ def plot_grouped_spectra(FTIR_dataframe, material, condition, time, raw_data=Tru
     """
     # Parse comma-separated strings into lists, handle 'any' (case-insensitive)
     mask = pd.Series([True] * len(FTIR_dataframe))
-    if isinstance(material, str) and material.strip().lower() != "any":
-        material_list = [m.strip() for m in material.split(',') if m.strip()]
+    if isinstance(materials, str) and materials.strip().lower() != "any":
+        material_list = [m.strip() for m in materials.split(',') if m.strip()]
         mask &= FTIR_dataframe['Material'].isin(material_list)
-    if isinstance(condition, str) and condition.strip().lower() != "any":
-        condition_list = [c.strip() for c in condition.split(',') if c.strip()]
+    if isinstance(conditions, str) and conditions.strip().lower() != "any":
+        condition_list = [c.strip() for c in conditions.split(',') if c.strip()]
         mask &= FTIR_dataframe['Conditions'].isin(condition_list)
-    if isinstance(time, str) and time.strip().lower() != "any":
+    if isinstance(times, str) and times.strip().lower() != "any":
         # Try to convert to int if possible, else keep as string
         time_list = []
-        for t in time.split(','):
+        for t in times.split(','):
             t = t.strip()
             if t:
                 try:
@@ -409,22 +417,154 @@ def plot_grouped_spectra(FTIR_dataframe, material, condition, time, raw_data=Tru
         mask &= FTIR_dataframe['Time'].isin(time_list)
     filtered_data = FTIR_dataframe[mask]
 
+    # If not including replicates, keep only the first member of each (Material, Conditions, Time) group
+    if not include_replicates:
+        filtered_data = filtered_data.sort_values(by=['Material', 'Conditions', 'Time'])
+        filtered_data = filtered_data.drop_duplicates(subset=['Material', 'Conditions', 'Time'], keep='first')
+
+    # Sort by time once for both legend and plotting (assume all times are integers)
+    filtered_data_sorted = filtered_data.sort_values(by='Time')
+    x_axis_col = 'X-Axis' if 'X-Axis' in filtered_data_sorted.columns else 'Wavelength'
+
+
+    # Plot all together (legend in time order) and record colors for each spectrum (including replicates)
     plt.figure(figsize=(10, 6))
-    for index, row in filtered_data.iterrows():
-        # Build label for this line
-        mat = row.get('Material', '')
-        cond = row.get('Conditions', row.get('Condition', ''))
-        t = row.get('Time', '')
-        base_label = f"{mat}, {cond}, {t}"
-        # Choose which data to plot
-        if raw_data and 'Raw Data' in row:
-            plt.plot(row.get('X-Axis', row.get('Wavelength')), row['Raw Data'], label=f"Raw: {base_label}")
-        if baseline and 'Baseline' in row and row['Baseline'] is not None:
-            plt.plot(row.get('X-Axis', row.get('Wavelength')), row['Baseline'], '--', label=f"Baseline: {base_label}")
-        if baseline_corrected and 'Corrected' in row and row['Corrected'] is not None:
-            plt.plot(row.get('X-Axis', row.get('Wavelength')), row['Corrected'], ':', label=f"Corrected: {base_label}")
-    plt.title(f"Spectra for Material: {material} | Condition: {condition} | Time: {time}")
-    plt.xlabel('Wavelength (cm^-1)')
-    plt.ylabel('Absorbance')
-    plt.legend()
+    legend_entries = []
+    color_map = {}  # Map from (data type, DataFrame index) to color
+    legend_filepaths = []  # List of filepaths in legend order
+    for idx, spectrum_row in filtered_data_sorted.iterrows():
+        material_val = spectrum_row.get('Material', '')
+        condition_val = spectrum_row.get('Conditions', spectrum_row.get('Condition', ''))
+        time_val = spectrum_row.get('Time', '')
+        spectrum_label = f"{material_val}, {condition_val}, {time_val}"
+        x_axis = spectrum_row.get(x_axis_col)
+        file_path = os.path.join(spectrum_row['File Location'], spectrum_row['File Name'])
+        if raw_data and 'Raw Data' in spectrum_row:
+            line_handle, = plt.plot(x_axis, spectrum_row['Raw Data'], label=f"Raw: {spectrum_label}")
+            legend_entries.append((line_handle, f"Raw: {spectrum_label}"))
+            color_map[("Raw", idx)] = line_handle.get_color()
+            legend_filepaths.append(file_path)
+        if baseline and 'Baseline' in spectrum_row and spectrum_row['Baseline'] is not None:
+            line_handle, = plt.plot(x_axis, spectrum_row['Baseline'], '--', label=f"Baseline: {spectrum_label}")
+            legend_entries.append((line_handle, f"Baseline: {spectrum_label}"))
+            color_map[("Baseline", idx)] = line_handle.get_color()
+            legend_filepaths.append(file_path)
+        if baseline_corrected and 'Corrected' in spectrum_row and spectrum_row['Corrected'] is not None:
+            line_handle, = plt.plot(x_axis, spectrum_row['Corrected'], ':', label=f"Corrected: {spectrum_label}")
+            legend_entries.append((line_handle, f"Corrected: {spectrum_label}"))
+            color_map[("Corrected", idx)] = line_handle.get_color()
+            legend_filepaths.append(file_path)
+    handles = [entry[0] for entry in legend_entries]
+    labels = [entry[1] for entry in legend_entries]
+    # Print filepaths in legend order
+    for fp in legend_filepaths:
+        print(f"Plotting: {fp}")
+    plt.title(f"Spectra for Material: {materials} | Condition: {conditions} | Time: {times}")
+    plt.xlabel('Wavelength (cm¯¹)')
+    plt.ylabel('Absorbance (AU)')
+    plt.legend(handles, labels)
+    plt.show()
+
+    # Plot each file individually if requested, in sequential order by time
+    if separate_plots:
+        for idx, row in filtered_data_sorted.iterrows():
+            # Print the full file path before plotting
+            print(f"Plotting: {os.path.join(row['File Location'], row['File Name'])}")
+            material_val = row.get('Material', '')
+            condition_val = row.get('Conditions', row.get('Condition', ''))
+            time_val = row.get('Time', '')
+            spectrum_label = f"{material_val}, {condition_val}, {time_val}"
+            x_axis = row.get(x_axis_col)
+            plt.figure(figsize=(8, 5))
+            if raw_data and 'Raw Data' in row:
+                color = color_map.get(("Raw", idx), None)
+                plt.plot(x_axis, row['Raw Data'], label="Raw", color=color)
+            if baseline and 'Baseline' in row and row['Baseline'] is not None:
+                color = color_map.get(("Baseline", idx), None)
+                plt.plot(x_axis, row['Baseline'], '--', label="Baseline", color=color)
+            if baseline_corrected and 'Corrected' in row and row['Corrected'] is not None:
+                color = color_map.get(("Corrected", idx), None)
+                plt.plot(x_axis, row['Corrected'], ':', label="Corrected", color=color)
+            plt.title(f"Spectrum: {spectrum_label}")
+            plt.xlabel('Wavelength (cm¯¹)')
+            plt.ylabel('Absorbance (AU)')
+            plt.legend()
+            plt.show()
+
+def try_baseline(FTIR_dataframe, material=None, baseline_function=None, parameter_string=None, filepath=None):
+    """
+    Apply a baseline correction to the first file of a given material and plot the result, or to a specific file if filepath is provided.
+
+    Args:
+        FTIR_dataframe (pd.DataFrame): The in-memory DataFrame containing all spectra.
+        material (str, optional): Material name to analyze (ignored if filepath is provided).
+        baseline_function (str): Baseline function to use ('GIFTS', 'IRSQR', 'FABC').
+        parameter_string (str, optional): Baseline parameters as key=value pairs, comma-separated.
+        filepath (str, optional): If provided, only process this file (by 'File Location' + 'File Name').
+    """
+
+    if baseline_function is None:
+        raise ValueError("Baseline function must be specified.")
+
+    if filepath is not None:
+        # Find the row matching the given file path (must match both File Location and File Name)
+        # filepath can be full path or just file name; try both
+        if os.path.sep in filepath:
+            # Full path: split into folder and file
+            folder, fname = os.path.split(filepath)
+            filtered = FTIR_dataframe[(FTIR_dataframe['File Location'] == folder) & (FTIR_dataframe['File Name'] == fname)]
+        else:
+            # Just file name: match any file with that name
+            filtered = FTIR_dataframe[FTIR_dataframe['File Name'] == filepath]
+        if filtered.empty:
+            raise ValueError(f"No entry found for file '{filepath}'.")
+        row = filtered.iloc[0]
+        material = row.get('Material', 'Unknown')
+    else:
+        if material is None:
+            raise ValueError("Material must be specified if filepath is not provided.")
+        # Select the first row for the specified material where time == 0
+        filtered = FTIR_dataframe[(FTIR_dataframe['Material'] == material) & (FTIR_dataframe['Time'] == 0)]
+        if filtered.empty:
+            raise ValueError(f"No entry found for material '{material}' with time == 0.")
+        row = filtered.iloc[0]
+
+    x = ast.literal_eval(row['X-Axis']) if isinstance(row['X-Axis'], str) else row['X-Axis']
+    y = ast.literal_eval(row['Raw Data']) if isinstance(row['Raw Data'], str) else row['Raw Data']
+    y = np.array(y, dtype=float)
+    if parameter_string:
+        parameters = parse_parameters(parameter_string)
+    else:
+        parameters = get_default_parameters(baseline_function)
+    parameters = cast_parameter_types(baseline_function, parameters)
+
+    # Print the full file path before plotting
+    file_path = os.path.join(row['File Location'], row['File Name'])
+    print(f"Plotting: {file_path}")
+
+    if baseline_function.upper() == 'GIFTS':
+        baseline = baseline_gifts(y, **parameters)
+    elif baseline_function.upper() == 'IRSQR':
+        baseline, _ = baseline_irsqr(y, **parameters, x_axis=x)
+    elif baseline_function.upper() == 'FABC':
+        baseline_obj = Baseline(x)
+        baseline, _ = baseline_obj.fabc(y, **parameters)
+    else:
+        raise ValueError(f"Unknown baseline function: {baseline_function}")
+
+    baseline_corrected = [a - b for a, b in zip(y, baseline)]
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10), sharex=True)
+    # Top plot: original and baseline
+    ax1.plot(x, y, label='Raw Data')
+    ax1.plot(x, baseline, label=f'{baseline_function} Baseline', linestyle='--')
+    ax1.set_ylabel('Absorbance (AU)')
+    ax1.set_title(f'{material}: Raw Data and {baseline_function} Baseline')
+    ax1.legend()
+    # Bottom plot: baseline-corrected
+    ax2.plot(x, baseline_corrected, label='Baseline-Corrected', color='tab:green')
+    ax2.set_xlabel('Wavenumber (cm¯¹)')
+    ax2.set_ylabel('Absorbance (AU)')
+    ax2.set_title('Baseline-Corrected')
+    ax2.legend()
+    plt.tight_layout()
     plt.show()
