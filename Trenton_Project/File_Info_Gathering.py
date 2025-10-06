@@ -44,6 +44,7 @@ def gather_file_info(dataframe_path, FTIR_dataframe, file_types, separators, mat
     Helper function that gathers file information from a specified root directory and its subdirectories.
     Extracts details from filenames and parent folder names to create a structured dataframe.
     The dataframe includes columns for file location, file name, date of scan, conditions, material, and time(duration).
+    If "ignore" is in the filename, the file will be skipped.
 
     Parameters:
     -----------
@@ -71,7 +72,7 @@ def gather_file_info(dataframe_path, FTIR_dataframe, file_types, separators, mat
     processed_files = set()
     if os.path.exists(dataframe_path):
         for _, row in FTIR_dataframe.iterrows():
-            processed_files.add((row["file location"], row["file name"]))
+            processed_files.add((row["File Location"], row["File Name"]))
     for file_path, _, filenames in os.walk(directory):
         parent_folder = os.path.basename(file_path)
         for filename in filenames:
@@ -217,7 +218,7 @@ def file_info_extractor(FTIR_dataframe, dataframe_path, file_types=None, separat
 
     ## Ensure required columns exist
     required_columns = [
-        "File Location", "File Name", "Date", "Conditions", "Material", "Time", "X-Axis", "Raw Data"
+        "File Location", "File Name", "Date", "Conditions", "Material", "Time", "X-Axis", "Raw Data", "Baseline Function", "Baseline Parameters", "Baseline", "Baseline-Corrected Data", "Normalization Peak Wavenumber", "Normalized and Corrected Data"
     ]
     for column in required_columns:
         if column not in FTIR_dataframe.columns:

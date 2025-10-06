@@ -11,6 +11,8 @@ import numpy as np
 from Baseline_GIFTS import baseline_gifts
 from Baseline_IRSQR import baseline_irsqr
 from pybaselines import Baseline
+import ast
+import matplotlib
 sys.path.append(r"C:\Users\twells\Documents\GitHub\FTIR-data-analysis-PV")
 
 def parse_parameters(parameter_str):
@@ -111,14 +113,11 @@ def baseline_selection(dataframe_path, materials_to_use=None, baseline_function=
     ----------
     dataframe_path : str
         Path to the CSV file.
-    materials_to_use : list of str or dict, optional
-        Materials to apply baseline function to. Can be:
-        - List of material names (same parameters for all)
-        - Dict mapping material names to parameter dictionaries
+    materials_to_use : dict, optional
+        Materials to apply baseline function to.
+        Keys are material names, values are parameter dictionaries.
     baseline_function : str, optional
         Baseline function to use.
-    parameter_dictionary : dict, optional
-        Parameters for baseline function (used when materials_to_use is a list).
     
     Returns
     -------
@@ -367,7 +366,7 @@ def baseline_correction(dataframe_path):
     # Save updated DataFrame
     dataframe.to_csv(dataframe_path, index=False)
 
-def plot_grouped_spectra(FTIR_dataframe, materials, conditions, times, raw_data=True, baseline=False, baseline_corrected=False, separate_plots=False, include_replicates=True):
+def plot_grouped_spectra(FTIR_dataframe, materials, conditions, times, raw_data=True, baseline=False, baseline_corrected=False, separate_plots=False, include_replicates=True, zoom=None):
     """
     Plot grouped spectra based on material, condition, and time. Accepts lists or 'any' for each category.
 
@@ -391,11 +390,14 @@ def plot_grouped_spectra(FTIR_dataframe, materials, conditions, times, raw_data=
         Whether to create separate plots for each spectrum (default is False).
     include_replicates : bool, optional
         Whether to include all replicates or just the first of each group (default is True).
+    zoom : str, optional
+        A string specifying the x-axis zoom range in the format "min-max" (e.g., "400-4000").
 
     Returns
     -------
     None
     """
+    
     # Parse comma-separated strings into lists, handle 'any' (case-insensitive)
     mask = pd.Series([True] * len(FTIR_dataframe))
     if isinstance(materials, str) and materials.strip().lower() != "any":
@@ -426,9 +428,8 @@ def plot_grouped_spectra(FTIR_dataframe, materials, conditions, times, raw_data=
     filtered_data_sorted = filtered_data.sort_values(by='Time')
     x_axis_col = 'X-Axis' if 'X-Axis' in filtered_data_sorted.columns else 'Wavelength'
 
-
     # Plot all together (legend in time order) and record colors for each spectrum (including replicates)
-    plt.figure(figsize=(10, 6))
+    plt.figure(num=" ", figsize=(10, 6))
     legend_entries = []
     color_map = {}  # Map from (data type, DataFrame index) to color
     legend_filepaths = []  # List of filepaths in legend order
@@ -437,20 +438,44 @@ def plot_grouped_spectra(FTIR_dataframe, materials, conditions, times, raw_data=
         condition_val = spectrum_row.get('Conditions', spectrum_row.get('Condition', ''))
         time_val = spectrum_row.get('Time', '')
         spectrum_label = f"{material_val}, {condition_val}, {time_val}"
+        # Use ast.literal_eval for x_axis and data columns if they are strings
         x_axis = spectrum_row.get(x_axis_col)
+        if isinstance(x_axis, str):
+            try:
+                x_axis = ast.literal_eval(x_axis)
+            except Exception:
+                pass
         file_path = os.path.join(spectrum_row['File Location'], spectrum_row['File Name'])
         if raw_data and 'Raw Data' in spectrum_row:
-            line_handle, = plt.plot(x_axis, spectrum_row['Raw Data'], label=f"Raw: {spectrum_label}")
+            y_data = spectrum_row['Raw Data']
+            if isinstance(y_data, str):
+                try:
+                    y_data = ast.literal_eval(y_data)
+                except Exception:
+                    pass
+            line_handle, = plt.plot(x_axis, y_data, label=f"Raw: {spectrum_label}")
             legend_entries.append((line_handle, f"Raw: {spectrum_label}"))
             color_map[("Raw", idx)] = line_handle.get_color()
             legend_filepaths.append(file_path)
         if baseline and 'Baseline' in spectrum_row and spectrum_row['Baseline'] is not None:
-            line_handle, = plt.plot(x_axis, spectrum_row['Baseline'], '--', label=f"Baseline: {spectrum_label}")
+            y_data = spectrum_row['Baseline']
+            if isinstance(y_data, str):
+                try:
+                    y_data = ast.literal_eval(y_data)
+                except Exception:
+                    pass
+            line_handle, = plt.plot(x_axis, y_data, '--', label=f"Baseline: {spectrum_label}")
             legend_entries.append((line_handle, f"Baseline: {spectrum_label}"))
             color_map[("Baseline", idx)] = line_handle.get_color()
             legend_filepaths.append(file_path)
         if baseline_corrected and 'Corrected' in spectrum_row and spectrum_row['Corrected'] is not None:
-            line_handle, = plt.plot(x_axis, spectrum_row['Corrected'], ':', label=f"Corrected: {spectrum_label}")
+            y_data = spectrum_row['Corrected']
+            if isinstance(y_data, str):
+                try:
+                    y_data = ast.literal_eval(y_data)
+                except Exception:
+                    pass
+            line_handle, = plt.plot(x_axis, y_data, ':', label=f"Corrected: {spectrum_label}")
             legend_entries.append((line_handle, f"Corrected: {spectrum_label}"))
             color_map[("Corrected", idx)] = line_handle.get_color()
             legend_filepaths.append(file_path)
@@ -463,32 +488,74 @@ def plot_grouped_spectra(FTIR_dataframe, materials, conditions, times, raw_data=
     plt.xlabel('Wavelength (cm¯¹)')
     plt.ylabel('Absorbance (AU)')
     plt.legend(handles, labels)
+    # Set zoom if provided
+    if zoom is not None and isinstance(zoom, str):
+        try:
+            zoom_range = zoom.replace(' ', '').split('-')
+            if len(zoom_range) == 2:
+                x_min, x_max = float(zoom_range[0]), float(zoom_range[1])
+                plt.xlim(x_min, x_max)
+        except Exception as e:
+            print(f"Warning: Could not parse zoom argument '{zoom}': {e}")
     plt.show()
 
     # Plot each file individually if requested, in sequential order by time
     if separate_plots:
         for idx, row in filtered_data_sorted.iterrows():
-            # Print the full file path before plotting
-            print(f"Plotting: {os.path.join(row['File Location'], row['File Name'])}")
+            # Print the file path for this individual plot only
+            file_path = os.path.join(row.get('File Location', ''), row.get('File Name', ''))
+            print(f"Plotting: {file_path}")
             material_val = row.get('Material', '')
             condition_val = row.get('Conditions', row.get('Condition', ''))
             time_val = row.get('Time', '')
             spectrum_label = f"{material_val}, {condition_val}, {time_val}"
             x_axis = row.get(x_axis_col)
-            plt.figure(figsize=(8, 5))
+            if isinstance(x_axis, str):
+                try:
+                    x_axis = ast.literal_eval(x_axis)
+                except Exception:
+                    pass
+            plt.figure(num=" ", figsize=(8, 5))
             if raw_data and 'Raw Data' in row:
+                y_data = row['Raw Data']
+                if isinstance(y_data, str):
+                    try:
+                        y_data = ast.literal_eval(y_data)
+                    except Exception:
+                        pass
                 color = color_map.get(("Raw", idx), None)
-                plt.plot(x_axis, row['Raw Data'], label="Raw", color=color)
+                plt.plot(x_axis, y_data, label="Raw", color=color)
             if baseline and 'Baseline' in row and row['Baseline'] is not None:
+                y_data = row['Baseline']
+                if isinstance(y_data, str):
+                    try:
+                        y_data = ast.literal_eval(y_data)
+                    except Exception:
+                        pass
                 color = color_map.get(("Baseline", idx), None)
-                plt.plot(x_axis, row['Baseline'], '--', label="Baseline", color=color)
+                plt.plot(x_axis, y_data, '--', label="Baseline", color=color)
             if baseline_corrected and 'Corrected' in row and row['Corrected'] is not None:
+                y_data = row['Corrected']
+                if isinstance(y_data, str):
+                    try:
+                        y_data = ast.literal_eval(y_data)
+                    except Exception:
+                        pass
                 color = color_map.get(("Corrected", idx), None)
-                plt.plot(x_axis, row['Corrected'], ':', label="Corrected", color=color)
+                plt.plot(x_axis, y_data, ':', label="Corrected", color=color)
             plt.title(f"Spectrum: {spectrum_label}")
             plt.xlabel('Wavelength (cm¯¹)')
             plt.ylabel('Absorbance (AU)')
             plt.legend()
+            # Set zoom if provided
+            if zoom is not None and isinstance(zoom, str):
+                try:
+                    zoom_range = zoom.replace(' ', '').split('-')
+                    if len(zoom_range) == 2:
+                        x_min, x_max = float(zoom_range[0]), float(zoom_range[1])
+                        plt.xlim(x_min, x_max)
+                except Exception as e:
+                    print(f"Warning: Could not parse zoom argument '{zoom}': {e}")
             plt.show()
 
 def try_baseline(FTIR_dataframe, material=None, baseline_function=None, parameter_string=None, filepath=None):
@@ -568,3 +635,4 @@ def try_baseline(FTIR_dataframe, material=None, baseline_function=None, paramete
     ax2.legend()
     plt.tight_layout()
     plt.show()
+
