@@ -6,14 +6,13 @@
 import pandas as pd
 import sys
 import os
+import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 from Baseline_GIFTS import baseline_gifts
 from Baseline_IRSQR import baseline_irsqr
 from pybaselines import Baseline
 import ast
-import matplotlib
-sys.path.append(r"C:\Users\twells\Documents\GitHub\FTIR-data-analysis-PV")
 
 def parse_parameters(parameter_str):
     """
@@ -105,72 +104,79 @@ def cast_parameter_types(function_name, parameters):
         if 'min_length' in parameters: parameters['min_length'] = int(parameters['min_length'])
     return parameters
 
-def baseline_selection(dataframe_path, materials_to_use=None, baseline_function=None, parameter_dictionary=None):
+def baseline_selection(FTIR_dataframe, materials_to_use=None, baseline_function=None, parameter_dictionary=None):
     """
-    Add baseline function and parameters to a DataFrame for specified materials.
-    
+    Set the baseline function for specified materials in the DataFrame.
+
     Parameters
     ----------
-    dataframe_path : str
-        Path to the CSV file.
-    materials_to_use : dict, optional
-        Materials to apply baseline function to.
-        Keys are material names, values are parameter dictionaries.
+    FTIR_dataframe : pd.DataFrame
+        The DataFrame containing the spectral data.
+    materials_to_use : list, optional
+        List of material names to apply the baseline function to.
     baseline_function : str, optional
         Baseline function to use.
-    
+
     Returns
     -------
-    None
+    pd.DataFrame
+        The updated DataFrame.
     """
-
-    # Read the existing CSV file into a DataFrame
-    dataframe = pd.read_csv(dataframe_path)
-
-    # Add new columns for Baseline Function and Parameters if they don't exist
-    if 'Baseline Function' not in dataframe.columns:
-        dataframe['Baseline Function'] = None
-    if 'Baseline Parameters' not in dataframe.columns:
-        dataframe['Baseline Parameters'] = None
-
-    # User provides a list of materials to use
+    # Prompt for materials if not provided
     if materials_to_use is None:
         materials_input = input("Enter materials to apply baseline function to (comma-separated): ").strip()
         materials_to_use = [mat.strip() for mat in materials_input.split(',')]
-    
-    # Get baseline function
+
+    # Prompt for baseline function if not provided
     if baseline_function is None:
         baseline_function = input("Enter baseline function (GIFTS, IRSQR, FABC, Manual): ").strip()
-    
-    # Handle different parameter scenarios
-    if isinstance(materials_to_use, dict):
-        # Materials_to_use is a dictionary mapping materials to parameters
-        for material, material_parameters in materials_to_use.items():
-            if material_parameters is None:
-                material_parameters = get_default_parameters(baseline_function)
-            
-            # Apply to rows with this material
-            mask = dataframe['material'] == material
-            dataframe.loc[mask, 'Baseline Function'] = baseline_function
-            dataframe.loc[mask, 'Baseline Parameters'] = str(material_parameters)
-            print(f"Applied {baseline_function} with parameters {material_parameters} to material: {material}")
-    
-    else:
-        # Materials_to_use is a list - same parameters for all materials
-        if parameter_dictionary is None:
-            parameter_dictionary = get_default_parameters(baseline_function)
-        
-        for material in materials_to_use:
-            mask = dataframe['material'] == material
-            dataframe.loc[mask, 'Baseline Function'] = baseline_function
-            dataframe.loc[mask, 'Baseline Parameters'] = str(parameter_dictionary)
-            print(f"Applied {baseline_function} with parameters {parameter_dictionary} to material: {material}")
-    
-    # Save the modified DataFrame
-    dataframe.to_csv(dataframe_path, index=False)
-    print(f"Updated DataFrame saved to {dataframe_path}")
 
-def baseline_selection_quick(dataframe_path, baseline_function=None, parameter_dictionary=None):
+    for material in materials_to_use:
+        mask = FTIR_dataframe['Material'] == material
+        FTIR_dataframe.loc[mask, 'Baseline Function'] = baseline_function
+        print(f"Applied baseline function {baseline_function} to material: {material}")
+
+    return FTIR_dataframe
+
+def parameter_selection(FTIR_dataframe, materials_to_use=None, parameters_list=None):
+    """
+    Set the baseline parameters for specified materials in the DataFrame.
+    
+    Parameters
+    ----------
+    FTIR_dataframe : pd.DataFrame
+        The DataFrame containing the spectral data.
+    materials_to_use : list, optional
+        List of material names to apply the parameters to.
+    parameters_list : list, optional
+        List of parameter values (as dict or string) to assign to each material (must match order of materials_to_use).
+    
+    Returns
+    -------
+    pd.DataFrame
+        The updated DataFrame.
+    """
+    # Prompt for materials if not provided
+    if materials_to_use is None:
+        materials_input = input("Enter materials to apply parameters to (comma-separated): ").strip()
+        materials_to_use = [mat.strip() for mat in materials_input.split(',')]
+
+    # Prompt for parameters if not provided
+    if parameters_list is None:
+        params_input = input("Enter parameters for each material (comma-separated, as dict or string): ").strip()
+        parameters_list = [param.strip() for param in params_input.split(',')]
+
+    if len(materials_to_use) != len(parameters_list):
+        raise ValueError("materials_to_use and parameters_list must have the same length.")
+
+    for material, params in zip(materials_to_use, parameters_list):
+        mask = FTIR_dataframe['Material'] == material
+        FTIR_dataframe.loc[mask, 'Baseline Parameters'] = str(params)
+        print(f"Applied parameters {params} to material: {material}")
+
+    return FTIR_dataframe
+
+def baseline_selection_quick(FTIR_dataframe, baseline_function=None, parameter_dictionary=None):
     """
     Modify the DataFrame by adding baseline function and parameters based on user input. Save the results back to the CSV file. Quick version that uses the same function and parameters for all rows.
     
@@ -183,105 +189,18 @@ def baseline_selection_quick(dataframe_path, baseline_function=None, parameter_d
     -------
     None
     """
-    # Read the existing CSV file into a DataFrame
-    dataframe = pd.read_csv(dataframe_path)
-
-    # Add new columns for Baseline Function and Parameters if they don't exist
-    if 'Baseline Function' not in dataframe.columns:
-        dataframe['Baseline Function'] = None
-    if 'Baseline Parameters' not in dataframe.columns:
-        dataframe['Baseline Parameters'] = None
-
     # Always use the same baseline function and parameters for all rows
     if baseline_function is None:
         baseline_function = input("Enter the baseline function to use for all materials (e.g., 'IRSQR', 'GIFTS', 'FABC'): ").strip().upper()
-    for idx in dataframe.index:
-        dataframe.at[idx, 'Baseline Function'] = baseline_function
+    for idx in FTIR_dataframe.index:
+        FTIR_dataframe.at[idx, 'Baseline Function'] = baseline_function
 
     if parameter_dictionary is None:
         parameter_dictionary = get_default_parameters(baseline_function)
-    for idx in dataframe.index:
-        dataframe.at[idx, 'Baseline Parameters'] = str(parameter_dictionary)
+    for idx in FTIR_dataframe.index:
+        FTIR_dataframe.at[idx, 'Baseline Parameters'] = str(parameter_dictionary)
 
-    # Save the modified DataFrame back to a CSV file
-    dataframe.to_csv(dataframe_path, index=False)
-
-def delete_columns(dataframe_path, columns_to_delete=None):
-    """
-    Delete specified columns from the DataFrame and save the results back to the CSV file.
-
-    Parameters
-    ----------
-    dataframe_path : str
-        The path to the CSV file to modify.
-    columns_to_delete : list of str
-        A list of column names to delete from the DataFrame.
-
-    Returns
-    -------
-    None
-    """
-    # Read the existing CSV file into a DataFrame
-    dataframe = pd.read_csv(dataframe_path)
-    if columns_to_delete is None:
-        # Get Columns to delete from user
-        columns_to_delete = input("Enter the column names to delete, separated by commas: ").strip().split(',')
-    # State which columns will be deleted
-    print("Columns requested for deletion:", columns_to_delete)
-    # Delete specified columns if they exist
-    for col in columns_to_delete:
-        if col in dataframe.columns:
-            dataframe.drop(col, axis=1, inplace=True)
-            print(f"Deleted column: {col}")
-        else:
-            print(f"Column not found, cannot delete: {col}")
-
-    # Save the modified DataFrame back to a CSV file
-    dataframe.to_csv(dataframe_path, index=False)
-
-def object_class_changer(dataframe_path):
-    """
-    Detect and print the class types of objects in each column of the DataFrame.
-    Give options to recast columns to specific types.
-
-    Parameters
-    ----------
-    dataframe_path : str
-        The path to the CSV file to analyze.
-    
-    Returns
-    -------
-    None
-    """
-    import ast
-    import numpy as np
-    dataframe = pd.read_csv(dataframe_path)
-    for column in dataframe.columns:
-        print(f"Column: {column}")
-        value = dataframe[column].iloc[0]
-        print(f" Row 0: Type: {type(value)}, Value: {value}")
-        print("\n")
-        recast = input(f"Would you like to recast column '{column}' as a different type? (y/n): ").strip().lower()
-        if recast == 'y':
-            print("Options: string, float, integer, list, array, dictionary")
-            dtype = input("Enter type to recast to: ").strip().lower()
-            if dtype == 'string':
-                dataframe[column] = dataframe[column].astype(str)
-            elif dtype == 'float':
-                dataframe[column] = pd.to_numeric(dataframe[column], errors='coerce')
-            elif dtype == 'integer':
-                dataframe[column] = pd.to_numeric(dataframe[column], errors='coerce').astype('Int64')
-            elif dtype == 'list':
-                dataframe[column] = dataframe[column].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else list(x) if hasattr(x, '__iter__') and not isinstance(x, str) else [x])
-            elif dtype == 'array':
-                dataframe[column] = dataframe[column].apply(lambda x: np.array(ast.literal_eval(x)) if isinstance(x, str) else np.array(x) if hasattr(x, '__iter__') and not isinstance(x, str) else np.array([x]))
-            elif dtype == 'dictionary':
-                dataframe[column] = dataframe[column].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else dict(x) if isinstance(x, dict) else {})
-            else:
-                print("Unknown type. Skipping recast.")
-            print(f"Column '{column}' recast to {dtype}.")
-    # Save the modified DataFrame back to a CSV file
-    dataframe.to_csv(dataframe_path, index=False)
+    return FTIR_dataframe
 
 def baseline_correction(dataframe_path):
     """
@@ -429,7 +348,7 @@ def plot_grouped_spectra(FTIR_dataframe, materials, conditions, times, raw_data=
     x_axis_col = 'X-Axis' if 'X-Axis' in filtered_data_sorted.columns else 'Wavelength'
 
     # Plot all together (legend in time order) and record colors for each spectrum (including replicates)
-    plt.figure(num=" ", figsize=(10, 6))
+    plt.figure(figsize=(10, 6))
     legend_entries = []
     color_map = {}  # Map from (data type, DataFrame index) to color
     legend_filepaths = []  # List of filepaths in legend order
@@ -515,7 +434,7 @@ def plot_grouped_spectra(FTIR_dataframe, materials, conditions, times, raw_data=
                     x_axis = ast.literal_eval(x_axis)
                 except Exception:
                     pass
-            plt.figure(num=" ", figsize=(8, 5))
+            plt.figure(figsize=(8, 5))
             if raw_data and 'Raw Data' in row:
                 y_data = row['Raw Data']
                 if isinstance(y_data, str):
@@ -636,3 +555,24 @@ def try_baseline(FTIR_dataframe, material=None, baseline_function=None, paramete
     plt.tight_layout()
     plt.show()
 
+def bring_in_dataframe(dataframe_path=None):
+    """
+    Load the CSV file into a pandas DataFrame.
+
+    Parameters
+    ----------
+    dataframe_path : str
+        The path to the CSV file.
+
+    Returns
+    -------
+    pd.DataFrame
+        The loaded DataFrame.
+    """
+    if dataframe_path is None:
+        dataframe_path = "FTIR_dataframe.csv" # Default path if none is provided (will be in active directory)
+    if os.path.exists(dataframe_path):
+        FTIR_dataframe = pd.read_csv(dataframe_path) # Load the DataFrame from the specified path
+    else:
+        FTIR_dataframe = pd.DataFrame() # Create a new empty DataFrame if it doesn't exist
+    return FTIR_dataframe
