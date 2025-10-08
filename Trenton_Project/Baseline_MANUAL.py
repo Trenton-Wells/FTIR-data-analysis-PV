@@ -57,7 +57,7 @@ def select_anchor_points(FTIR_dataframe, material=None, filepath=None, try_it_ou
     Returns
     -------
     None
-        The selected anchor points are stored in the global variable SELECTED_ANCHOR_POINTS.
+        The selected anchor points are stored in the dataframe under 'Baseline Parameters'.
     """
     _cleanup_widgets()  # Clean up widgets from previous runs
 
@@ -101,6 +101,10 @@ def select_anchor_points(FTIR_dataframe, material=None, filepath=None, try_it_ou
 
     # --- Click handler for anchor selection ---
     def on_click(trace, points, selector):
+        """
+        Helper function:
+        Handles click events on the plot to select anchor points.
+        """
         if points.xs:
             x_val = points.xs[0]
             anchor_points.append(x_val)

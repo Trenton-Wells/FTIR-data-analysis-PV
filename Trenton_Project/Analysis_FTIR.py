@@ -13,6 +13,7 @@ from Baseline_GIFTS import baseline_gifts
 from Baseline_IRSQR import baseline_irsqr
 from pybaselines import Baseline
 import ast
+import random
 
 def parse_parameters(parameter_str):
     """
@@ -104,7 +105,7 @@ def cast_parameter_types(function_name, parameters):
         if 'min_length' in parameters: parameters['min_length'] = int(parameters['min_length'])
     return parameters
 
-def baseline_selection(FTIR_dataframe, materials_to_use=None, baseline_function=None, parameter_dictionary=None):
+def baseline_selection(FTIR_dataframe, materials=None, baseline_function=None):
     """
     Set the baseline function for specified materials in the DataFrame.
 
@@ -112,7 +113,7 @@ def baseline_selection(FTIR_dataframe, materials_to_use=None, baseline_function=
     ----------
     FTIR_dataframe : pd.DataFrame
         The DataFrame containing the spectral data.
-    materials_to_use : list, optional
+    materials : list, optional
         List of material names to apply the baseline function to.
     baseline_function : str, optional
         Baseline function to use.
@@ -122,83 +123,92 @@ def baseline_selection(FTIR_dataframe, materials_to_use=None, baseline_function=
     pd.DataFrame
         The updated DataFrame.
     """
-    # Prompt for materials if not provided
-    if materials_to_use is None:
+
+    # Accept either a string (comma-separated) or a list for materials
+    if materials is None:
         materials_input = input("Enter materials to apply baseline function to (comma-separated): ").strip()
-        materials_to_use = [mat.strip() for mat in materials_input.split(',')]
+        materials = [mat.strip() for mat in materials_input.split(',')]
+    elif isinstance(materials, str):
+        materials = [mat.strip() for mat in materials.split(',')]
 
     # Prompt for baseline function if not provided
     if baseline_function is None:
         baseline_function = input("Enter baseline function (GIFTS, IRSQR, FABC, Manual): ").strip()
 
-    for material in materials_to_use:
+    for material in materials:
         mask = FTIR_dataframe['Material'] == material
         FTIR_dataframe.loc[mask, 'Baseline Function'] = baseline_function
         print(f"Applied baseline function {baseline_function} to material: {material}")
 
     return FTIR_dataframe
 
-def parameter_selection(FTIR_dataframe, materials_to_use=None, parameters_list=None):
+def parameter_selection(FTIR_dataframe, materials=None):
     """
     Set the baseline parameters for specified materials in the DataFrame.
-    
+
     Parameters
     ----------
     FTIR_dataframe : pd.DataFrame
         The DataFrame containing the spectral data.
-    materials_to_use : list, optional
-        List of material names to apply the parameters to.
-    parameters_list : list, optional
-        List of parameter values (as dict or string) to assign to each material (must match order of materials_to_use).
-    
+    materials : string, optional
+        String of material names to apply the baseline parameters to.
+
     Returns
     -------
     pd.DataFrame
         The updated DataFrame.
     """
     # Prompt for materials if not provided
-    if materials_to_use is None:
-        materials_input = input("Enter materials to apply parameters to (comma-separated): ").strip()
-        materials_to_use = [mat.strip() for mat in materials_input.split(',')]
+    if materials is None:
+        materials_input = input("Enter materials to apply baseline parameters to (comma-separated): ").strip()
+        materials = [mat.strip() for mat in materials_input.split(',')]
 
-    # Prompt for parameters if not provided
-    if parameters_list is None:
-        params_input = input("Enter parameters for each material (comma-separated, as dict or string): ").strip()
-        parameters_list = [param.strip() for param in params_input.split(',')]
+    # Prompt for baseline function if not provided
+    if baseline_function is None:
+        baseline_function = input("Enter baseline function (GIFTS, IRSQR, FABC, Manual): ").strip()
 
-    if len(materials_to_use) != len(parameters_list):
-        raise ValueError("materials_to_use and parameters_list must have the same length.")
-
-    for material, params in zip(materials_to_use, parameters_list):
+    for material in materials:
         mask = FTIR_dataframe['Material'] == material
-        FTIR_dataframe.loc[mask, 'Baseline Parameters'] = str(params)
-        print(f"Applied parameters {params} to material: {material}")
+        FTIR_dataframe.loc[mask, 'Baseline Function'] = baseline_function
+        print(f"Applied baseline function {baseline_function} to material: {material}")
 
     return FTIR_dataframe
 
-def baseline_selection_quick(FTIR_dataframe, baseline_function=None, parameter_dictionary=None):
+
+def parameter_selection(FTIR_dataframe, materials=None, parameters=None):
     """
-    Modify the DataFrame by adding baseline function and parameters based on user input. Save the results back to the CSV file. Quick version that uses the same function and parameters for all rows.
-    
+    Set the baseline parameters for specified materials in the DataFrame.
+
     Parameters
     ----------
-    dataframe_path : str
-        The path to the CSV file to modify.
+    FTIR_dataframe : pd.DataFrame
+        The DataFrame containing the spectral data.
+    materials : string, optional
+        String of material names to apply the parameters to.
+    parameters : str or dict, optional
+        The parameter values (as dict or string) to assign to all specified materials.
 
     Returns
     -------
-    None
+    pd.DataFrame
+        The updated DataFrame.
     """
-    # Always use the same baseline function and parameters for all rows
-    if baseline_function is None:
-        baseline_function = input("Enter the baseline function to use for all materials (e.g., 'IRSQR', 'GIFTS', 'FABC'): ").strip().upper()
-    for idx in FTIR_dataframe.index:
-        FTIR_dataframe.at[idx, 'Baseline Function'] = baseline_function
 
-    if parameter_dictionary is None:
-        parameter_dictionary = get_default_parameters(baseline_function)
-    for idx in FTIR_dataframe.index:
-        FTIR_dataframe.at[idx, 'Baseline Parameters'] = str(parameter_dictionary)
+    # Accept either a string (comma-separated) or a list for materials
+    if materials is None:
+        materials_input = input("Enter materials to apply baseline parameters to (comma-separated): ").strip()
+        materials = [mat.strip() for mat in materials_input.split(',')]
+    elif isinstance(materials, str):
+        materials = [mat.strip() for mat in materials.split(',')]
+
+    # Prompt for parameters if not provided
+    if parameters is None:
+        parameters = input("Enter baseline parameters (as dict or string) to apply to all selected materials: ").strip()
+
+    for material in materials:
+        mask = FTIR_dataframe['Material'] == material
+        FTIR_dataframe.loc[mask, 'Baseline Parameters'] = str(parameters)
+        print(f"Applied parameters {parameters} to material: {material}")
 
     return FTIR_dataframe
 
@@ -481,12 +491,17 @@ def try_baseline(FTIR_dataframe, material=None, baseline_function=None, paramete
     """
     Apply a baseline correction to the first file of a given material and plot the result, or to a specific file if filepath is provided.
 
-    Args:
-        FTIR_dataframe (pd.DataFrame): The in-memory DataFrame containing all spectra.
-        material (str, optional): Material name to analyze (ignored if filepath is provided).
-        baseline_function (str): Baseline function to use ('GIFTS', 'IRSQR', 'FABC').
-        parameter_string (str, optional): Baseline parameters as key=value pairs, comma-separated.
-        filepath (str, optional): If provided, only process this file (by 'File Location' + 'File Name').
+    Parameters
+    ----------
+    FTIR_dataframe (pd.DataFrame): The in-memory DataFrame containing all spectra.
+    material (str, optional): Material name to analyze (ignored if filepath is provided).
+    baseline_function (str): Baseline function to use ('GIFTS', 'IRSQR', 'FABC').
+    parameter_string (str, optional): Baseline parameters as key=value pairs, comma-separated.
+    filepath (str, optional): If provided, only process this file (by 'File Location' + 'File Name').
+
+    Returns
+    -------
+    None
     """
 
     if baseline_function is None:
@@ -552,6 +567,108 @@ def try_baseline(FTIR_dataframe, material=None, baseline_function=None, paramete
     ax2.set_ylabel('Absorbance (AU)')
     ax2.set_title('Baseline-Corrected')
     ax2.legend()
+    plt.tight_layout()
+    plt.show()
+
+def test_baseline_choices(FTIR_dataframe, material=None):
+    """
+    Plot three random spectra for a given material, showing raw data, baseline, and baseline-corrected data.
+    The baseline function and parameters are taken from the DataFrame columns.
+    Assumes user has already filled those columns earlier in the workflow.
+
+    Parameters
+    ----------
+    FTIR_dataframe : pd.DataFrame
+        The DataFrame containing the spectral data.
+    material : str
+        The material to filter and plot.
+
+    Returns
+    -------
+    None
+    """
+    if material is None:
+        material = input("Enter the material to test baseline and parameter choices for: ").strip()
+    # Filter for the specified material
+    filtered = FTIR_dataframe[FTIR_dataframe['Material'] == material]
+    if len(filtered) < 1:
+        print(f"No rows found for material '{material}'.")
+        return
+    # Pick up to 3 random rows
+    n = min(3, len(filtered))
+    random_rows = filtered.sample(n=n, random_state=None)
+
+    fig, axes = plt.subplots(n, 2, figsize=(12, 4 * n), sharex=False)
+    if n == 1:
+        axes = [axes]  # Make iterable for single row
+
+    for i, (idx, row) in enumerate(random_rows.iterrows()):
+        # Parse x and y data
+        x = ast.literal_eval(row['X-Axis']) if isinstance(row['X-Axis'], str) else row['X-Axis']
+        y = ast.literal_eval(row['Raw Data']) if isinstance(row['Raw Data'], str) else row['Raw Data']
+        y = np.array(y, dtype=float)
+        baseline_func = row.get('Baseline Function', None)
+        param_str = row.get('Baseline Parameters', None)
+        if param_str:
+            try:
+                if isinstance(param_str, dict):
+                    params = param_str
+                else:
+                    params = ast.literal_eval(param_str)
+            except Exception:
+                params = {}
+        else:
+            params = {}
+
+        # Compute baseline
+        baseline = None
+        baseline_corrected = None
+        try:
+            if baseline_func is None:
+                raise ValueError("No baseline function specified.")
+            func = baseline_func.strip().upper()
+            if func == 'GIFTS':
+                baseline = baseline_gifts(y, **params)
+            elif func == 'IRSQR':
+                baseline, _ = baseline_irsqr(y, **params, x_axis=x)
+            elif func == 'FABC':
+                baseline_obj = Baseline(x)
+                baseline, _ = baseline_obj.fabc(y, **params)
+            elif func == 'MANUAL':
+                from scipy.interpolate import CubicSpline
+                anchor_points = params.get('anchor_points', [])
+                if not anchor_points:
+                    raise ValueError('No anchor_points for MANUAL baseline.')
+                anchor_indices = [min(range(len(x)), key=lambda i: abs(x[i] - ap)) for ap in anchor_points]
+                y_anchor = [y[i] for i in anchor_indices]
+                baseline = CubicSpline(x=anchor_points, y=y_anchor, extrapolate=True)(x)
+            else:
+                raise ValueError(f"Unknown baseline function: {baseline_func}")
+            baseline = np.array(baseline, dtype=float)
+            baseline_corrected = y - baseline
+        except Exception as e:
+            print(f"Error computing baseline for row {idx}: {e}")
+            baseline = np.full_like(y, np.nan)
+            baseline_corrected = np.full_like(y, np.nan)
+
+        # Plot raw and baseline
+        ax0 = axes[i][0] if n > 1 else axes[0]
+        ax0.plot(x, y, label='Raw Data')
+        if baseline is not None:
+            ax0.plot(x, baseline, '--', label='Baseline')
+        ax0.set_title(f"{material} | File: {row['File Name']}")
+        ax0.set_ylabel('Absorbance (AU)')
+        ax0.legend()
+
+        # Plot baseline-corrected
+        ax1 = axes[i][1] if n > 1 else axes[1]
+        if baseline_corrected is not None:
+            ax1.plot(x, baseline_corrected, color='tab:green', label='Baseline-Corrected')
+        ax1.set_title("Baseline-Corrected")
+        ax1.set_xlabel('Wavenumber (cm¯¹)')
+        ax1.set_ylabel('Absorbance (AU)')
+        ax1.legend()
+
     plt.tight_layout()
     plt.show()
 

@@ -224,6 +224,44 @@ def file_info_extractor(FTIR_dataframe, dataframe_path, file_types=None, separat
         if column not in FTIR_dataframe.columns:
             FTIR_dataframe[column] = None
 
+    # Cast columns to correct dtype
+    # String columns
+    string_cols = [
+        "File Location", "File Name", "Date", "Conditions", "Material", "Baseline Function", "Baseline Parameters"
+    ]
+    for col in string_cols:
+        if col in FTIR_dataframe.columns:
+            FTIR_dataframe[col] = FTIR_dataframe[col].astype('string')
+
+    # Integer columns
+    if "Time" in FTIR_dataframe.columns:
+        FTIR_dataframe["Time"] = pd.to_numeric(FTIR_dataframe["Time"], errors='coerce').astype('Int64')
+
+    # Float columns
+    if "Normalization Peak Wavenumber" in FTIR_dataframe.columns:
+        FTIR_dataframe["Normalization Peak Wavenumber"] = pd.to_numeric(FTIR_dataframe["Normalization Peak Wavenumber"], errors='coerce').astype('float')
+
+    # Columns that are lists of floats (leave as object, but ensure lists of floats)
+    list_float_cols = [
+        "X-Axis", "Raw Data", "Baseline", "Baseline-Corrected Data", "Normalized and Corrected Data"
+    ]
+    for col in list_float_cols:
+        if col in FTIR_dataframe.columns:
+            def to_float_list(val):
+                if isinstance(val, list):
+                    return [float(x) for x in val]
+                elif pd.isnull(val):
+                    return val
+                try:
+                    import ast
+                    parsed = ast.literal_eval(val)
+                    if isinstance(parsed, list):
+                        return [float(x) for x in parsed]
+                except Exception:
+                    pass
+                return val
+            FTIR_dataframe[col] = FTIR_dataframe[col].apply(to_float_list)
+
     ## Option for if dataframe should append rows with missing values or not
     if append_missing is None:
         append_missing = input("Do you want to append rows with missing values into the dataframe? (y/n): ").strip().lower()
