@@ -94,24 +94,3 @@ def baseline_irsqr(data, lam=1e6, quantile=0.05, num_knots=100, spline_degree=3,
 
     parameters = {'weights': weight_array, 'tol_history': tol_history[:i + 1]}
     return baseline, parameters
-
-if __name__ == "__main__":
-    df = pd.read_csv(r"C:\Users\twells\Documents\GitHub\FTIR-data-analysis-PV\Trenton_Project\dataframe.csv")
-    for idx, row in df.iterrows():
-        # Get x-axis data from column before data_list (column 6, index 6)
-        x_data = ast.literal_eval(row.iloc[6])
-        # Convert string list to actual list for y-axis
-        data_list = ast.literal_eval(row.iloc[7])
-        baseline_obj = Baseline()
-        baseline, params = baseline_obj.fabc(data_list)
-        baseline_corrected = np.array(data_list) - baseline
-        # Plot using x_data for x-axis
-        plt.plot(x_data, data_list, label='Original Data')
-        plt.plot(x_data, baseline, label='Baseline', linestyle='--')
-        #plt.plot(x_data, baseline_corrected, label='Baseline_Corrected', linestyle=(0, (1, 1)))
-        plt.xlabel('Wavenumber (cm$^{-1}$)')
-        plt.ylabel('Absorbance')
-        # Use filename from second column (index 1)
-        plt.title(str(row.iloc[1]))
-        plt.legend()
-        plt.show()

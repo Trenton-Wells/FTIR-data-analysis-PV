@@ -259,6 +259,7 @@ def file_info_extractor(FTIR_dataframe, dataframe_path, file_types=None, separat
                         return [float(x) for x in parsed]
                 except Exception:
                     pass
+                
                 return val
             FTIR_dataframe[col] = FTIR_dataframe[col].apply(to_float_list)
 

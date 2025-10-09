@@ -34,10 +34,11 @@ def _cleanup_widgets():
                     obj.close()
                 except Exception:
                     pass
+        widgets.Widget.close_all()
     except Exception:
         pass
 
-def select_anchor_points(FTIR_dataframe, material=None, filepath=None, try_it_out=True):
+def select_anchor_points(FTIR_dataframe, material=None, filepath=None, try_it_out=True, dataframe_path=None):
     """
     Interactive anchor point selection for FTIR baseline correction.
 
@@ -53,6 +54,8 @@ def select_anchor_points(FTIR_dataframe, material=None, filepath=None, try_it_ou
         If provided, only process this file (by 'File Location' + 'File Name').
     try_it_out : bool, optional
         If True, only prints the anchor points (default). If False, saves anchor points to 'Baseline Parameters' column for all rows with the same material.
+    dataframe_path : str, optional
+        Path to save the DataFrame as CSV if anchor points are saved (used only if try_it_out is False).
 
     Returns
     -------
@@ -60,6 +63,7 @@ def select_anchor_points(FTIR_dataframe, material=None, filepath=None, try_it_ou
         The selected anchor points are stored in the dataframe under 'Baseline Parameters'.
     """
     _cleanup_widgets()  # Clean up widgets from previous runs
+    clear_output(wait=True)  # Clear previous outputs
 
     # --- Data selection logic ---
     if filepath is not None:
@@ -169,7 +173,17 @@ def select_anchor_points(FTIR_dataframe, material=None, filepath=None, try_it_ou
                     for idx, r in FTIR_dataframe.iterrows():
                         if r['Material'] == mat:
                             FTIR_dataframe.at[idx, 'Baseline Parameters'] = str(SELECTED_ANCHOR_POINTS)
-                    print(f"Anchor points saved to Baseline Parameters for material '{mat}'.")
+                            FTIR_dataframe.at[idx, 'Baseline Function'] = 'Manual'
+                    print(f"Anchor points saved to Baseline Parameters and Baseline Function set to 'Manual' for material '{mat}'.")
+                    # --- Save DataFrame to CSV if dataframe_path is provided ---
+                    if dataframe_path:
+                        try:
+                            FTIR_dataframe.to_csv(dataframe_path, index=False)
+                            print(f"DataFrame saved to {dataframe_path}.")
+                        except Exception as e:
+                            print(f"Warning: Could not save DataFrame to {dataframe_path}: {e}")
+                    else:
+                        print("Warning: dataframe_path not provided. DataFrame not saved.")
             button_box2_out.clear_output()
         def redo2_callback(b):
             with done2:
