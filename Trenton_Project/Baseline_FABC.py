@@ -6,13 +6,10 @@ import warnings
 import pandas as pd
 import ast
 
-from scipy.ndimage import (
-    binary_erosion, binary_opening
-)
+from scipy.ndimage import binary_erosion, binary_opening
 from scipy.signal import convolve
-from pybaselines.utils import ( 
-    optimize_window, pad_edges, ParameterWarning
-)
+from pybaselines.utils import optimize_window, pad_edges, ParameterWarning
+
 
 def _haar(num_points, scale=2):
     """
@@ -51,7 +48,7 @@ def _haar(num_points, scale=2):
 
     """
     if not isinstance(scale, int):
-        raise TypeError('scale must be an integer for the Haar wavelet')
+        raise TypeError("scale must be an integer for the Haar wavelet")
     # to maintain symmetry, even scales should have even windows and odd
     # scales have odd windows
     odd_scale = scale % 2
@@ -72,6 +69,7 @@ def _haar(num_points, scale=2):
 
     # the 1/sqrt(scale) is a normalization
     return wavelet / (np.sqrt(scale))
+
 
 def _iteration_threshold(power, num_std=3.0):
     """
@@ -108,12 +106,14 @@ def _iteration_threshold(power, num_std=3.0):
         if masked_power.size < 2:  # need at least 2 points for std calculation
             warnings.warn(
                 'not enough baseline points found; "num_std" is likely too low',
-                ParameterWarning, stacklevel=2
+                ParameterWarning,
+                stacklevel=2,
             )
             break
         mask = power < np.mean(masked_power) + num_std * np.std(masked_power, ddof=1)
 
     return mask
+
 
 def _refine_mask(mask, min_length=2):
     """
@@ -152,8 +152,9 @@ def _refine_mask(mask, min_length=2):
     # do not use border_value=1 since that automatically makes the borders True and
     # extends the True section by half_window on each side
     output = binary_opening(
-        np.pad(mask, half_length, 'constant', constant_values=True), np.ones(min_length, bool)
-    )[half_length:len(mask) + half_length]
+        np.pad(mask, half_length, "constant", constant_values=True),
+        np.ones(min_length, bool),
+    )[half_length : len(mask) + half_length]
 
     # convert lone False values to True
     np.logical_or(output, binary_erosion(output, [1, 0, 1]), out=output)
@@ -161,6 +162,7 @@ def _refine_mask(mask, min_length=2):
     # that way, can control both the minimum length and then remove edges of baselines
     # independently, allowing more control over the output mask
     return output
+
 
 def _cwt(data, wavelet, widths, dtype=None, **kwargs):
     """
@@ -202,12 +204,13 @@ def _cwt(data, wavelet, widths, dtype=None, **kwargs):
 
     References
     ----------
-    S. Mallat, "A Wavelet Tour of Signal Processing (3rd Edition)", Academic Press, 2009.
+    S. Mallat, "A Wavelet Tour of Signal Processing (3rd Edition)", Academic Press, 
+    2009.
 
     """
     # Determine output type
     if dtype is None:
-        if np.asarray(wavelet(1, widths[0], **kwargs)).dtype.char in 'FDG':
+        if np.asarray(wavelet(1, widths[0], **kwargs)).dtype.char in "FDG":
             dtype = np.complex128
         else:
             dtype = np.float64
@@ -216,12 +219,23 @@ def _cwt(data, wavelet, widths, dtype=None, **kwargs):
     for ind, width in enumerate(widths):
         N = np.min([10 * width, len(data)])
         wavelet_data = np.conj(wavelet(N, width, **kwargs)[::-1])
-        output[ind] = convolve(data, wavelet_data, mode='same')
+        output[ind] = convolve(data, wavelet_data, mode="same")
     return output
 
 
-def baseline_fabc(self, data, lam=1e6, scale=None, num_std=3.0, diff_order=2, min_length=2,
-                    weights=None, weights_as_mask=False, pad_kwargs=None, **kwargs):
+def baseline_fabc(
+    self,
+    data,
+    lam=1e6,
+    scale=None,
+    num_std=3.0,
+    diff_order=2,
+    min_length=2,
+    weights=None,
+    weights_as_mask=False,
+    pad_kwargs=None,
+    **kwargs,
+):
     """
     Fully automatic baseline correction (fabc).
 
@@ -241,7 +255,8 @@ def baseline_fabc(self, data, lam=1e6, scale=None, num_std=3.0, diff_order=2, mi
         approximately equal to the index-based full-width-at-half-maximum of the peaks
         or features in the data. Default is None, which will use half of the value from
         :func:`.optimize_window`, which is not always a good value, but at least scales
-        with the number of data points and gives a starting point for tuning the parameter.
+        with the number of data points and gives a starting point for tuning the 
+        parameter.
     num_std : float, optional
         The number of standard deviations to include when thresholding. Higher values
         will assign more points as baseline. Default is 3.0.
@@ -250,8 +265,10 @@ def baseline_fabc(self, data, lam=1e6, scale=None, num_std=3.0, diff_order=2, mi
         (second order differential matrix). Typical values are 2 or 1.
     min_length : int, optional
         Any region of consecutive baseline points less than `min_length` is considered
-        to be a false positive and all points in the region are converted to peak points.
-        A higher `min_length` ensures less points are falsely assigned as baseline points.
+        to be a false positive and all points in the region are converted to peak 
+        points.
+        A higher `min_length` ensures fewer points are falsely assigned as baseline 
+        points.
         Default is 2, which only removes lone baseline points.
     weights : array-like, shape (N,), optional
         The weighting array, used to override the function's baseline identification
@@ -269,9 +286,8 @@ def baseline_fabc(self, data, lam=1e6, scale=None, num_std=3.0, diff_order=2, mi
     **kwargs
 
         .. deprecated:: 1.2.0
-            Passing additional keyword arguments is deprecated and will be removed in version
-            1.4.0. Pass keyword arguments using `pad_kwargs`.
-
+            Passing additional keyword arguments is deprecated and will be removed in 
+            version 1.4.0. Pass keyword arguments using `pad_kwargs`.
     Returns
     -------
     baseline : numpy.ndarray, shape (N,)
@@ -287,10 +303,10 @@ def baseline_fabc(self, data, lam=1e6, scale=None, num_std=3.0, diff_order=2, mi
 
     Notes
     -----
-    The classification of baseline points is similar to :meth:`~.Baseline.dietrich`, except that
-    this method approximates the first derivative using a continous wavelet transform
-    with the Haar wavelet, which is more robust than the numerical derivative in
-    Dietrich's method.
+    The classification of baseline points is similar to :meth:`~.Baseline.dietrich`, 
+    except that this method approximates the first derivative using a continuous wavelet
+    transform with the Haar wavelet, which is more robust than the numerical derivative 
+    in Dietrich's method.
 
     References
     ----------
@@ -314,42 +330,27 @@ def baseline_fabc(self, data, lam=1e6, scale=None, num_std=3.0, diff_order=2, mi
             scale = ceil(optimize_window(y) / 2)
         half_window = scale * 2
         pad_kwargs = pad_kwargs if pad_kwargs is not None else {}
-        wavelet_cwt = _cwt(pad_edges(y, half_window, **pad_kwargs, **kwargs), _haar, [scale])
-        power = wavelet_cwt[0, half_window:-half_window]**2
+        wavelet_cwt = _cwt(
+            pad_edges(y, half_window, **pad_kwargs, **kwargs), _haar, [scale]
+        )
+        power = wavelet_cwt[0, half_window:-half_window] ** 2
 
         mask = _refine_mask(_iteration_threshold(power, num_std), min_length)
         np.logical_and(mask, weight_array, out=mask)
 
-        _, whittaker_weights, whittaker_system = self._setup_whittaker(y, lam, diff_order, mask)
+        _, whittaker_weights, whittaker_system = self._setup_whittaker(
+            y, lam, diff_order, mask
+        )
         if self._sort_order is not None:
             whittaker_weights = whittaker_weights[self._inverted_order]
 
     whittaker_weights = whittaker_weights.astype(float)
     baseline = whittaker_system.solve(
-        whittaker_system.add_diagonal(whittaker_weights), whittaker_weights * y,
-        overwrite_b=True, overwrite_ab=True
+        whittaker_system.add_diagonal(whittaker_weights),
+        whittaker_weights * y,
+        overwrite_b=True,
+        overwrite_ab=True,
     )
-    parameters = {'mask': mask, 'weights': whittaker_weights}
+    parameters = {"mask": mask, "weights": whittaker_weights}
 
     return baseline, parameters
-
-if __name__ == "__main__":
-    df = pd.read_csv(r"C:\Users\twells\Documents\GitHub\FTIR-data-analysis-PV\Trenton_Project\dataframe.csv")
-    for idx, row in df.iterrows():
-        # Get x-axis data from column before data_list (column 6, index 6)
-        x_data = ast.literal_eval(row.iloc[6])
-        # Convert string list to actual list for y-axis
-        data_list = ast.literal_eval(row.iloc[7])
-        baseline_obj = Baseline()
-        baseline, params = baseline_obj.fabc(data_list)
-        baseline_corrected = np.array(data_list) - baseline
-        # Plot using x_data for x-axis
-        plt.plot(x_data, data_list, label='Original Data')
-        plt.plot(x_data, baseline, label='Baseline', linestyle='--')
-        #plt.plot(x_data, baseline_corrected, label='Baseline_Corrected', linestyle=(0, (1, 1)))
-        plt.xlabel('Wavenumber (cm$^{-1}$)')
-        plt.ylabel('Absorbance')
-        # Use filename from second column (index 1)
-        plt.title(str(row.iloc[1]))
-        plt.legend()
-        plt.show()

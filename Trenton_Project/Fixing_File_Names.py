@@ -1,17 +1,25 @@
-#Created: 9-18-2025
-#Author: Trenton Wells
-#Organization: NREL
-#NREL Contact: trenton.wells@nrel.gov
-#Personal Contact: trentonwells73@gmail.com
+# Created: 9-18-2025
+# Author: Trenton Wells
+# Organization: NREL
+# NREL Contact: trenton.wells@nrel.gov
+# Personal Contact: trentonwells73@gmail.com
 
-## This script scans a specified root directory and its subdirectories to find and rename files. Folder names will not be changed,
-## except in the case of date renaming to ISO format (e.g., 2025-09-18) (optional).
-## It works by replacing spaces and/or specified words in the filenames. (e.g., replacing spaces with underscores).
-## Suggested to use this tool if file names have inconsistent naming conventions that may cause issues in downstream processing.
+# This script scans a specified root directory and its subdirectories to find and 
+# rename files. Folder names will not be changed, except in the case of date renaming 
+# to ISO format (e.g., 2025-09-18) (optional).
+# It works by replacing spaces and/or specified words in the filenames. 
+# (e.g., replacing spaces with underscores).
+# Suggested to use this tool if file names have inconsistent naming conventions that 
+# may cause issues in downstream processing.
+import os
+import re
 
-def Date_change_ISO(directory):
+def date_change_ISO(directory):
     """
-    Renames all dates in filenames and folder names in the given directory and its subdirectories to ISO format (YYYY-MM-DD).
+    Rename dates in filenames and folder names in the given directory to ISO format. 
+
+    ISO format is YYYY-MM-DD. This is an international standard date format and has the
+    added benefit of sorting chronologically when sorted alphabetically.
 
     Parameters:
     -----------
@@ -21,37 +29,38 @@ def Date_change_ISO(directory):
     -----------
     Renamed files and folders in place; prints changes to console.
     """
-    import re
     date_patterns = [
         # MM-DD-YYYY or M-D-YYYY
-        r'(\b\d{1,2}-\d{1,2}-\d{4}\b)',
+        r"(\b\d{1,2}-\d{1,2}-\d{4}\b)",
         # YYYY-MM-DD
-        r'(\b\d{4}-\d{1,2}-\d{1,2}\b)',
+        r"(\b\d{4}-\d{1,2}-\d{1,2}\b)",
         # MMDDYYYY
-        r'(\b\d{2}\d{2}\d{4}\b)',
+        r"(\b\d{2}\d{2}\d{4}\b)",
         # YYYYMMDD
-        r'(\b\d{4}\d{2}\d{2}\b)'
+        r"(\b\d{4}\d{2}\d{2}\b)",
     ]
+
     def convert_to_iso(date_str):
         # If already in ISO format (YYYY-MM-DD), return as is
-        if re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
+        if re.match(r"^\d{4}-\d{2}-\d{2}$", date_str):
             return date_str
         # MM-DD-YYYY or M-D-YYYY
-        match = re.match(r'^(\d{1,2})-(\d{1,2})-(\d{4})$', date_str)
+        match = re.match(r"^(\d{1,2})-(\d{1,2})-(\d{4})$", date_str)
         if match:
             m, d, y = match.groups()
             return f"{y}-{int(m):02d}-{int(d):02d}"
         # MMDDYYYY
-        match = re.match(r'^(\d{2})(\d{2})(\d{4})$', date_str)
+        match = re.match(r"^(\d{2})(\d{2})(\d{4})$", date_str)
         if match:
             m, d, y = match.groups()
             return f"{y}-{m}-{d}"
         # YYYYMMDD
-        match = re.match(r'^(\d{4})(\d{2})(\d{2})$', date_str)
+        match = re.match(r"^(\d{4})(\d{2})(\d{2})$", date_str)
         if match:
             y, m, d = match.groups()
             return f"{y}-{m}-{d}"
         return date_str
+
     print("Renaming dates in filenames to ISO format...")
     for root, dirs, files in os.walk(directory):
         # Rename folders in current directory
@@ -61,7 +70,10 @@ def Date_change_ISO(directory):
                 for date_match in re.findall(pattern, current_dir):
                     iso_date = convert_to_iso(date_match)
                     if iso_date != date_match:
-                        print(f"In folder '{current_dir}': changing date '{date_match}' to '{iso_date}'")
+                        message = ( f"In folder '{current_dir}': changing date"
+                        f" '{date_match}' to '{iso_date}'"
+                        )
+                        print(message)
                         new_dirname = new_dirname.replace(date_match, iso_date)
             if new_dirname != current_dir:
                 old_dirpath = os.path.join(root, current_dir)
@@ -76,7 +88,9 @@ def Date_change_ISO(directory):
                 for date_match in re.findall(pattern, current_filename):
                     iso_date = convert_to_iso(date_match)
                     if iso_date != date_match:
-                        print(f"In file '{current_filename}': changing date '{date_match}' to '{iso_date}'")
+                        message = (f"In file '{current_filename}': changing date"
+                        f" '{date_match}' to '{iso_date}'")
+                        print(message)
                         new_filename = new_filename.replace(date_match, iso_date)
             if new_filename != current_filename:
                 old_filepath = os.path.join(root, current_filename)
@@ -85,52 +99,70 @@ def Date_change_ISO(directory):
                 os.rename(old_filepath, new_filepath)
     print("Date renaming to ISO format complete.")
 
-import os
-
-def batch_rename_files(directory=None, replace_spaces=None, iso_date_rename=None, file_rename=None, character_to_use=None, pairs_input=None):
+def batch_rename_files(
+    directory=None,
+    replace_spaces=None,
+    iso_date_rename=None,
+    file_rename=None,
+    character_to_use=None,
+    pairs_input=None,
+):
     """
-    Scans a directory and its subdirectories to rename files by replacing spaces and/or specified words in filenames.
-    Folder names will not be changed.
+    Change filenames in a directory by replacing spaces and/or specified words.
+    
+    Scans a directory and its subdirectories to rename files by replacing spaces and/or 
+    specified words in filenames. Folder names will not be changed. Recommended to use 
+    this tool if file names have inconsistent naming conventions that may cause issues.
     Parameters:
     -----------
         directory (str): Directory to scan. If None, prompts user for input.
-    
+
     Returns:
     -----------
         Renamed files in place; prints changes to console.
     """
-    ## If no directory is provided, prompt the user for input
+    # If no directory is provided, prompt the user for input
     if directory is None:
         directory = input("Enter the directory to scan: ").strip()
     if not os.path.isdir(directory):
         raise FileNotFoundError(f"Directory not found: {directory}")
     print(f"Scanning directory: {directory}")
 
-    ## Option to replace spaces in filenames with different separator character
+    # Option to replace spaces in filenames with different separator character
     if replace_spaces is None:
-        replace_spaces_input = input("Do you want to replace spaces in filenames? (y/n): ").strip().lower()
-        if replace_spaces_input == 'y':
+        replace_spaces_input = (
+            input("Do you want to replace spaces in filenames? (y/n): ").strip().lower()
+        )
+        if replace_spaces_input == "y":
             replace_spaces = True
     if replace_spaces:
         if character_to_use is None:
-            character_to_use = input("Enter the separator to use instead of spaces (e.g. _): ").strip()
+            character_to_use = input(
+                "Enter the separator to use instead of spaces (e.g. _): "
+            ).strip()
         print("Renaming files now!")
         for root, dirs, files in os.walk(directory):
             for current_filename in files:
-                if ' ' in current_filename:
+                if " " in current_filename:
                     old_filepath = os.path.join(root, current_filename)
-                    new_filename = current_filename.replace(' ', character_to_use)
+                    new_filename = current_filename.replace(" ", character_to_use)
                     new_filepath = os.path.join(root, new_filename)
                     print(f"Renaming: {old_filepath} to {new_filepath}")
                     os.rename(old_filepath, new_filepath)
         print("File renaming complete.")
     else:
         print("No spaces will be replaced in filenames.")
-    
-    ## Option to batch rename dates to ISO format (YYYY-MM-DD)
+
+    # Option to batch rename dates to ISO format (YYYY-MM-DD)
     if iso_date_rename is None:
-        iso_date_input = input("Do you want to convert all dates in filenames to ISO format (YYYY-MM-DD)? (y/n): ").strip().lower()
-        if iso_date_input == 'y':
+        message = (f"Do you want to convert all dates in filenames to ISO format"
+                   f" (YYYY-MM-DD)? (y/n): ")
+        iso_date_input = (
+            input(message)
+            .strip()
+            .lower()
+        )
+        if iso_date_input == "y":
             iso_date_rename = True
     if iso_date_rename:
         Date_change_ISO(directory)
@@ -139,8 +171,10 @@ def batch_rename_files(directory=None, replace_spaces=None, iso_date_rename=None
 
     if file_rename:
         if pairs_input is None:
-            pairs_input = input("Enter words to find and their replacements as comma-separated pairs (e.g. old1:new1,old2:new2): ").strip()
-        word_pairs = [pair.split(':') for pair in pairs_input.split(',') if ':' in pair]
+            message = (f"Enter words to find and their replacements as comma-separated"
+                       f" pairs (e.g. old1:new1,old2:new2): ")
+            pairs_input = input(message).strip()
+        word_pairs = [pair.split(":") for pair in pairs_input.split(",") if ":" in pair]
         print("Renaming files by replacing specified words...")
         for root, dirs, files in os.walk(directory):
             for current_filename in files:
@@ -155,6 +189,7 @@ def batch_rename_files(directory=None, replace_spaces=None, iso_date_rename=None
         print("Batch word replacement complete.")
     else:
         print("No words will be replaced in filenames.")
+
 
 if __name__ == "__main__":
     batch_rename_files()

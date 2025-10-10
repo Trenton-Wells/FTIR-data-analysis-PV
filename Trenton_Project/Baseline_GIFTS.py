@@ -2,6 +2,7 @@ import numpy as np
 from scipy.sparse import diags
 from scipy.sparse.linalg import spsolve
 
+
 def baseline_gifts(y, lam=1e6, p=0.01, iterations=10):
     """
     Perform baseline correction using Asymmetric Least Squares (ALS) method.
@@ -34,4 +35,3 @@ def baseline_gifts(y, lam=1e6, p=0.01, iterations=10):
         w = p * (y > baseline) + (1 - p) * (y <= baseline)
 
     return baseline
-

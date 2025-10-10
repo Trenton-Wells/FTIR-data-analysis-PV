@@ -1,4 +1,3 @@
-
 import numpy as np
 import matplotlib.pyplot as plt
 from pybaselines.utils import relative_difference
@@ -6,8 +5,20 @@ from pybaselines import _weighting, Baseline
 import pandas as pd
 import ast
 
-def baseline_irsqr(data, lam=1e6, quantile=0.05, num_knots=100, spline_degree=3,
-                   diff_order=3, max_iterations=100, tolerance=1e-6, weights=None, eps=None, x_axis=None):
+
+def baseline_irsqr(
+    data,
+    lam=1e6,
+    quantile=0.05,
+    num_knots=100,
+    spline_degree=3,
+    diff_order=3,
+    max_iterations=100,
+    tolerance=1e-6,
+    weights=None,
+    eps=None,
+    x_axis=None,
+):
     """
     Iterative Reweighted Spline Quantile Regression (IRSQR).
 
@@ -65,18 +76,19 @@ def baseline_irsqr(data, lam=1e6, quantile=0.05, num_knots=100, spline_degree=3,
     References
     ----------
     Han, Q., et al. Iterative Reweighted Quantile Regression Using Augmented Lagrangian
-    Optimization for Baseline Correction. 2018 5th International Conference on Information
-    Science and Control Engineering (ICISCE), 2018, 280-284.
+    Optimization for Baseline Correction. 2018 5th International Conference on 
+    Information Science and Control Engineering (ICISCE), 2018, 280-284.
 
     """
 
     if not 0 < quantile < 1:
-        raise ValueError('quantile must be between 0 and 1')
+        raise ValueError("quantile must be between 0 and 1")
 
     if x_axis is None:
         x_axis = np.arange(len(data))
     baseline_obj = Baseline(x_axis)
-    # print('DEBUG: data type:', type(data), 'shape:', getattr(data, 'shape', None), 'len:', len(data) if hasattr(data, '__len__') else None)
+    # print('DEBUG: data type:', type(data), 'shape:', getattr(data, 'shape', None), 
+    # 'len:', len(data) if hasattr(data, '__len__') else None)
     # print('DEBUG: weights:', weights, 'type:', type(weights))
     y, weight_array, pspline = baseline_obj._setup_spline(
         data, weights, spline_degree, num_knots, True, diff_order, lam
@@ -92,5 +104,5 @@ def baseline_irsqr(data, lam=1e6, quantile=0.05, num_knots=100, spline_degree=3,
         old_coef = pspline.coef
         weight_array = _weighting._quantile(y, baseline, quantile, eps)
 
-    parameters = {'weights': weight_array, 'tol_history': tol_history[:i + 1]}
+    parameters = {"weights": weight_array, "tol_history": tol_history[: i + 1]}
     return baseline, parameters
