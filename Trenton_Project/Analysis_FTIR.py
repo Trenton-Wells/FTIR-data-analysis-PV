@@ -4,14 +4,12 @@
 # NREL Contact: trenton.wells@nrel.gov
 # Personal Contact: trentonwells73@gmail.com
 import pandas as pd
-import sys
 import os
-import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
-from Baseline_GIFTS import baseline_gifts
-from Baseline_IRSQR import baseline_irsqr
-from pybaselines import Baseline
+from pybaselines.smooth import arpls
+from pybaselines.spline import irsqr
+from pybaselines.classification import fabc
 import ast
 import random
 import ipywidgets as widgets
@@ -49,7 +47,7 @@ def _get_default_parameters(function_name):
     Input the name of a baseline function and return its default parameters as a 
     dictionary.
 
-    Example: _get_default_parameters('GIFTS') returns {'lam': 1e6, 'p': 0.01, 
+    Example: _get_default_parameters('ARPLS') returns {'lam': 1e6, 'p': 0.01, 
     'iterations': 10}
     
     Parameters
@@ -63,7 +61,7 @@ def _get_default_parameters(function_name):
         A dictionary of default parameters for the given function.
     """
     BASELINE_DEFAULTS = {
-        "GIFTS": {"lam": 1e6, "p": 0.01, "iterations": 10},
+        "ARPLS": {"lam": 1e6, "p": 0.01, "iterations": 10},
         "IRSQR": {
             "lam": 1e6,
             "quantile": 0.05,
@@ -104,7 +102,7 @@ def _cast_parameter_types(function_name, parameters):
         The dictionary with casted parameter types.
     """
     function = function_name.upper()
-    if function == "GIFTS":
+    if function == "ARPLS":
         # lam: float, p: float, iterations: int
         if "lam" in parameters:
             parameters["lam"] = float(parameters["lam"])
@@ -183,7 +181,7 @@ def baseline_selection(FTIR_dataframe, materials=None, baseline_function=None):
     # Prompt for baseline function if not provided
     if baseline_function is None:
         baseline_function = input(
-            "Enter baseline function (GIFTS, IRSQR, FABC, Manual): "
+            "Enter baseline function (ARPLS, IRSQR, FABC, Manual): "
         ).strip()
 
     for material in materials:
@@ -234,11 +232,9 @@ def parameter_selection(FTIR_dataframe, materials=None, parameters=None):
     return FTIR_dataframe
 
 
-def baseline_correction(dataframe_path):
+def baseline_correction(FTIR_dataframe):
     """
-    Baseline correction function accesses the dataframe and applies baseline correction 
-    based on user-specified functions and parameters.
-    Then saves the baseline and baseline-corrected spectra back to the CSV file.
+    Apply baseline correction to the dataframe.
 
     Parameters
     ----------
@@ -247,22 +243,16 @@ def baseline_correction(dataframe_path):
 
     Returns
     -------
-    None
+    pd.DataFrame
+        The updated DataFrame.
     """
-    import ast
-    from Trenton_Project.Baseline_GIFTS import baseline_correction as gifts_baseline
-    from Trenton_Project.Baseline_IRSQR import irsqr as irsqr_baseline
-    from pybaselines import Baseline
-
-    dataframe = pd.read_csv(dataframe_path)
-
     # Add new columns for Baseline Function and Parameters if they don't exist
-    if "Baseline" not in dataframe.columns:
-        dataframe["Baseline"] = None
-    if "Corrected" not in dataframe.columns:
-        dataframe["Corrected"] = None
+    if "Baseline" not in FTIR_dataframe.columns:
+        FTIR_dataframe["Baseline"] = None
+    if "Corrected" not in FTIR_dataframe.columns:
+        FTIR_dataframe["Corrected"] = None
 
-    for idx, row in dataframe.iterrows():
+    for idx, row in FTIR_dataframe.iterrows():
         baseline_name = row["Baseline Function"]
         parameter_dictionary = (
             ast.literal_eval(row["Baseline Parameters"])
@@ -278,9 +268,9 @@ def baseline_correction(dataframe_path):
         baseline = None
         baseline_corrected = None
 
-        if baseline_name == "GIFTS":
-            # Call GIFTS baseline correction
-            baseline = gifts_baseline(y_data, **parameter_dictionary)
+        if baseline_name == "ARPLS":
+            # Call ARPLS baseline correction
+            baseline = arpls(y_data, **parameter_dictionary)
             baseline_corrected = [y - b for y, b in zip(y_data, baseline)]
         elif baseline_name == "IRSQR":
             # Call IRSQR baseline correction
@@ -348,7 +338,9 @@ def plot_grouped_spectra(
     zoom=None,
 ):
     """
-    Plot grouped spectra based on material, condition, and time. Accepts lists or 'any' for each category.
+    Plot grouped spectra based on material, condition, and time. 
+    
+    Accepts lists or 'any' for each category.
 
     Parameters
     ----------
@@ -585,7 +577,7 @@ def try_baseline(
     FTIR_dataframe (pd.DataFrame): The in-memory DataFrame containing all spectra.
     material (str, optional): Material name to analyze (ignored if filepath is 
         provided).
-    baseline_function (str): Baseline function to use ('GIFTS', 'IRSQR', 'FABC').
+    baseline_function (str): Baseline function to use ('ARPLS', 'IRSQR', 'FABC').
     parameter_string (str, optional): Baseline parameters as key=value pairs, 
         comma-separated.
     filepath (str, optional): If provided, only process this file (by 'File Location' 
@@ -646,7 +638,7 @@ def try_baseline(
     # Widget setup for live parameter editing
     param_widgets = {}
     # Explicitly define widgets for each baseline function and parameter
-    if baseline_function.upper() == "GIFTS":
+    if baseline_function.upper() == "ARPLS":
         # lam: float, p: float, iterations: int
         param_widgets["lam"] = widgets.FloatSlider(
             value=parameters.get("lam", 1e6),
@@ -792,13 +784,12 @@ def try_baseline(
         param_vals = _cast_parameter_types(baseline_function, param_vals)
         with output:
             clear_output(wait=True)
-            if baseline_function.upper() == "GIFTS":
-                baseline = baseline_gifts(y, **param_vals)
+            if baseline_function.upper() == "ARPLS":
+                baseline = arpls(y, **param_vals)
             elif baseline_function.upper() == "IRSQR":
-                baseline, _ = baseline_irsqr(y, **param_vals, x_axis=x)
+                baseline, _ = irsqr(y, **param_vals, x_axis=x)
             elif baseline_function.upper() == "FABC":
-                baseline_obj = Baseline(x)
-                baseline, _ = baseline_obj.fabc(y, **param_vals)
+                baseline, _ = fabc(y, **param_vals)
             else:
                 print(f"Unknown baseline function: {baseline_function}")
                 return
@@ -838,10 +829,11 @@ def try_baseline(
 
 def test_baseline_choices(FTIR_dataframe, material=None):
     """
-    Plot three random spectra for a given material, showing raw data, baseline, and 
-    baseline-corrected data.
-    The baseline function and parameters are taken from the DataFrame columns.
-    Assumes user has already filled those columns earlier in the workflow.
+    Plot three random spectra for a given material, showing baseline results. 
+    
+    Plots raw data, baseline, and baseline-corrected data. The baseline function and 
+    parameters are taken from the DataFrame columns. Assumes user has already filled 
+    those columns earlier in the workflow.
 
     Parameters
     ----------
@@ -904,16 +896,13 @@ def test_baseline_choices(FTIR_dataframe, material=None):
             if baseline_func is None:
                 raise ValueError("No baseline function specified.")
             func = baseline_func.strip().upper()
-            if func == "GIFTS":
-                baseline = baseline_gifts(y, **params)
+            if func == "ARPLS":
+                baseline = arpls(y, **params)
             elif func == "IRSQR":
-                baseline, _ = baseline_irsqr(y, **params, x_axis=x)
+                baseline, _ = irsqr(y, **params)
             elif func == "FABC":
-                baseline_obj = Baseline(x)
-                baseline, _ = baseline_obj.fabc(y, **params)
+                baseline, _ = fabc(y, **params)
             elif func == "MANUAL":
-                from scipy.interpolate import CubicSpline
-
                 anchor_points = params.get("anchor_points", [])
                 if not anchor_points:
                     raise ValueError("No anchor_points for MANUAL baseline.")
@@ -960,6 +949,8 @@ def bring_in_dataframe(dataframe_path=None):
     """
     Load the CSV file into a pandas DataFrame.
 
+    Allows for easy dataframe manipulation in memory over the course of the analysis.
+
     Parameters
     ----------
     dataframe_path : str
@@ -982,3 +973,326 @@ def bring_in_dataframe(dataframe_path=None):
             pd.DataFrame()
         )  # Create a new empty DataFrame if it doesn't exist
     return FTIR_dataframe
+
+def select_anchor_points(
+    FTIR_dataframe, material=None, filepath=None, try_it_out=True, dataframe_path=None
+):
+    """
+    Interactively select anchor points for FTIR baseline correction.
+
+    Lets user select anchor points from a spectrum in the DataFrame for baseline 
+    correction. Anchor points are selected by clicking on the plot, and will apply to 
+    each file of that material. After selection, a cubic spline baseline is fit and 
+    previewed, and the user can accept or redo the selection.
+
+    Parameters
+    ----------
+    FTIR_dataframe : pd.DataFrame
+        The DataFrame containing the spectral data.
+    material : str, optional
+        Material name to analyze (ignored if filepath is provided).
+    filepath : str, optional
+        If provided, only process this file (by 'File Location' + 'File Name').
+    try_it_out : bool, optional
+        If True, only prints the anchor points (default). If False, saves anchor points 
+        to 'Baseline Parameters' column for all rows with the same material.
+    dataframe_path : str, optional
+        Path to save the DataFrame as CSV if anchor points are saved (used only if 
+        try_it_out is False).
+
+    Returns
+    -------
+    None
+        The selected anchor points are stored in the dataframe under 'Baseline 
+        Parameters'.
+    """
+    SELECTED_ANCHOR_POINTS = []
+    clear_output(wait=True)  # Forcibly reset output area before anything else
+
+    # --- Data selection logic ---
+    if filepath is not None:
+        import os
+
+        if os.path.sep in filepath:
+            folder, fname = os.path.split(filepath)
+            filtered = FTIR_dataframe[
+                (FTIR_dataframe["File Location"] == folder)
+                & (FTIR_dataframe["File Name"] == fname)
+            ]
+        else:
+            filtered = FTIR_dataframe[FTIR_dataframe["File Name"] == filepath]
+        if filtered.empty:
+            raise ValueError(f"No entry found for file '{filepath}'.")
+        row = filtered.iloc[0]
+    else:
+        if material is None:
+            raise ValueError("Material must be specified if filepath is not provided.")
+        filtered = FTIR_dataframe[
+            (FTIR_dataframe["Material"] == material) & (FTIR_dataframe["Time"] == 0)
+        ]
+        if filtered.empty:
+            raise ValueError(
+                f"No entry found for material '{material}' with time == 0."
+            )
+        row = filtered.iloc[0]
+
+    x_data = (
+        ast.literal_eval(row["X-Axis"])
+        if isinstance(row["X-Axis"], str)
+        else row["X-Axis"]
+    )
+    y_data = (
+        ast.literal_eval(row["Raw Data"])
+        if isinstance(row["Raw Data"], str)
+        else row["Raw Data"]
+    )
+
+    # --- Widget and button setup (define early for scope) ---
+    accept_button = widgets.Button(description="Continue", button_style="success")
+    redo_button = widgets.Button(description="Redo", button_style="warning")
+    button_box = widgets.HBox([accept_button, redo_button])
+    button_box_out = widgets.Output()
+    done = widgets.Output()
+    output = widgets.Output()
+    anchor_points = []
+    anchor_markers = go.Scatter(
+        x=[],
+        y=[],
+        mode="markers",
+        marker=dict(color="red", size=10),
+        name="Anchor Points",
+    )
+
+    # --- Plot setup ---
+    fig = go.FigureWidget(
+        data=[
+            go.Scatter(x=x_data, y=y_data, mode="lines", name="Raw Data"),
+            anchor_markers,
+        ]
+    )
+    fig.update_layout(
+        title="Click to select anchor points for baseline correction",
+        xaxis_title="Wavenumber (cm⁻¹)",
+        yaxis_title="Absorbance (AU)",
+    )
+
+    # --- Click handler for anchor selection ---
+    def _on_click(trace, points, selector):
+        """
+        Handle click events on the plot to select anchor points.
+
+        Helper function for select_anchor_points().
+        """
+        if points.xs:
+            x_val = points.xs[0]
+            anchor_points.append(x_val)
+            # Add a vertical line for the anchor point
+            vline = dict(
+                type="line",
+                x0=x_val,
+                x1=x_val,
+                y0=min(y_data),
+                y1=max(y_data),
+                line=dict(color="red", dash="dash"),
+            )
+            fig.add_shape(vline)
+            # Add a marker at the selected point on the line
+            idx = np.argmin(np.abs(np.array(x_data) - x_val))
+            y_val = y_data[idx]
+            with fig.batch_update():
+                anchor_markers.x = list(anchor_markers.x) + [x_val]
+                anchor_markers.y = list(anchor_markers.y) + [y_val]
+            with output:
+                clear_output(wait=True)
+                print(f"Anchor point selected: {x_val}")
+
+    scatter = fig.data[0]
+    scatter.on_click(_on_click)
+
+    # --- Accept/Redo logic, defined once and reused ---
+    def show_baseline_preview():
+        """
+        Show a preview of the cubic spline baseline and baseline-corrected spectrum 
+        using the selected anchor points.
+
+        Helper function for select_anchor_points().
+        Lets the user accept or redo the selection after visualizing the correction.
+        """
+        # Fit cubic spline to anchor points with zero slope at endpoints
+        anchor_x = np.array(sorted(anchor_points))
+        anchor_y = np.array(
+            [y_data[np.argmin(np.abs(np.array(x_data) - x))] for x in anchor_x]
+        )
+        spline = CubicSpline(anchor_x, anchor_y, bc_type=((1, 0.0), (1, 0.0)))
+        x_dense = np.linspace(min(x_data), max(x_data), 1000)
+        spline_y = spline(x_dense)
+        y_interp = np.interp(x_data, x_dense, spline_y)
+        baseline_corrected = np.array(y_data) - y_interp
+        from plotly.subplots import make_subplots
+
+        fig2 = make_subplots(
+            rows=2,
+            cols=1,
+            shared_xaxes=True,
+            subplot_titles=("Original with Baseline", "Baseline Corrected"),
+        )
+        fig2.add_trace(
+            go.Scatter(x=x_data, y=y_data, mode="lines", name="Raw Data"), row=1, col=1
+        )
+        fig2.add_trace(
+            go.Scatter(
+                x=x_dense,
+                y=spline_y,
+                mode="lines",
+                name="Baseline",
+                line=dict(color="green"),
+            ),
+            row=1,
+            col=1,
+        )
+        fig2.add_trace(
+            go.Scatter(
+                x=anchor_x,
+                y=anchor_y,
+                mode="markers",
+                marker=dict(color="red", size=10),
+                name="Anchor Points",
+            ),
+            row=1,
+            col=1,
+        )
+        fig2.add_trace(
+            go.Scatter(
+                x=x_data,
+                y=baseline_corrected,
+                mode="lines",
+                name="Baseline Corrected",
+                line=dict(color="purple"),
+            ),
+            row=2,
+            col=1,
+        )
+        fig2.update_layout(
+            height=800,
+            title_text="Baseline Correction Preview",
+            xaxis_title="Wavenumber (cm⁻¹)",
+            yaxis_title="Absorbance (AU)",
+        )
+        # Accept/Redo for preview
+        accept2 = widgets.Button(description="Accept", button_style="success")
+        redo2 = widgets.Button(description="Redo", button_style="warning")
+        button_box2 = widgets.HBox([accept2, redo2])
+        button_box2_out = widgets.Output()
+        done2 = widgets.Output()
+
+        def accept2_callback(b):
+            global SELECTED_ANCHOR_POINTS
+            SELECTED_ANCHOR_POINTS = sorted(anchor_points)
+            with done2:
+                clear_output()
+                # If in the "try baselines" section, print the results. If not, save to 
+                # dataframe.
+                if try_it_out:
+                    print(
+                        f"DONE--Final selected anchor points: {SELECTED_ANCHOR_POINTS}"
+                    )
+                else:
+                    # Save anchor points to Baseline Parameters for all rows with the 
+                    # same material
+                    mat = row["Material"]
+                    for idx, r in FTIR_dataframe.iterrows():
+                        if r["Material"] == mat:
+                            FTIR_dataframe.at[idx, "Baseline Parameters"] = str(
+                                SELECTED_ANCHOR_POINTS
+                            )
+                            FTIR_dataframe.at[idx, "Baseline Function"] = "Manual"
+                    message = (f"Anchor points saved to Baseline Parameters and "
+                        f"Baseline Function set to 'Manual' for material '{mat}'."
+                    )
+                    print(message)
+                    # --- Save DataFrame to CSV if dataframe_path is provided ---
+                    if dataframe_path:
+                        try:
+                            FTIR_dataframe.to_csv(dataframe_path, index=False)
+                            print(f"DataFrame saved to {dataframe_path}.")
+                        except Exception as e:
+                            message = (f"Warning: Could not save DataFrame to "
+                                f"{dataframe_path}: {e}"
+                            )
+                            print(message)
+                    else:
+                        print(
+                            "Warning: dataframe_path not provided. DataFrame not saved."
+                        )
+            button_box2_out.clear_output()
+
+        def redo2_callback(b):
+            with done2:
+                clear_output()
+            reset_selection()
+
+        accept2.on_click(accept2_callback)
+        redo2.on_click(redo2_callback)
+        clear_output(wait=True)
+        display(fig2, button_box2_out, done2)
+        with button_box2_out:
+            display(button_box2)
+
+    def reset_selection():
+        """
+        Clear current selection and reset the plot for new anchor point selection.
+
+        Helper function for select_anchor_points(). Clears anchor points and resets the 
+        interactive plot and widgets for a new selection.
+        """
+        # Clear anchor points and reset plot
+        anchor_points.clear()
+        fig.layout.shapes = ()
+        with fig.batch_update():
+            anchor_markers.x = []
+            anchor_markers.y = []
+        with output:
+            clear_output()
+            print("Anchor points cleared. Please select again.")
+        with done:
+            clear_output()
+        button_box_out.clear_output()
+        display(fig, output, button_box_out, done)
+        with button_box_out:
+            display(button_box)
+
+    def continue_callback(b):
+        """
+        Handle click on Continue button.
+        
+        Helper function for select_anchor_points(). Handles the Continue button for the
+        initial anchor selection. If enough points are selected, shows the baseline 
+        preview; otherwise, prompts the user to select more points.
+        """
+        button_box_out.clear_output()
+        with done:
+            clear_output()
+        if len(anchor_points) < 2:
+            with done:
+                print("Select at least two anchor points for spline.")
+            reset_selection()
+            return
+        show_baseline_preview()
+
+    def redo_callback(b):
+        """
+        Helper function:
+        Handles the Redo button for the initial anchor selection, resetting the 
+        selection process.
+        """
+        reset_selection()
+
+    accept_button.on_click(continue_callback)
+    redo_button.on_click(redo_callback)
+
+    # --- Initial display ---
+    clear_output(wait=True)  # Ensure output area is reset to avoid UID errors
+    display(fig, output, button_box_out, done)
+    with button_box_out:
+        display(button_box)
+    return None
