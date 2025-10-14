@@ -7,13 +7,17 @@ import pandas as pd
 import os
 import matplotlib.pyplot as plt
 import numpy as np
-from pybaselines.smooth import arpls
+from pybaselines.whittaker import arpls
 from pybaselines.spline import irsqr
 from pybaselines.classification import fabc
+from scipy.interpolate import CubicSpline
+from pybaselines.utils import optimize_window
 import ast
 import random
 import ipywidgets as widgets
+import plotly.graph_objs as go
 from IPython.display import display, clear_output
+from math import ceil
 
 
 def _parse_parameters(parameter_str):
@@ -46,9 +50,6 @@ def _get_default_parameters(function_name):
     """
     Input the name of a baseline function and return its default parameters as a 
     dictionary.
-
-    Example: _get_default_parameters('ARPLS') returns {'lam': 1e6, 'p': 0.01, 
-    'iterations': 10}
     
     Parameters
     ----------
@@ -61,15 +62,21 @@ def _get_default_parameters(function_name):
         A dictionary of default parameters for the given function.
     """
     BASELINE_DEFAULTS = {
-        "ARPLS": {"lam": 1e6, "p": 0.01, "iterations": 10},
+        "ARPLS": {
+            "lam": 1e5,
+            "diff_order": 2,
+            "max_iter": 50,
+            "tol": 1e-3,
+            "weights": None
+        },
         "IRSQR": {
             "lam": 1e6,
             "quantile": 0.05,
             "num_knots": 100,
             "spline_degree": 3,
             "diff_order": 3,
-            "max_iterations": 100,
-            "tolerance": 1e-6,
+            "max_iter": 100,
+            "tol": 1e-6,
             "weights": None,
             "eps": None,
         },
@@ -79,6 +86,9 @@ def _get_default_parameters(function_name):
             "num_std": 3.0,
             "diff_order": 2,
             "min_length": 2,
+            "weights": None,
+            "weights_as_mask": False,
+            "pad_kwargs": None
         },
         "MANUAL": {},
     }
@@ -103,16 +113,21 @@ def _cast_parameter_types(function_name, parameters):
     """
     function = function_name.upper()
     if function == "ARPLS":
-        # lam: float, p: float, iterations: int
         if "lam" in parameters:
             parameters["lam"] = float(parameters["lam"])
-        if "p" in parameters:
-            parameters["p"] = float(parameters["p"])
-        if "iterations" in parameters:
-            parameters["iterations"] = int(parameters["iterations"])
+        if "diff_order" in parameters:
+            parameters["diff_order"] = int(parameters["diff_order"])
+        if "max_iter" in parameters:
+            parameters["max_iter"] = int(parameters["max_iter"])
+        if "tol" in parameters:
+            parameters["tol"] = float(parameters["tol"])
+        if "weights" in parameters:
+            if str(parameters["weights"]).lower() not in ["none", "null", ""]:
+                try:
+                    parameters["weights"] = ast.literal_eval(parameters["weights"])
+                except Exception:
+                    pass
     elif function == "IRSQR":
-        # lam: float, quantile: float, num_knots: int, spline_degree: int, 
-        # diff_order: int, max_iterations: int, tolerance: float
         if "lam" in parameters:
             parameters["lam"] = float(parameters["lam"])
         if "quantile" in parameters:
@@ -123,30 +138,53 @@ def _cast_parameter_types(function_name, parameters):
             parameters["spline_degree"] = int(parameters["spline_degree"])
         if "diff_order" in parameters:
             parameters["diff_order"] = int(parameters["diff_order"])
-        if "max_iterations" in parameters:
-            parameters["max_iterations"] = int(parameters["max_iterations"])
-        if "tolerance" in parameters:
-            parameters["tolerance"] = float(parameters["tolerance"])
+        if "max_iter" in parameters:
+            parameters["max_iter"] = int(parameters["max_iter"])
+        if "tol" in parameters:
+            parameters["tol"] = float(parameters["tol"])
+        if "weights" in parameters:
+            if str(parameters["weights"]).lower() not in ["none", "null", ""]:
+                try:
+                    parameters["weights"] = ast.literal_eval(parameters["weights"])
+                except Exception:
+                    pass
+        if "eps" in parameters:
+            if str(parameters["eps"]).lower() not in ["none", "null", ""]:
+                try:
+                    parameters["eps"] = float(parameters["eps"])
+                except Exception:
+                    pass
     elif function == "FABC":
-        # lam: float, scale: int or None, num_std: float, diff_order: int, 
-        # min_length: int
         if "lam" in parameters:
             parameters["lam"] = float(parameters["lam"])
-        if "scale" in parameters:
-            if (
-                parameters["scale"] is None
-                or str(parameters["scale"]).lower() == "none"
-                or parameters["scale"] == ""
-            ):
-                parameters["scale"] = None
-            else:
-                parameters["scale"] = int(parameters["scale"])
+        if str(parameters["scale"]).lower() not in ["none", "null", ""]:
+            try:
+                parameters["scale"] = ast.literal_eval(parameters["scale"])
+            except Exception:
+                pass
         if "num_std" in parameters:
             parameters["num_std"] = float(parameters["num_std"])
         if "diff_order" in parameters:
             parameters["diff_order"] = int(parameters["diff_order"])
         if "min_length" in parameters:
             parameters["min_length"] = int(parameters["min_length"])
+        if "weights" in parameters:
+            if str(parameters["weights"]).lower() not in ["none", "null", ""]:
+                try:
+                    parameters["weights"] = ast.literal_eval(parameters["weights"])
+                except Exception:
+                    pass
+        if "weights_as_mask" in parameters:
+            if str(parameters["weights_as_mask"]).lower() in ["true"]:
+                parameters["weights_as_mask"] = True
+            else:
+                parameters["weights_as_mask"] = False
+        if "pad_kwargs" in parameters:
+            if parameters["pad_kwargs"] is not None:
+                try:
+                    parameters["pad_kwargs"] = ast.literal_eval(parameters["pad_kwargs"])
+                except Exception:
+                    pass
     return parameters
 
 
@@ -274,14 +312,11 @@ def baseline_correction(FTIR_dataframe):
             baseline_corrected = [y - b for y, b in zip(y_data, baseline)]
         elif baseline_name == "IRSQR":
             # Call IRSQR baseline correction
-            baseline, _ = irsqr_baseline(
-                None, y_data, **parameter_dictionary
-            )  # Pass None for self if using as standalone
+            baseline, _ = irsqr(y_data, **parameter_dictionary)
             baseline_corrected = [y - b for y, b in zip(y_data, baseline)]
         elif baseline_name == "FABC":
             # Call FABC baseline correction
-            baseline_obj = Baseline()
-            baseline, _ = baseline_obj.fabc(y_data, **parameter_dictionary)
+            baseline, _ = fabc(y_data, **parameter_dictionary)
             baseline_corrected = [y - b for y, b in zip(y_data, baseline)]
         elif baseline_name == "MANUAL":
             # Call Manual baseline correction
@@ -311,18 +346,17 @@ def baseline_correction(FTIR_dataframe):
         # Cast all baseline values to float before saving
         if baseline is not None:
             baseline_floats = [float(val) for val in baseline]
-            dataframe.at[idx, "Baseline"] = baseline_floats
+            FTIR_dataframe.at[idx, "Baseline"] = baseline_floats
         else:
-            dataframe.at[idx, "Baseline"] = None
+            FTIR_dataframe.at[idx, "Baseline"] = None
         # Cast all corrected values to float before saving
         if baseline_corrected is not None:
             corrected_floats = [float(val) for val in baseline_corrected]
-            dataframe.at[idx, "Corrected"] = corrected_floats
+            FTIR_dataframe.at[idx, "Corrected"] = corrected_floats
         else:
-            dataframe.at[idx, "Corrected"] = None
+            FTIR_dataframe.at[idx, "Corrected"] = None
 
-    # Save updated DataFrame
-    dataframe.to_csv(dataframe_path, index=False)
+    return FTIR_dataframe
 
 
 def plot_grouped_spectra(
@@ -569,8 +603,10 @@ def try_baseline(
     filepath=None,
 ):
     """
-    Apply a baseline correction to the first file of a given material and plot the 
-    result.
+    Apply a modifiable baseline to a single spectrum from the DataFrame.
+
+    Allows for on-the-fly parameter adjustments via interactive widgets and 
+    experimentation with different baseline functions.
 
     Parameters
     ----------
@@ -641,138 +677,153 @@ def try_baseline(
     if baseline_function.upper() == "ARPLS":
         # lam: float, p: float, iterations: int
         param_widgets["lam"] = widgets.FloatSlider(
-            value=parameters.get("lam", 1e6),
-            min=1e3,
-            max=1e9,
-            step=1e3,
-            description="lam",
+            value=parameters.get("lam", 1e5),
+            min=1e4,
+            max=1e6,
+            step=1e4,
+            description="Smoothness (lam)",
             readout_format=".1e",
+            style={'description_width': 'auto'}
         )
-        param_widgets["p"] = widgets.FloatSlider(
-            value=parameters.get("p", 0.01),
-            min=0.001,
-            max=0.999,
-            step=0.001,
-            description="p",
-            readout_format=".3f",
-        )
-        param_widgets["iterations"] = widgets.IntSlider(
-            value=parameters.get("iterations", 10),
+        param_widgets["diff_order"] = widgets.IntSlider(
+            value=parameters.get("diff_order", 2),
             min=1,
-            max=100,
+            max=2,
             step=1,
-            description="iterations",
+            description="Differential Order",
+            style={'description_width': 'auto'}
+        )
+        param_widgets["max_iter"] = widgets.IntSlider(
+            value=parameters.get("max_iter", 50),
+            min=1,
+            max=200,
+            step=1,
+            description="Max Iterations",
+            style={'description_width': 'auto'}
+        )
+        param_widgets["tol"] = widgets.FloatSlider(
+            value=parameters.get("tol", 1e-3),
+            min=1e-6,
+            max=1e-1,
+            step=1e-4,
+            description="Tolerance",
+            readout_format=".1e",
+            style={'description_width': 'auto'}
         )
     elif baseline_function.upper() == "IRSQR":
         # lam: float, quantile: float, num_knots: int, spline_degree: int, diff_order: 
         # int, max_iterations: int, tolerance: float, eps: float
         param_widgets["lam"] = widgets.FloatSlider(
             value=parameters.get("lam", 1e6),
-            min=1e3,
-            max=1e9,
-            step=1e3,
-            description="lam",
+            min=1e5,
+            max=1e7,
+            step=1e5,
+            description="Smoothness (lam)",
             readout_format=".1e",
+            style={'description_width': 'auto'}
         )
         param_widgets["quantile"] = widgets.FloatSlider(
             value=parameters.get("quantile", 0.05),
             min=0.001,
             max=0.5,
             step=0.001,
-            description="quantile",
+            description="Quantile",
             readout_format=".3f",
+            style={'description_width': 'auto'}
         )
         param_widgets["num_knots"] = widgets.IntSlider(
             value=parameters.get("num_knots", 100),
             min=5,
             max=500,
             step=5,
-            description="num_knots",
+            description="Knots",
+            style={'description_width': 'auto'}
         )
         param_widgets["spline_degree"] = widgets.IntSlider(
             value=parameters.get("spline_degree", 3),
             min=1,
             max=5,
             step=1,
-            description="spline_degree",
+            description="Spline Degree",
+            style={'description_width': 'auto'}
         )
         param_widgets["diff_order"] = widgets.IntSlider(
-            value=parameters.get("diff_order", 1),
+            value=parameters.get("diff_order", 3),
             min=1,
-            max=5,
+            max=3,
             step=1,
-            description="diff_order",
+            description="Differential Order",
+            style={'description_width': 'auto'}
         )
-        param_widgets["max_iterations"] = widgets.IntSlider(
-            value=parameters.get("max_iterations", 100),
+        param_widgets["max_iter"] = widgets.IntSlider(
+            value=parameters.get("max_iter", 100),
             min=1,
             max=1000,
             step=1,
-            description="max_iterations",
+            description="Max Iterations",
+            style={'description_width': 'auto'}
         )
-        param_widgets["tolerance"] = widgets.FloatSlider(
-            value=parameters.get("tolerance", 1e-6),
+        param_widgets["tol"] = widgets.FloatSlider(
+            value=parameters.get("tol", 1e-6),
             min=1e-10,
             max=1e-2,
             step=1e-7,
-            description="tolerance",
+            description="Tolerance",
             readout_format=".1e",
-        )
-        param_widgets["eps"] = widgets.FloatSlider(
-            value=(
-                parameters.get("eps", 1e-6)
-                if parameters.get("eps", None) is not None
-                else 1e-6
-            ),
-            min=1e-10,
-            max=1e-2,
-            step=1e-7,
-            description="eps",
-            readout_format=".1e",
+            style={'description_width': 'auto'}
         )
     elif baseline_function.upper() == "FABC":
         # lam: float, scale: int or None, num_std: float, diff_order: int, min_length: 
         # int
         param_widgets["lam"] = widgets.FloatSlider(
             value=parameters.get("lam", 1e6),
-            min=1e3,
-            max=1e9,
-            step=1e3,
-            description="lam",
+            min=1e4,
+            max=1e7,
+            step=1e5,
+            description="Smoothness (lam)",
             readout_format=".1e",
+            style={'description_width': 'auto'}
         )
+        raw_data = (
+            ast.literal_eval(row["Raw Data"]) if isinstance(row["Raw Data"], str)
+            else row["Raw Data"]
+        )
+        scale_default = ceil(optimize_window(raw_data) / 2)
+        scale_val = parameters.get("scale", None)
+        if scale_val is None:
+            scale_val = scale_default
         param_widgets["scale"] = widgets.IntSlider(
-            value=(
-                parameters.get("scale", 50)
-                if parameters.get("scale", None) is not None
-                else 50
-            ),
+            value=int(scale_val),
             min=1,
             max=500,
             step=1,
-            description="scale",
+            description="Scale",
+            style={'description_width': 'auto'}
         )
         param_widgets["num_std"] = widgets.FloatSlider(
             value=parameters.get("num_std", 3.0),
-            min=0.1,
-            max=10.0,
+            min=1.5,
+            max=4.5,
             step=0.1,
-            description="num_std",
+            description="Standard Deviations",
             readout_format=".2f",
+            style={'description_width': 'auto'}
         )
         param_widgets["diff_order"] = widgets.IntSlider(
             value=parameters.get("diff_order", 2),
             min=1,
-            max=5,
+            max=3,
             step=1,
-            description="diff_order",
+            description="Differential Order",
+            style={'description_width': 'auto'}
         )
         param_widgets["min_length"] = widgets.IntSlider(
             value=parameters.get("min_length", 2),
             min=1,
-            max=20,
+            max=6,
             step=1,
-            description="min_length",
+            description="Min Baseline Span Length",
+            style={'description_width': 'auto'}
         )
 
     output = widgets.Output()
@@ -785,15 +836,35 @@ def try_baseline(
         with output:
             clear_output(wait=True)
             if baseline_function.upper() == "ARPLS":
-                baseline = arpls(y, **param_vals)
+                baseline_result = arpls(y, **param_vals)
             elif baseline_function.upper() == "IRSQR":
-                baseline, _ = irsqr(y, **param_vals, x_axis=x)
+                baseline_result = irsqr(y, **param_vals, x_data=x)
             elif baseline_function.upper() == "FABC":
-                baseline, _ = fabc(y, **param_vals)
+                baseline_result = fabc(y, **param_vals)
             else:
                 print(f"Unknown baseline function: {baseline_function}")
                 return
-            baseline_corrected = [a - b for a, b in zip(y, baseline)]
+
+            # Handle return type: pybaselines returns (baseline, details_dict) or just baseline
+            if isinstance(baseline_result, tuple):
+                baseline = baseline_result[0]
+            elif isinstance(baseline_result, dict):
+                # If a dict is returned, try to get 'baseline' key
+                baseline = baseline_result.get('baseline', None)
+                if baseline is None:
+                    print("Error: Baseline function did not return a baseline array.")
+                    return
+            else:
+                baseline = baseline_result
+
+            # Ensure baseline and y are numpy arrays for subtraction
+            baseline = np.asarray(baseline)
+            y_arr = np.asarray(y)
+            if baseline.shape != y_arr.shape:
+                print(f"Error: Baseline shape {baseline.shape} does not match data shape {y_arr.shape}.")
+                return
+            baseline_corrected = y_arr - baseline
+
             import matplotlib.pyplot as plt
 
             fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10), sharex=True)
@@ -814,14 +885,40 @@ def try_baseline(
 
     # Create interactive widget
     if param_widgets:
-        ui = widgets.VBox([w for w in param_widgets.values()])
+        # For each parameter, create a row with the widget and its own reset button
+        defaults = _get_default_parameters(baseline_function)
+        widget_rows = []
+        for key, widget in param_widgets.items():
+            reset_btn = widgets.Button(
+                description=f"Reset",
+                button_style="info",
+                layout=widgets.Layout(width="70px", margin="0 0 0 10px")
+            )
+            def make_reset_func(w, default_val):
+                return lambda b: setattr(w, 'value', default_val)
+            reset_btn.on_click(make_reset_func(widget, defaults.get(key, widget.value)))
+            row = widgets.HBox([widget, reset_btn])
+            widget_rows.append(row)
+
+        # Add a 'Reset All' button beneath the individual reset buttons
+        reset_all_btn = widgets.Button(
+            description="Reset All",
+            button_style="warning",
+            layout=widgets.Layout(width="100px", margin="10px 0 0 0")
+        )
+        def reset_all_callback(b):
+            for key, widget in param_widgets.items():
+                if key in defaults:
+                    widget.value = defaults[key]
+        reset_all_btn.on_click(reset_all_callback)
+
+        ui = widgets.VBox(widget_rows + [reset_all_btn])
         from functools import partial
 
         widget_func = widgets.interactive_output(
             _plot_baseline, {k: w for k, w in param_widgets.items()}
         )
-        display(ui, output)
-        widget_func
+        display(widgets.HBox([ui, output]))
     else:
         # No parameters to edit, just plot once
         _plot_baseline()

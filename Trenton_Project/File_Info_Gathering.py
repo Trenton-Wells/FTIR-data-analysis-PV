@@ -47,7 +47,6 @@ def find_term(term, text):
 
 
 def _gather_file_info(
-    dataframe_path,
     FTIR_dataframe,
     file_types,
     separators,
@@ -66,8 +65,6 @@ def _gather_file_info(
 
     Parameters:
     -----------
-    dataframe_path : str
-        Path to the existing dataframe CSV file.
     FTIR_dataframe : pd.DataFrame
         The existing dataframe to append new data to.
     file_types : list of str
@@ -91,9 +88,8 @@ def _gather_file_info(
     # Build set of processed files
     # This prevents re-processing files that are already in the dataframe
     processed_files = set()
-    if os.path.exists(dataframe_path):
-        for _, row in FTIR_dataframe.iterrows():
-            processed_files.add((row["File Location"], row["File Name"]))
+    for _, row in FTIR_dataframe.iterrows():
+        processed_files.add((row["File Location"], row["File Name"]))
     for file_path, _, filenames in os.walk(directory):
         parent_folder = os.path.basename(file_path)
         for filename in filenames:
@@ -262,7 +258,6 @@ def _gather_file_info(
 
 def file_info_extractor(
     FTIR_dataframe,
-    dataframe_path,
     file_types=None,
     separators=None,
     material_terms=None,
@@ -305,7 +300,6 @@ def file_info_extractor(
     FTIR_dataframe : pd.DataFrame
         The updated dataframe with new file info appended.
     """
-
     # Ensure required columns exist
     required_columns = [
         "File Location",
@@ -444,7 +438,6 @@ def file_info_extractor(
 
     # Gather new file info
     data, grouped_files = _gather_file_info(
-        dataframe_path=dataframe_path,
         FTIR_dataframe=FTIR_dataframe,
         file_types=file_types,
         separators=separators,

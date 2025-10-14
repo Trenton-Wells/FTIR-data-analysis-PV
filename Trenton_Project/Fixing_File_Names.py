@@ -165,7 +165,7 @@ def batch_rename_files(
         if iso_date_input == "y":
             iso_date_rename = True
     if iso_date_rename:
-        Date_change_ISO(directory)
+        date_change_ISO(directory)
     else:
         print("No dates will be changed in filenames.")
 
