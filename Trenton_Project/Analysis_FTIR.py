@@ -788,13 +788,17 @@ def try_baseline(
             ast.literal_eval(row["Raw Data"]) if isinstance(row["Raw Data"], str)
             else row["Raw Data"]
         )
+        raw_data = (
+            ast.literal_eval(row["Raw Data"]) if isinstance(row["Raw Data"], str)
+            else row["Raw Data"]
+        )
         scale_default = ceil(optimize_window(raw_data) / 2)
         scale_val = parameters.get("scale", None)
         if scale_val is None:
             scale_val = scale_default
         param_widgets["scale"] = widgets.IntSlider(
             value=int(scale_val),
-            min=1,
+            min=2,
             max=500,
             step=1,
             description="Scale",
@@ -894,9 +898,14 @@ def try_baseline(
                 button_style="info",
                 layout=widgets.Layout(width="70px", margin="0 0 0 10px")
             )
+            # For 'scale', use the initial scale_val as the reset value
+            if key == "scale":
+                reset_value = int(scale_val)
+            else:
+                reset_value = defaults.get(key, widget.value)
             def make_reset_func(w, default_val):
                 return lambda b: setattr(w, 'value', default_val)
-            reset_btn.on_click(make_reset_func(widget, defaults.get(key, widget.value)))
+            reset_btn.on_click(make_reset_func(widget, reset_value))
             row = widgets.HBox([widget, reset_btn])
             widget_rows.append(row)
 
@@ -908,7 +917,9 @@ def try_baseline(
         )
         def reset_all_callback(b):
             for key, widget in param_widgets.items():
-                if key in defaults:
+                if key == "scale":
+                    widget.value = int(scale_val)
+                elif key in defaults:
                     widget.value = defaults[key]
         reset_all_btn.on_click(reset_all_callback)
 
@@ -1287,15 +1298,11 @@ def select_anchor_points(
             SELECTED_ANCHOR_POINTS = sorted(anchor_points)
             with done2:
                 clear_output()
-                # If in the "try baselines" section, print the results. If not, save to 
-                # dataframe.
                 if try_it_out:
                     print(
                         f"DONE--Final selected anchor points: {SELECTED_ANCHOR_POINTS}"
                     )
                 else:
-                    # Save anchor points to Baseline Parameters for all rows with the 
-                    # same material
                     mat = row["Material"]
                     for idx, r in FTIR_dataframe.iterrows():
                         if r["Material"] == mat:
@@ -1307,20 +1314,6 @@ def select_anchor_points(
                         f"Baseline Function set to 'Manual' for material '{mat}'."
                     )
                     print(message)
-                    # --- Save DataFrame to CSV if dataframe_path is provided ---
-                    if dataframe_path:
-                        try:
-                            FTIR_dataframe.to_csv(dataframe_path, index=False)
-                            print(f"DataFrame saved to {dataframe_path}.")
-                        except Exception as e:
-                            message = (f"Warning: Could not save DataFrame to "
-                                f"{dataframe_path}: {e}"
-                            )
-                            print(message)
-                    else:
-                        print(
-                            "Warning: dataframe_path not provided. DataFrame not saved."
-                        )
             button_box2_out.clear_output()
 
         def redo2_callback(b):
