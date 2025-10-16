@@ -182,7 +182,9 @@ def _cast_parameter_types(function_name, parameters):
         if "pad_kwargs" in parameters:
             if parameters["pad_kwargs"] is not None:
                 try:
-                    parameters["pad_kwargs"] = ast.literal_eval(parameters["pad_kwargs"])
+                    parameters["pad_kwargs"] = ast.literal_eval(
+                        parameters["pad_kwargs"]
+                    )
                 except Exception:
                     pass
     return parameters
@@ -865,7 +867,9 @@ def try_baseline(
             baseline = np.asarray(baseline)
             y_arr = np.asarray(y)
             if baseline.shape != y_arr.shape:
-                print(f"Error: Baseline shape {baseline.shape} does not match data shape {y_arr.shape}.")
+                message = (f"Error: Baseline shape {baseline.shape} does not match data"
+                           f" shape {y_arr.shape}.")
+                print(message)
                 return
             baseline_corrected = y_arr - baseline
 
@@ -1082,8 +1086,8 @@ def bring_in_dataframe(dataframe_path=None):
         )  # Create a new empty DataFrame if it doesn't exist
     return FTIR_dataframe
 
-def select_anchor_points(
-    FTIR_dataframe, material=None, filepath=None, try_it_out=True, dataframe_path=None
+def anchor_points_selection(
+    FTIR_dataframe, material=None, filepath=None, try_it_out=True
 ):
     """
     Interactively select anchor points for FTIR baseline correction.
