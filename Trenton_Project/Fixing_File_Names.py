@@ -140,7 +140,7 @@ def batch_rename_files(
             character_to_use = input(
                 "Enter the separator to use instead of spaces (e.g. _): "
             ).strip()
-        print("Renaming files now!")
+        print("Replacing spaces now...")
         for root, dirs, files in os.walk(directory):
             for current_filename in files:
                 if " " in current_filename:
@@ -149,7 +149,7 @@ def batch_rename_files(
                     new_filepath = os.path.join(root, new_filename)
                     print(f"Renaming: {old_filepath} to {new_filepath}")
                     os.rename(old_filepath, new_filepath)
-        print("File renaming complete.")
+        print("Space replacement complete.")
     else:
         print("No spaces will be replaced in filenames.")
 

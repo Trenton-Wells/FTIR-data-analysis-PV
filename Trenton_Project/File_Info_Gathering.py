@@ -6,8 +6,8 @@
 
 # This script gathers basic spectra file information from a specified root directory 
 # and its subdirectories, extracting details from filenames and parent folder names to 
-# create a structured dataframe.
-# The dataframe includes columns for file location, file name, date of scan, 
+# create a structured DataFrame.
+# The DataFrame includes columns for file location, file name, date of scan, 
 # conditions, material, and time(duration).
 # General usage note: Avoid using separators that are part of material or condition 
 # terms, and avoid using extensions that are part of material or condition terms.
@@ -47,7 +47,7 @@ def find_term(term, text):
 
 
 def _gather_file_info(
-    FTIR_dataframe,
+    FTIR_DataFrame,
     file_types,
     separators,
     material_terms,
@@ -59,14 +59,14 @@ def _gather_file_info(
     """
     Gather file information from a specified root directory and its subdirectories.
     
-    Helps file_info_extractor() create a structured dataframe by extracting details
+    Helps file_info_extractor() create a structured DataFrame by extracting details
     from filenames and parent folder names.
     If "ignore" is in the filename, the file will be skipped.
 
     Parameters:
     -----------
-    FTIR_dataframe : pd.DataFrame
-        The existing dataframe to append new data to.
+    FTIR_DataFrame : pd.DataFrame
+        The existing DataFrame to append new data to.
     file_types : list of str
         List of file extensions to consider (e.g., ['.csv', '.0', '.dpt']).
     separators : list of str
@@ -86,14 +86,14 @@ def _gather_file_info(
     data = []
     grouped_files = {}
     # Build set of processed files
-    # This prevents re-processing files that are already in the dataframe
+    # This prevents re-processing files that are already in the DataFrame
     processed_files = set()
-    for _, row in FTIR_dataframe.iterrows():
+    for _, row in FTIR_DataFrame.iterrows():
         processed_files.add((row["File Location"], row["File Name"]))
     for file_path, _, filenames in os.walk(directory):
         parent_folder = os.path.basename(file_path)
         for filename in filenames:
-            # Skip files already in dataframe
+            # Skip files already in DataFrame
             if (file_path, filename) in processed_files:
                 continue
             first_column_list = []
@@ -257,7 +257,7 @@ def _gather_file_info(
 
 
 def file_info_extractor(
-    FTIR_dataframe,
+    FTIR_DataFrame,
     file_types=None,
     separators=None,
     material_terms=None,
@@ -267,15 +267,15 @@ def file_info_extractor(
     track_replicates=False,
 ):
     """
-    Use file info to create or update a structured dataframe of scan details.
+    Use file info to create or update a structured DataFrame of scan details.
     
-    Main function to gather file information and update the provided FTIR_dataframe in 
+    Main function to gather file information and update the provided FTIR_DataFrame in 
     memory.
 
     Parameters:
     -----------
-    FTIR_dataframe : pd.DataFrame
-        The existing dataframe to append new data to (will be updated in memory).
+    FTIR_DataFrame : pd.DataFrame
+        The existing DataFrame to append new data to (will be updated in memory).
     file_types : str or None
         Comma-separated string of file extensions to consider (e.g. '.csv,.0,.dpt'). If 
         None, prompts user for input.
@@ -297,8 +297,8 @@ def file_info_extractor(
 
     Returns:
     --------
-    FTIR_dataframe : pd.DataFrame
-        The updated dataframe with new file info appended.
+    FTIR_DataFrame : pd.DataFrame
+        The updated DataFrame with new file info appended.
     """
     # Ensure required columns exist
     required_columns = [
@@ -318,8 +318,8 @@ def file_info_extractor(
         "Normalized and Corrected Data",
     ]
     for column in required_columns:
-        if column not in FTIR_dataframe.columns:
-            FTIR_dataframe[column] = None
+        if column not in FTIR_DataFrame.columns:
+            FTIR_DataFrame[column] = None
 
     # Cast columns to correct dtype
     # String columns
@@ -333,19 +333,19 @@ def file_info_extractor(
         "Baseline Parameters",
     ]
     for col in string_cols:
-        if col in FTIR_dataframe.columns:
-            FTIR_dataframe[col] = FTIR_dataframe[col].astype("string")
+        if col in FTIR_DataFrame.columns:
+            FTIR_DataFrame[col] = FTIR_DataFrame[col].astype("string")
 
     # Integer columns
-    if "Time" in FTIR_dataframe.columns:
-        FTIR_dataframe["Time"] = pd.to_numeric(
-            FTIR_dataframe["Time"], errors="coerce"
+    if "Time" in FTIR_DataFrame.columns:
+        FTIR_DataFrame["Time"] = pd.to_numeric(
+            FTIR_DataFrame["Time"], errors="coerce"
         ).astype("Int64")
 
     # Float columns
-    if "Normalization Peak Wavenumber" in FTIR_dataframe.columns:
-        FTIR_dataframe["Normalization Peak Wavenumber"] = pd.to_numeric(
-            FTIR_dataframe["Normalization Peak Wavenumber"], errors="coerce"
+    if "Normalization Peak Wavenumber" in FTIR_DataFrame.columns:
+        FTIR_DataFrame["Normalization Peak Wavenumber"] = pd.to_numeric(
+            FTIR_DataFrame["Normalization Peak Wavenumber"], errors="coerce"
         ).astype("float")
 
     # Columns that are lists of floats (leave as object, but ensure lists of floats)
@@ -357,7 +357,7 @@ def file_info_extractor(
         "Normalized and Corrected Data",
     ]
     for col in list_float_cols:
-        if col in FTIR_dataframe.columns:
+        if col in FTIR_DataFrame.columns:
 
             def to_float_list(val):
                 if isinstance(val, list):
@@ -375,11 +375,11 @@ def file_info_extractor(
 
                 return val
 
-            FTIR_dataframe[col] = FTIR_dataframe[col].apply(to_float_list)
+            FTIR_DataFrame[col] = FTIR_DataFrame[col].apply(to_float_list)
 
-    # Option for if dataframe should append rows with missing values or not
+    # Option for if DataFrame should append rows with missing values or not
     if append_missing is None:
-        message = (f"Do you want to append rows with missing values into the dataframe?"
+        message = (f"Do you want to append rows with missing values into the DataFrame?"
                    f" (y/n): "
                    )
         append_missing = (
@@ -438,7 +438,7 @@ def file_info_extractor(
 
     # Gather new file info
     data, grouped_files = _gather_file_info(
-        FTIR_dataframe=FTIR_dataframe,
+        FTIR_DataFrame=FTIR_DataFrame,
         file_types=file_types,
         separators=separators,
         material_terms=material_terms,
@@ -448,16 +448,16 @@ def file_info_extractor(
         track_replicates=track_replicates,
     )
 
-    # Append new data to FTIR_dataframe
+    # Append new data to FTIR_DataFrame
     if data:
         new_data = pd.DataFrame(data)
-        FTIR_dataframe = pd.concat([FTIR_dataframe, new_data], ignore_index=True)
-        FTIR_dataframe.drop_duplicates(
+        FTIR_DataFrame = pd.concat([FTIR_DataFrame, new_data], ignore_index=True)
+        FTIR_DataFrame.drop_duplicates(
             subset=["File Location", "File Name"], inplace=True
         )
-        FTIR_dataframe.reset_index(drop=True, inplace=True)
+        FTIR_DataFrame.reset_index(drop=True, inplace=True)
 
-    return FTIR_dataframe
+    return FTIR_DataFrame
 
 
 # General Use:

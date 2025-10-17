@@ -190,13 +190,13 @@ def _cast_parameter_types(function_name, parameters):
     return parameters
 
 
-def baseline_selection(FTIR_dataframe, materials=None, baseline_function=None):
+def baseline_selection(FTIR_DataFrame, materials=None, baseline_function=None):
     """
     Set the baseline function for specified materials in the DataFrame.
 
     Parameters
     ----------
-    FTIR_dataframe : pd.DataFrame
+    FTIR_DataFrame : pd.DataFrame
         The DataFrame containing the spectral data.
     materials : list, optional
         List of material names to apply the baseline function to.
@@ -225,19 +225,19 @@ def baseline_selection(FTIR_dataframe, materials=None, baseline_function=None):
         ).strip()
 
     for material in materials:
-        mask = FTIR_dataframe["Material"] == material
-        FTIR_dataframe.loc[mask, "Baseline Function"] = baseline_function
+        mask = FTIR_DataFrame["Material"] == material
+        FTIR_DataFrame.loc[mask, "Baseline Function"] = baseline_function
         print(f"Applied baseline function {baseline_function} to material: {material}")
 
-    return FTIR_dataframe
+    return FTIR_DataFrame
 
-def parameter_selection(FTIR_dataframe, materials=None, parameters=None):
+def parameter_selection(FTIR_DataFrame, materials=None, parameters=None):
     """
     Set the baseline parameters for specified materials in the DataFrame.
 
     Parameters
     ----------
-    FTIR_dataframe : pd.DataFrame
+    FTIR_DataFrame : pd.DataFrame
         The DataFrame containing the spectral data.
     materials : string, optional
         String of material names to apply the parameters to.
@@ -265,20 +265,20 @@ def parameter_selection(FTIR_dataframe, materials=None, parameters=None):
                    f"selected materials: ")
         parameters = input(message).strip()
     for material in materials:
-        mask = FTIR_dataframe["Material"] == material
-        FTIR_dataframe.loc[mask, "Baseline Parameters"] = str(parameters)
+        mask = FTIR_DataFrame["Material"] == material
+        FTIR_DataFrame.loc[mask, "Baseline Parameters"] = str(parameters)
         print(f"Applied parameters {parameters} to material: {material}")
 
-    return FTIR_dataframe
+    return FTIR_DataFrame
 
 
-def baseline_correction(FTIR_dataframe):
+def baseline_correction(FTIR_DataFrame):
     """
-    Apply baseline correction to the dataframe.
+    Apply baseline correction to the DataFrame.
 
     Parameters
     ----------
-    dataframe_path : str
+    DataFrame_path : str
         The path to the CSV file to modify.
 
     Returns
@@ -287,12 +287,12 @@ def baseline_correction(FTIR_dataframe):
         The updated DataFrame.
     """
     # Add new columns for Baseline Function and Parameters if they don't exist
-    if "Baseline" not in FTIR_dataframe.columns:
-        FTIR_dataframe["Baseline"] = None
-    if "Corrected" not in FTIR_dataframe.columns:
-        FTIR_dataframe["Corrected"] = None
+    if "Baseline" not in FTIR_DataFrame.columns:
+        FTIR_DataFrame["Baseline"] = None
+    if "Corrected" not in FTIR_DataFrame.columns:
+        FTIR_DataFrame["Corrected"] = None
 
-    for idx, row in FTIR_dataframe.iterrows():
+    for idx, row in FTIR_DataFrame.iterrows():
         baseline_name = row["Baseline Function"]
         parameter_dictionary = (
             ast.literal_eval(row["Baseline Parameters"])
@@ -348,21 +348,21 @@ def baseline_correction(FTIR_dataframe):
         # Cast all baseline values to float before saving
         if baseline is not None:
             baseline_floats = [float(val) for val in baseline]
-            FTIR_dataframe.at[idx, "Baseline"] = baseline_floats
+            FTIR_DataFrame.at[idx, "Baseline"] = baseline_floats
         else:
-            FTIR_dataframe.at[idx, "Baseline"] = None
+            FTIR_DataFrame.at[idx, "Baseline"] = None
         # Cast all corrected values to float before saving
         if baseline_corrected is not None:
             corrected_floats = [float(val) for val in baseline_corrected]
-            FTIR_dataframe.at[idx, "Corrected"] = corrected_floats
+            FTIR_DataFrame.at[idx, "Corrected"] = corrected_floats
         else:
-            FTIR_dataframe.at[idx, "Corrected"] = None
+            FTIR_DataFrame.at[idx, "Corrected"] = None
 
-    return FTIR_dataframe
+    return FTIR_DataFrame
 
 
 def plot_grouped_spectra(
-    FTIR_dataframe,
+    FTIR_DataFrame,
     materials,
     conditions,
     times,
@@ -380,7 +380,7 @@ def plot_grouped_spectra(
 
     Parameters
     ----------
-    FTIR_dataframe : pd.DataFrame
+    FTIR_DataFrame : pd.DataFrame
         The DataFrame containing the spectral data.
     material : str, list, or 'any'
         The material(s) to filter by, or 'any' to include all.
@@ -409,13 +409,13 @@ def plot_grouped_spectra(
     """
 
     # Parse comma-separated strings into lists, handle 'any' (case-insensitive)
-    mask = pd.Series([True] * len(FTIR_dataframe))
+    mask = pd.Series([True] * len(FTIR_DataFrame))
     if isinstance(materials, str) and materials.strip().lower() != "any":
         material_list = [m.strip() for m in materials.split(",") if m.strip()]
-        mask &= FTIR_dataframe["Material"].isin(material_list)
+        mask &= FTIR_DataFrame["Material"].isin(material_list)
     if isinstance(conditions, str) and conditions.strip().lower() != "any":
         condition_list = [c.strip() for c in conditions.split(",") if c.strip()]
-        mask &= FTIR_dataframe["Conditions"].isin(condition_list)
+        mask &= FTIR_DataFrame["Conditions"].isin(condition_list)
     if isinstance(times, str) and times.strip().lower() != "any":
         # Try to convert to int if possible, else keep as string
         time_list = []
@@ -426,8 +426,8 @@ def plot_grouped_spectra(
                     time_list.append(int(t))
                 except ValueError:
                     time_list.append(t)
-        mask &= FTIR_dataframe["Time"].isin(time_list)
-    filtered_data = FTIR_dataframe[mask]
+        mask &= FTIR_DataFrame["Time"].isin(time_list)
+    filtered_data = FTIR_DataFrame[mask]
 
     # If not including replicates, keep only the first member of each (Material, 
     # Conditions, Time) group
@@ -598,7 +598,7 @@ def plot_grouped_spectra(
 
 
 def try_baseline(
-    FTIR_dataframe,
+    FTIR_DataFrame,
     material=None,
     baseline_function=None,
     parameter_string=None,
@@ -612,7 +612,7 @@ def try_baseline(
 
     Parameters
     ----------
-    FTIR_dataframe (pd.DataFrame): The in-memory DataFrame containing all spectra.
+    FTIR_DataFrame (pd.DataFrame): The in-memory DataFrame containing all spectra.
     material (str, optional): Material name to analyze (ignored if filepath is 
         provided).
     baseline_function (str): Baseline function to use ('ARPLS', 'IRSQR', 'FABC').
@@ -631,12 +631,12 @@ def try_baseline(
     if filepath is not None:
         if os.path.sep in filepath:
             folder, fname = os.path.split(filepath)
-            filtered = FTIR_dataframe[
-                (FTIR_dataframe["File Location"] == folder)
-                & (FTIR_dataframe["File Name"] == fname)
+            filtered = FTIR_DataFrame[
+                (FTIR_DataFrame["File Location"] == folder)
+                & (FTIR_DataFrame["File Name"] == fname)
             ]
         else:
-            filtered = FTIR_dataframe[FTIR_dataframe["File Name"] == filepath]
+            filtered = FTIR_DataFrame[FTIR_DataFrame["File Name"] == filepath]
         if filtered.empty:
             raise ValueError(f"No entry found for file '{filepath}'.")
         row = filtered.iloc[0]
@@ -644,8 +644,8 @@ def try_baseline(
     else:
         if material is None:
             raise ValueError("Material must be specified if filepath is not provided.")
-        filtered = FTIR_dataframe[
-            (FTIR_dataframe["Material"] == material) & (FTIR_dataframe["Time"] == 0)
+        filtered = FTIR_DataFrame[
+            (FTIR_DataFrame["Material"] == material) & (FTIR_DataFrame["Time"] == 0)
         ]
         if filtered.empty:
             raise ValueError(
@@ -939,7 +939,7 @@ def try_baseline(
         _plot_baseline()
 
 
-def test_baseline_choices(FTIR_dataframe, material=None):
+def test_baseline_choices(FTIR_DataFrame, material=None):
     """
     Plot three random spectra for a given material, showing baseline results. 
     
@@ -949,7 +949,7 @@ def test_baseline_choices(FTIR_dataframe, material=None):
 
     Parameters
     ----------
-    FTIR_dataframe : pd.DataFrame
+    FTIR_DataFrame : pd.DataFrame
         The DataFrame containing the spectral data.
     material : str
         The material to filter and plot.
@@ -963,7 +963,7 @@ def test_baseline_choices(FTIR_dataframe, material=None):
             "Enter the material to test baseline and parameter choices for: "
         ).strip()
     # Filter for the specified material
-    filtered = FTIR_dataframe[FTIR_dataframe["Material"] == material]
+    filtered = FTIR_DataFrame[FTIR_DataFrame["Material"] == material]
     if len(filtered) < 1:
         print(f"No rows found for material '{material}'.")
         return
@@ -1057,15 +1057,15 @@ def test_baseline_choices(FTIR_dataframe, material=None):
     plt.show()
 
 
-def bring_in_dataframe(dataframe_path=None):
+def bring_in_DataFrame(DataFrame_path=None):
     """
     Load the CSV file into a pandas DataFrame.
 
-    Allows for easy dataframe manipulation in memory over the course of the analysis.
+    Allows for easy DataFrame manipulation in memory over the course of the analysis.
 
     Parameters
     ----------
-    dataframe_path : str
+    DataFrame_path : str
         The path to the CSV file.
 
     Returns
@@ -1073,21 +1073,21 @@ def bring_in_dataframe(dataframe_path=None):
     pd.DataFrame
         The loaded DataFrame.
     """
-    if dataframe_path is None:
-        dataframe_path = "FTIR_dataframe.csv"  # Default path if none is provided (will 
+    if DataFrame_path is None:
+        DataFrame_path = "FTIR_DataFrame.csv"  # Default path if none is provided (will 
         # be in active directory)
-    if os.path.exists(dataframe_path):
-        FTIR_dataframe = pd.read_csv(
-            dataframe_path
+    if os.path.exists(DataFrame_path):
+        FTIR_DataFrame = pd.read_csv(
+            DataFrame_path
         )  # Load the DataFrame from the specified path
     else:
-        FTIR_dataframe = (
+        FTIR_DataFrame = (
             pd.DataFrame()
         )  # Create a new empty DataFrame if it doesn't exist
-    return FTIR_dataframe
+    return FTIR_DataFrame
 
 def anchor_points_selection(
-    FTIR_dataframe, material=None, filepath=None, try_it_out=True
+    FTIR_DataFrame, material=None, filepath=None, try_it_out=True
 ):
     """
     Interactively select anchor points for FTIR baseline correction.
@@ -1099,7 +1099,7 @@ def anchor_points_selection(
 
     Parameters
     ----------
-    FTIR_dataframe : pd.DataFrame
+    FTIR_DataFrame : pd.DataFrame
         The DataFrame containing the spectral data.
     material : str, optional
         Material name to analyze (ignored if filepath is provided).
@@ -1108,14 +1108,14 @@ def anchor_points_selection(
     try_it_out : bool, optional
         If True, only prints the anchor points (default). If False, saves anchor points 
         to 'Baseline Parameters' column for all rows with the same material.
-    dataframe_path : str, optional
+    DataFrame_path : str, optional
         Path to save the DataFrame as CSV if anchor points are saved (used only if 
         try_it_out is False).
 
     Returns
     -------
     None
-        The selected anchor points are stored in the dataframe under 'Baseline 
+        The selected anchor points are stored in the DataFrame under 'Baseline 
         Parameters'.
     """
     SELECTED_ANCHOR_POINTS = []
@@ -1127,20 +1127,20 @@ def anchor_points_selection(
 
         if os.path.sep in filepath:
             folder, fname = os.path.split(filepath)
-            filtered = FTIR_dataframe[
-                (FTIR_dataframe["File Location"] == folder)
-                & (FTIR_dataframe["File Name"] == fname)
+            filtered = FTIR_DataFrame[
+                (FTIR_DataFrame["File Location"] == folder)
+                & (FTIR_DataFrame["File Name"] == fname)
             ]
         else:
-            filtered = FTIR_dataframe[FTIR_dataframe["File Name"] == filepath]
+            filtered = FTIR_DataFrame[FTIR_DataFrame["File Name"] == filepath]
         if filtered.empty:
             raise ValueError(f"No entry found for file '{filepath}'.")
         row = filtered.iloc[0]
     else:
         if material is None:
             raise ValueError("Material must be specified if filepath is not provided.")
-        filtered = FTIR_dataframe[
-            (FTIR_dataframe["Material"] == material) & (FTIR_dataframe["Time"] == 0)
+        filtered = FTIR_DataFrame[
+            (FTIR_DataFrame["Material"] == material) & (FTIR_DataFrame["Time"] == 0)
         ]
         if filtered.empty:
             raise ValueError(
@@ -1308,12 +1308,12 @@ def anchor_points_selection(
                     )
                 else:
                     mat = row["Material"]
-                    for idx, r in FTIR_dataframe.iterrows():
+                    for idx, r in FTIR_DataFrame.iterrows():
                         if r["Material"] == mat:
-                            FTIR_dataframe.at[idx, "Baseline Parameters"] = str(
+                            FTIR_DataFrame.at[idx, "Baseline Parameters"] = str(
                                 SELECTED_ANCHOR_POINTS
                             )
-                            FTIR_dataframe.at[idx, "Baseline Function"] = "Manual"
+                            FTIR_DataFrame.at[idx, "Baseline Function"] = "Manual"
                     message = (f"Anchor points saved to Baseline Parameters and "
                         f"Baseline Function set to 'Manual' for material '{mat}'."
                     )
@@ -1390,3 +1390,392 @@ def anchor_points_selection(
     with button_box_out:
         display(button_box)
     return None
+
+def normalization_peak_selection(FTIR_DataFrame, material=None, filepath=None):
+    """
+    Interactively select and save a normalization peak range for FTIR spectra.
+
+    Plots either a predefined specific file (via filepath) or the first time-zero
+    file for a specified material. The user selects two points on the plot to define
+    an x-range (wavenumber window) for normalization. The selected range is printed
+    and can be saved to the DataFrame column 'Normalization Peak Wavenumber'.
+
+    Parameters
+    ----------
+    FTIR_DataFrame : pd.DataFrame
+        The DataFrame containing the spectral data.
+    material : str, optional
+        Material to visualize when filepath is not provided. The first Time == 0
+        entry for this material will be shown.
+    filepath : str, optional
+        A specific file to visualize, provided as a full path or just filename.
+
+    Returns
+    -------
+    pd.DataFrame
+        The updated DataFrame with the selected normalization peak range saved.
+    """
+
+    clear_output(wait=True)
+
+    # Ensure destination column exists
+    target_col = "Normalization Peak Wavenumber"
+    if target_col not in FTIR_DataFrame.columns:
+        FTIR_DataFrame[target_col] = None
+
+    # --- Select a single row by filepath or by (material, Time == 0) ---
+    if filepath is not None:
+        if os.path.sep in filepath:
+            folder, fname = os.path.split(filepath)
+            filtered = FTIR_DataFrame[
+                (FTIR_DataFrame["File Location"] == folder)
+                & (FTIR_DataFrame["File Name"] == fname)
+            ]
+        else:
+            filtered = FTIR_DataFrame[FTIR_DataFrame["File Name"] == filepath]
+        if filtered.empty:
+            raise ValueError(f"No entry found for file '{filepath}'.")
+        row = filtered.iloc[0]
+        material_name = row.get("Material", "Unknown")
+    else:
+        if material is None:
+            raise ValueError("Material must be specified if filepath is not provided.")
+        filtered = FTIR_DataFrame[
+            (FTIR_DataFrame["Material"] == material) & (FTIR_DataFrame["Time"] == 0)
+        ]
+        if filtered.empty:
+            raise ValueError(
+                f"No entry found for material '{material}' with time == 0."
+            )
+        row = filtered.iloc[0]
+        material_name = material
+
+    # --- Extract data ---
+    x_data = (
+        ast.literal_eval(row["X-Axis"])
+        if isinstance(row["X-Axis"], str)
+        else row["X-Axis"]
+    )
+    y_data = (
+        ast.literal_eval(row["Raw Data"])
+        if isinstance(row["Raw Data"], str)
+        else row["Raw Data"]
+    )
+
+    # --- Widgets and outputs ---
+    save_spec_btn = widgets.Button(
+        description="Save for this file", button_style="success"
+    )
+    save_mat_btn = widgets.Button(
+        description="Save for this material", button_style="info"
+    )
+    redo_btn = widgets.Button(description="Redo", button_style="warning")
+    cancel_btn = widgets.Button(description="Close", button_style="")
+    btn_box = widgets.HBox([save_spec_btn, save_mat_btn, redo_btn, cancel_btn])
+    info_out = widgets.Output()
+    msg_out = widgets.Output()
+
+    selected_points = []  # store up to two x positions
+    shaded_shape_id = "norm_range_rect"
+    first_vline_name = "norm_vline_first"  # visual indicator for first click
+
+    file_path = os.path.join(row.get("File Location", ""), row.get("File Name", ""))
+    with info_out:
+        print(f"Plotting: {file_path}")
+        print("Click two points to define the normalization range.")
+
+    # --- Build interactive figure ---
+    fig = go.FigureWidget(
+        data=[
+            go.Scatter(x=x_data, y=y_data, mode="lines", name="Raw Data"),
+        ]
+    )
+    fig.update_layout(
+        title=f"Select Normalization Range | Material: {material_name}",
+        xaxis_title="Wavenumber (cm⁻¹)",
+        yaxis_title="Absorbance (AU)",
+    )
+
+    def _clear_selection_visuals():
+        # remove all our shapes (simplest and robust)
+        fig.layout.shapes = ()
+
+    def _draw_first_click(x0: float):
+        # dotted vertical line to show first click registered
+        vline = dict(
+            type="line",
+            x0=x0, x1=x0,
+            y0=min(y_data), y1=max(y_data),
+            line=dict(color="red", dash="dot"),
+            name=first_vline_name,
+        )
+        fig.add_shape(vline)
+
+    def _draw_selection_visuals(x0, x1):
+        # vertical lines
+        vline1 = dict(
+            type="line", x0=x0, x1=x0, y0=min(y_data), y1=max(y_data),
+            line=dict(color="red", dash="dash"), name="norm_vline_1"
+        )
+        vline2 = dict(
+            type="line", x0=x1, x1=x1, y0=min(y_data), y1=max(y_data),
+            line=dict(color="red", dash="dash"), name="norm_vline_2"
+        )
+        # rectangle shading
+        rect = dict(
+            type="rect",
+            x0=min(x0, x1), x1=max(x0, x1),
+            y0=min(y_data), y1=max(y_data),
+            fillcolor="rgba(0,128,0,0.15)", line=dict(width=0),
+            layer="below", name=shaded_shape_id,
+        )
+        fig.add_shape(vline1)
+        fig.add_shape(vline2)
+        fig.add_shape(rect)
+
+    def _on_click(trace, points, selector):
+        if not points.xs:
+            return
+        x_val = float(points.xs[0])
+        # If already have two, start over with new first point
+        if len(selected_points) >= 2:
+            selected_points.clear()
+            _clear_selection_visuals()
+
+        selected_points.append(x_val)
+
+        if len(selected_points) == 1:
+            # show immediate visual feedback for first click
+            _clear_selection_visuals()
+            _draw_first_click(x_val)
+            with msg_out:
+                clear_output(wait=True)
+                print(f"First point set at x = {x_val:.3f} cm⁻¹. Click second point…")
+        elif len(selected_points) == 2:
+            x0, x1 = selected_points
+            _clear_selection_visuals()
+            _draw_selection_visuals(x0, x1)
+            with msg_out:
+                clear_output(wait=True)
+                lo, hi = (min(x0, x1), max(x0, x1))
+                print(f"Selected normalization range: [{lo:.3f}, {hi:.3f}] cm⁻¹")
+        else:
+            with msg_out:
+                clear_output(wait=True)
+                print(f"First point set at x = {x_val:.3f} cm⁻¹. Click second point…")
+
+    fig.data[0].on_click(_on_click)
+
+    def _current_range():
+        if len(selected_points) != 2:
+            return None
+        x0, x1 = selected_points
+        return [float(min(x0, x1)), float(max(x0, x1))]
+
+    def _finalize_and_clear():
+        # Detach callbacks and disable controls
+        try:
+            fig.data[0].on_click(None)
+        except Exception:
+            pass
+        for b in (save_spec_btn, save_mat_btn, redo_btn, cancel_btn):
+            b.disabled = True
+        # Clear any widget outputs
+        try:
+            info_out.clear_output()
+        except Exception:
+            pass
+        try:
+            msg_out.clear_output()
+        except Exception:
+            pass
+        # Completely clear the cell output so new interactive UIs can render safely
+        clear_output(wait=True)
+
+    def _save_for_this_spectrum(b):
+        rng = _current_range()
+        if rng is None:
+            with msg_out:
+                clear_output(wait=True)
+                print("Please select two points before saving.")
+            return
+        FTIR_DataFrame.at[row.name, target_col] = str(rng)
+        _finalize_and_clear()
+
+    def _save_for_this_material(b):
+        rng = _current_range()
+        if rng is None:
+            with msg_out:
+                clear_output(wait=True)
+                print("Please select two points before saving.")
+            return
+        mat = row.get("Material", None)
+        if mat is None:
+            with msg_out:
+                clear_output(wait=True)
+                print("Row has no 'Material' value; cannot save for material.")
+            return
+        mask = FTIR_DataFrame["Material"] == mat
+        FTIR_DataFrame.loc[mask, target_col] = str(rng)
+        _finalize_and_clear()
+
+    def _redo(b):
+        selected_points.clear()
+        _clear_selection_visuals()
+        with msg_out:
+            clear_output()
+            print("Selection cleared. Click two points to select a range.")
+
+    def _close(b):
+        _finalize_and_clear()
+
+    save_spec_btn.on_click(_save_for_this_spectrum)
+    save_mat_btn.on_click(_save_for_this_material)
+    redo_btn.on_click(_redo)
+    cancel_btn.on_click(_close)
+
+    # --- Initial display ---
+    display(fig, info_out, msg_out, btn_box)
+    return FTIR_DataFrame
+
+def spectrum_normalization(
+    FTIR_DataFrame,
+    material,
+):
+    """
+    Normalize baseline-corrected spectra.
+     
+    Normalizes the baseline-corrected spectra so the peak within the normalization range
+    is the same across all files of a material. Uses the largest peak among the group
+    as the target (e.g., if peaks are 10 and 5, the second is doubled).
+
+    Parameters
+    ----------
+    FTIR_DataFrame : pd.DataFrame
+        DataFrame containing spectra.
+    material : str
+        Material to normalize.
+
+    Returns
+    -------
+    pd.DataFrame
+        Updated DataFrame with normalized values written back to source_col.
+    """
+    if FTIR_DataFrame is None:
+        raise ValueError("FTIR_DataFrame must be loaded in.")
+    if material is None or str(material).strip() == "":
+        raise ValueError("material is required.")
+
+    source_column = "Baseline-Corrected Data"
+    range_column = "Normalization Peak Wavenumber"
+
+    subset = FTIR_DataFrame[FTIR_DataFrame["Material"] == material]
+    if subset.empty:
+        raise ValueError(f"No rows found for material '{material}'.")
+
+    # Determine x-axis column
+    x_axis_column = "X-Axis" if "X-Axis" in FTIR_DataFrame.columns else None
+    if x_axis_column is None:
+        raise ValueError(
+            f"No 'X-Axis' column found in FTIR_DataFrame. Ensure the DataFrame is "
+            f"loaded correctly."
+        )
+
+    # Collect per-row peak within normalization window
+    per_row_peak = {}
+    parsed_rows = {}
+
+    for idx, row in subset.iterrows():
+        norm_range = row.get(range_column, None)
+        if norm_range is None:
+            raise ValueError(
+                f"Row {idx} missing normalization range in column '{range_column}'. "
+                f"Ensure it is set before normalization."
+            )
+        # Parse normalization range
+        if isinstance(norm_range, str):
+            try:
+                norm_range = ast.literal_eval(norm_range)
+            except Exception:
+                raise ValueError(
+                    f"Row {idx} has invalid normalization range string: '{norm_range}'."
+                )
+        if not isinstance(norm_range, (list, tuple)) or len(norm_range) != 2:
+            raise ValueError(
+                f"Row {idx} has invalid normalization range: '{norm_range}'. "
+                f"Expected a list or tuple of two numeric values."
+            )
+        try:
+            lo, hi = float(norm_range[0]), float(norm_range[1])
+        except Exception:
+            raise ValueError(
+                f"Row {idx} has non-numeric values in normalization range: '{norm_range}'."
+            )
+        x = row.get(x_axis_column, None)
+        y = row.get(source_column, None)
+        if x is None or y is None:
+            continue
+        if isinstance(x, str):
+            try:
+                x = ast.literal_eval(x)
+            except Exception:
+                continue
+        if isinstance(y, str):
+            try:
+                y = ast.literal_eval(y)
+            except Exception:
+                continue
+        if x is None or y is None:
+            continue
+        try:
+            x_arr = np.asarray(x, dtype=float)
+            y_arr = np.asarray(y, dtype=float)
+        except Exception:
+            continue
+        if x_arr.shape[0] != y_arr.shape[0] or x_arr.ndim != 1:
+            continue
+
+        # Indices inside [lo, hi] regardless of axis order
+        lo_, hi_ = min(lo, hi), max(lo, hi)
+        mask = (x_arr >= lo_) & (x_arr <= hi_)
+        if not np.any(mask):
+            continue
+
+        local_peak = np.nanmax(y_arr[mask])
+        if not np.isfinite(local_peak):
+            continue
+
+        per_row_peak[idx] = float(local_peak)
+        parsed_rows[idx] = (y_arr,)
+
+    if not per_row_peak:
+        raise ValueError(
+            f"No valid normalization ranges/data for material '{material}'. "
+            f"Ensure '{range_column}' is set and '{source_column}' exists."
+        )
+
+    target_peak = max(per_row_peak.values())
+    if target_peak == 0 or target_peak < 0:
+        raise ValueError(
+            f"Target peak within normalization range is zero or negative; cannot "
+            f"normalize."
+        )
+
+    updated = 0
+    for idx, row_peak in per_row_peak.items():
+        if row_peak <= 0:
+            raise ValueError(
+                f"Row {idx} has non-positive peak {row_peak:.6g}; cannot normalize."
+            )
+        scale = target_peak / row_peak
+        # Retrieve original y_arr again (already parsed)
+        y_arr = parsed_rows[idx][0]
+        y_scaled = (y_arr * scale).astype(float).tolist()
+        FTIR_DataFrame.at[idx, source_column] = y_scaled
+        updated += 1
+
+    print(
+        f"Normalized material '{material}' using target peak {target_peak:.6g} "
+        f"from {len(per_row_peak)} files; updated {updated} files."
+    )
+    return FTIR_DataFrame
