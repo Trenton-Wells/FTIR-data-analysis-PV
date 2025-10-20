@@ -18,6 +18,7 @@ import os
 import re
 import pandas as pd
 import numpy as np
+import ast
 
 
 def find_term(term, text):
@@ -54,6 +55,7 @@ def _gather_file_info(
     conditions_terms,
     directory,
     append_missing,
+    access_subdirectories=True,
     track_replicates=False,
 ):
     """
@@ -78,6 +80,10 @@ def _gather_file_info(
         List of condition terms to search for in filenames and folder names.
     directory : str
         The root directory to scan.
+    access_subdirectories : bool, optional
+        When False, only descend into immediate subfolders of 'directory' whose
+        names contain a date label (MM-DD-YYYY or YYYY-MM-DD). Files in the root
+        directory are still scanned. Default is True (descend into all subfolders).
     track_replicates : bool, optional
         Whether to print groups of replicate files. Default is False.
     """
@@ -90,7 +96,13 @@ def _gather_file_info(
     processed_files = set()
     for _, row in FTIR_DataFrame.iterrows():
         processed_files.add((row["File Location"], row["File Name"]))
-    for file_path, _, filenames in os.walk(directory):
+    for file_path, dirnames, filenames in os.walk(directory):
+        # Optionally restrict traversal to only date-labeled immediate subfolders
+        if not access_subdirectories:
+            # Only filter when we are at the root directory level
+            if os.path.normpath(file_path) == os.path.normpath(directory):
+                date_regex = re.compile(r"(\d{2}-\d{2}-\d{4}|\d{4}-\d{2}-\d{2})")
+                dirnames[:] = [d for d in dirnames if date_regex.search(d)]
         parent_folder = os.path.basename(file_path)
         for filename in filenames:
             # Skip files already in DataFrame
@@ -264,6 +276,7 @@ def file_info_extractor(
     conditions_terms=None,
     directory=None,
     append_missing=None,
+    access_subdirectories=True,
     track_replicates=False,
 ):
     """
@@ -292,6 +305,10 @@ def file_info_extractor(
         The root directory to scan. If None, prompts user for input.
     append_missing : bool or None
         Whether to append rows with missing values. If None, prompts user for input.
+    access_subdirectories : bool or None
+        If False, only descend into immediate subfolders of 'directory' whose names
+        contain a date label (MM-DD-YYYY or YYYY-MM-DD). If None, prompts user for
+        input. Default is True.
     track_replicates : bool or None
         Whether to print groups of replicate files. If None, prompts user for input.
 
@@ -342,6 +359,20 @@ def file_info_extractor(
             FTIR_DataFrame["Time"], errors="coerce"
         ).astype("Int64")
 
+    # Dictionary columns
+    if "Baseline Parameters" in FTIR_DataFrame.columns:
+        def _to_dict(val):
+            if isinstance(val, dict) or pd.isnull(val):
+                return val
+            if isinstance(val, str):
+                try:
+                    parsed = ast.literal_eval(val)
+                    if isinstance(parsed, dict):
+                        return parsed
+                except Exception:
+                    pass
+            return val
+        FTIR_DataFrame["Baseline Parameters"] = FTIR_DataFrame["Baseline Parameters"].apply(_to_dict)
     # Float columns
     if "Normalization Peak Wavenumber" in FTIR_DataFrame.columns:
         FTIR_DataFrame["Normalization Peak Wavenumber"] = pd.to_numeric(
@@ -388,6 +419,14 @@ def file_info_extractor(
             .lower()
         )
         append_missing = True if append_missing == "y" else False
+
+    # Option for whether to access non-date-labeled subdirectories
+    if access_subdirectories is None:
+        message = (
+            "Limit scan to only subfolders with date labels (MM-DD-YYYY or YYYY-MM-DD)? (y/n): "
+        )
+        resp = input(message).strip().lower()
+        access_subdirectories = False if resp == "y" else True
 
     # Get file types
     if file_types is None:
@@ -445,6 +484,7 @@ def file_info_extractor(
         conditions_terms=conditions_terms,
         directory=directory,
         append_missing=append_missing,
+        access_subdirectories=access_subdirectories,
         track_replicates=track_replicates,
     )
 

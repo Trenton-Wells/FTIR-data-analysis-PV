@@ -910,8 +910,8 @@ def try_baseline(
             def make_reset_func(w, default_val):
                 return lambda b: setattr(w, 'value', default_val)
             reset_btn.on_click(make_reset_func(widget, reset_value))
-            row = widgets.HBox([widget, reset_btn])
-            widget_rows.append(row)
+            widget_row = widgets.HBox([widget, reset_btn])
+            widget_rows.append(widget_row)
 
         # Add a 'Reset All' button beneath the individual reset buttons
         reset_all_btn = widgets.Button(
@@ -927,13 +927,144 @@ def try_baseline(
                     widget.value = defaults[key]
         reset_all_btn.on_click(reset_all_callback)
 
-        ui = widgets.VBox(widget_rows + [reset_all_btn])
+        # Helper to gather current parameter values (widgets + any non-widget ones)
+        def _current_param_values():
+            current = parameters.copy()
+            for k, w in param_widgets.items():
+                current[k] = w.value
+            return _cast_parameter_types(baseline_function, current)
+
+        # Save buttons to persist choices
+        save_file_btn = widgets.Button(
+            description="Save for file & close",
+            button_style="success",
+            layout=widgets.Layout(margin="10px 10px 0 0")
+        )
+        save_material_btn = widgets.Button(
+            description="Save for material & close",
+            button_style="info",
+            layout=widgets.Layout(margin="10px 10px 0 0")
+        )
+
+        def _serialize_params(d):
+            # Ensure plain Python types for safe storage/round-trip via ast.literal_eval
+            def to_plain(v):
+                try:
+                    import numpy as _np
+                    if isinstance(v, (_np.integer,)):
+                        return int(v)
+                    if isinstance(v, (_np.floating,)):
+                        return float(v)
+                    if isinstance(v, _np.ndarray):
+                        return v.tolist()
+                except Exception:
+                    pass
+                return v
+            return {k: to_plain(v) for k, v in d.items()}
+
+        # Finalize routine: disable/close all widgets and clear outputs to avoid UID errors
+        def _finalize_and_close(container_widget=None):
+            try:
+                for w in param_widgets.values():
+                    try:
+                        w.disabled = True
+                    except Exception:
+                        pass
+                for btn in (save_file_btn, save_material_btn, reset_all_btn):
+                    try:
+                        btn.disabled = True
+                    except Exception:
+                        pass
+                # Close widgets to free comms (prevents duplicate UID issues)
+                try:
+                    for w in param_widgets.values():
+                        w.close()
+                except Exception:
+                    pass
+                try:
+                    save_file_btn.close(); save_material_btn.close(); reset_all_btn.close()
+                except Exception:
+                    pass
+                # Close interactive binding and its output widget if present
+                try:
+                    widget_func.close()
+                except Exception:
+                    pass
+                try:
+                    output.clear_output()
+                    output.close()
+                except Exception:
+                    pass
+                try:
+                    import matplotlib.pyplot as _plt
+                    _plt.close('all')
+                except Exception:
+                    pass
+                if container_widget is not None:
+                    try:
+                        container_widget.close()
+                    except Exception:
+                        pass
+            finally:
+                pass
+
+        def on_save_for_file(b):
+            param_vals = _serialize_params(_current_param_values())
+            # Persist to the accessed row
+            FTIR_DataFrame.at[row.name, "Baseline Function"] = str(baseline_function).upper()
+            FTIR_DataFrame.at[row.name, "Baseline Parameters"] = str(param_vals)
+            # Close UI after saving to avoid UID errors on reruns, then show summary using a fresh Output
+            _finalize_and_close(container_widget=container)
+            summary_out = widgets.Output()
+            display(summary_out)
+            with summary_out:
+                try:
+                    _file_path = os.path.join(row.get("File Location", ""), row.get("File Name", ""))
+                except Exception:
+                    _file_path = row.get("File Name", "")
+                print("Saved baseline settings for this file:")
+                print(f" - File: {_file_path} (row index: {row.name})")
+                print(f" - Baseline Function: {str(baseline_function).upper()}")
+                print(f" - Parameters: {param_vals}")
+
+        def on_save_for_material(b):
+            param_vals = _serialize_params(_current_param_values())
+            mat_val = row.get("Material", material)
+            if mat_val is None:
+                mat_val = material
+            mask = FTIR_DataFrame["Material"] == mat_val
+            FTIR_DataFrame.loc[mask, "Baseline Function"] = str(baseline_function).upper()
+            FTIR_DataFrame.loc[mask, "Baseline Parameters"] = str(param_vals)
+            # Close UI after saving to avoid UID errors on reruns, then show summary using a fresh Output
+            _finalize_and_close(container_widget=container)
+            summary_out = widgets.Output()
+            display(summary_out)
+            with summary_out:
+                try:
+                    _count = int(mask.sum())
+                except Exception:
+                    _count = None
+                print("Saved baseline settings for this material:")
+                print(f" - Material: {mat_val}")
+                if _count is not None:
+                    print(f" - Rows updated: {_count}")
+                print(f" - Baseline Function: {str(baseline_function).upper()}")
+                print(f" - Parameters: {param_vals}")
+
+        save_file_btn.on_click(on_save_for_file)
+        save_material_btn.on_click(on_save_for_material)
+
+        # Place save buttons to the left of Reset All in a single row
+        controls_footer = widgets.HBox([save_file_btn, save_material_btn, reset_all_btn])
+        ui = widgets.VBox(widget_rows + [controls_footer])
         from functools import partial
 
         widget_func = widgets.interactive_output(
             _plot_baseline, {k: w for k, w in param_widgets.items()}
         )
-        display(widgets.HBox([ui, output]))
+        # Keep a handle to the displayed container so we can close it later
+        container = widgets.HBox([ui, output])
+        display(container)
     else:
         # No parameters to edit, just plot once
         _plot_baseline()
@@ -989,16 +1120,8 @@ def test_baseline_choices(FTIR_DataFrame, material=None):
         )
         y = np.array(y, dtype=float)
         baseline_func = row.get("Baseline Function", None)
-        param_str = row.get("Baseline Parameters", None)
-        if param_str:
-            try:
-                if isinstance(param_str, dict):
-                    params = param_str
-                else:
-                    params = ast.literal_eval(param_str)
-            except Exception:
-                params = {}
-        else:
+        params = row.get("Baseline Parameters", {})
+        if not isinstance(params, dict):
             params = {}
 
         # Compute baseline
@@ -1030,6 +1153,8 @@ def test_baseline_choices(FTIR_DataFrame, material=None):
             baseline_corrected = y - baseline
         except Exception as e:
             print(f"Error computing baseline for row {idx}: {e}")
+            print(f" - Baseline Function: {baseline_func}")
+            print(f" - Baseline Parameters: {params}")
             baseline = np.full_like(y, np.nan)
             baseline_corrected = np.full_like(y, np.nan)
 
@@ -1076,6 +1201,8 @@ def bring_in_DataFrame(DataFrame_path=None):
     if DataFrame_path is None:
         DataFrame_path = "FTIR_DataFrame.csv"  # Default path if none is provided (will 
         # be in active directory)
+    else:
+        pass
     if os.path.exists(DataFrame_path):
         FTIR_DataFrame = pd.read_csv(
             DataFrame_path
@@ -1084,7 +1211,7 @@ def bring_in_DataFrame(DataFrame_path=None):
         FTIR_DataFrame = (
             pd.DataFrame()
         )  # Create a new empty DataFrame if it doesn't exist
-    return FTIR_DataFrame
+    return FTIR_DataFrame, DataFrame_path
 
 def anchor_points_selection(
     FTIR_DataFrame, material=None, filepath=None, try_it_out=True
