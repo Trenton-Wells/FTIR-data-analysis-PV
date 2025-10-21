@@ -91,11 +91,34 @@ def _gather_file_info(
 
     data = []
     grouped_files = {}
+    print("Scanning directory for spectral files...")
     # Build set of processed files
     # This prevents re-processing files that are already in the DataFrame
     processed_files = set()
     for _, row in FTIR_DataFrame.iterrows():
         processed_files.add((row["File Location"], row["File Name"]))
+    # Pre-count candidate files for progress tracking
+    total_candidates = 0
+    for _file_path, _dirnames, _filenames in os.walk(directory):
+        if not access_subdirectories:
+            if os.path.normpath(_file_path) == os.path.normpath(directory):
+                date_regex = re.compile(r"(\d{2}-\d{2}-\d{4}|\d{4}-\d{2}-\d{2})")
+                _dirnames[:] = [d for d in _dirnames if date_regex.search(d)]
+        for _filename in _filenames:
+            # Apply the same core file filters as the main loop
+            if (_file_path, _filename) in processed_files:
+                continue
+            if _filename.startswith('.'):
+                continue
+            if 'ignore' in _filename.lower():
+                continue
+            if not any(_filename.lower().endswith(file_type.lower()) for file_type in file_types):
+                continue
+            total_candidates += 1
+    print(f"Found {total_candidates} spectral files to parse…")
+
+    parsed_count = 0
+
     for file_path, dirnames, filenames in os.walk(directory):
         # Optionally restrict traversal to only date-labeled immediate subfolders
         if not access_subdirectories:
@@ -120,6 +143,13 @@ def _gather_file_info(
                 filename.lower().endswith(file_type.lower()) for file_type in file_types
             ):
                 continue
+            # Update progress for each candidate file encountered
+            parsed_count += 1
+            # Print a single-line progress indicator
+            try:
+                print(f"\rParsed {parsed_count}/{total_candidates} files", end="", flush=True)
+            except Exception:
+                pass
             # Read first and second columns from the file, save as list of floats
             full_file_path = os.path.join(file_path, filename)
             try:
@@ -265,6 +295,12 @@ def _gather_file_info(
                 ]
                 print(f"Replicate group {group_key}: {formatted}")
 
+    # Finish progress line with newline for clean output
+    try:
+        print("\nDone parsing spectral files.")
+    except Exception:
+        pass
+
     return data, grouped_files
 
 
@@ -333,6 +369,8 @@ def file_info_extractor(
         "Baseline-Corrected Data",
         "Normalization Peak Wavenumber",
         "Normalized and Corrected Data",
+        "Peak Wavenumbers",
+        "Peak Absorbances"
     ]
     for column in required_columns:
         if column not in FTIR_DataFrame.columns:
@@ -386,6 +424,8 @@ def file_info_extractor(
         "Baseline",
         "Baseline-Corrected Data",
         "Normalized and Corrected Data",
+        "Peak Wavenumbers",
+        "Peak Absorbances"
     ]
     for col in list_float_cols:
         if col in FTIR_DataFrame.columns:
@@ -407,6 +447,20 @@ def file_info_extractor(
                 return val
 
             FTIR_DataFrame[col] = FTIR_DataFrame[col].apply(to_float_list)
+
+    # Ensure list-like columns are stored with object dtype (per-row lists)
+    try:
+        existing_list_cols = [c for c in list_float_cols if c in FTIR_DataFrame.columns]
+        if existing_list_cols:
+            FTIR_DataFrame[existing_list_cols] = FTIR_DataFrame[existing_list_cols].astype(object)
+    except Exception:
+        # Fallback: coerce individually if bulk coercion fails
+        for c in list_float_cols:
+            if c in FTIR_DataFrame.columns:
+                try:
+                    FTIR_DataFrame[c] = FTIR_DataFrame[c].astype(object)
+                except Exception:
+                    pass
 
     # Option for if DataFrame should append rows with missing values or not
     if append_missing is None:

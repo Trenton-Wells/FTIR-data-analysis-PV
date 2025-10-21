@@ -12,6 +12,7 @@ from pybaselines.spline import irsqr
 from pybaselines.classification import fabc
 from scipy.interpolate import CubicSpline
 from pybaselines.utils import optimize_window
+from scipy.signal import find_peaks
 import ast
 import random
 import ipywidgets as widgets
@@ -48,9 +49,9 @@ def _parse_parameters(parameter_str):
 
 def _get_default_parameters(function_name):
     """
-    Input the name of a baseline function and return its default parameters as a 
+    Input the name of a baseline function and return its default parameters as a
     dictionary.
-    
+
     Parameters
     ----------
     function_name : str
@@ -67,7 +68,7 @@ def _get_default_parameters(function_name):
             "diff_order": 2,
             "max_iter": 50,
             "tol": 1e-3,
-            "weights": None
+            "weights": None,
         },
         "IRSQR": {
             "lam": 1e6,
@@ -88,7 +89,7 @@ def _get_default_parameters(function_name):
             "min_length": 2,
             "weights": None,
             "weights_as_mask": False,
-            "pad_kwargs": None
+            "pad_kwargs": None,
         },
         "MANUAL": {},
     }
@@ -190,173 +191,167 @@ def _cast_parameter_types(function_name, parameters):
     return parameters
 
 
-def baseline_selection(FTIR_DataFrame, materials=None, baseline_function=None):
+def baseline_correction(FTIR_DataFrame, materials="any"):
     """
-    Set the baseline function for specified materials in the DataFrame.
+    Apply baseline correction to spectra in the DataFrame for selected materials or all.
 
     Parameters
     ----------
     FTIR_DataFrame : pd.DataFrame
-        The DataFrame containing the spectral data.
-    materials : list, optional
-        List of material names to apply the baseline function to.
-    baseline_function : str, optional
-        Baseline function to use.
+        The DataFrame to update in-place.
+    materials : str or list
+        Material(s) to filter and process. Use 'any' (case-insensitive) to process all rows.
 
     Returns
     -------
     pd.DataFrame
         The updated DataFrame.
     """
+    # Ensure destination columns exist and are object dtype (for per-row lists)
+    for col in ("Baseline", "Baseline-Corrected Data"):
+        if col not in FTIR_DataFrame.columns:
+            FTIR_DataFrame[col] = None
+    # Coerce sequence-holding columns to object dtype to avoid shape/broadcast issues
+    try:
+        FTIR_DataFrame[["Baseline", "Baseline-Corrected Data"]] = FTIR_DataFrame[
+            ["Baseline", "Baseline-Corrected Data"]
+        ].astype(object)
+    except Exception:
+        # Fall back to individual-coercion if slice fails (e.g., missing one column)
+        for _col in ("Baseline", "Baseline-Corrected Data"):
+            if _col in FTIR_DataFrame.columns:
+                try:
+                    FTIR_DataFrame[_col] = FTIR_DataFrame[_col].astype(object)
+                except Exception:
+                    pass
 
-    # Accept either a string (comma-separated) or a list for materials
-    if materials is None:
-        materials_input = input(
-            "Enter materials to apply baseline function to (comma-separated): "
-        ).strip()
-        materials = [mat.strip() for mat in materials_input.split(",")]
-    elif isinstance(materials, str):
-        materials = [mat.strip() for mat in materials.split(",")]
+    # Build mask for materials
+    if isinstance(materials, str):
+        if materials.strip().lower() == "any":
+            mask = pd.Series([True] * len(FTIR_DataFrame), index=FTIR_DataFrame.index)
+        else:
+            material_list = [m.strip() for m in materials.split(",") if m.strip()]
+            mask = FTIR_DataFrame["Material"].astype(str).isin(material_list)
+    elif isinstance(materials, (list, tuple)):
+        material_list = [str(m).strip() for m in materials if str(m).strip()]
+        mask = FTIR_DataFrame["Material"].astype(str).isin(material_list)
+    else:
+        mask = pd.Series([True] * len(FTIR_DataFrame), index=FTIR_DataFrame.index)
 
-    # Prompt for baseline function if not provided
-    if baseline_function is None:
-        baseline_function = input(
-            "Enter baseline function (ARPLS, IRSQR, FABC, Manual): "
-        ).strip()
+    updated = 0
+    skipped = 0
+    for idx in FTIR_DataFrame.index[mask]:
+        row = FTIR_DataFrame.loc[idx]
+        baseline_name = row.get("Baseline Function", None)
+        if baseline_name is None or str(baseline_name).strip() == "":
+            print(f"Row {idx}: Missing 'Baseline Function'; skipping.")
+            skipped += 1
+            continue
 
-    for material in materials:
-        mask = FTIR_DataFrame["Material"] == material
-        FTIR_DataFrame.loc[mask, "Baseline Function"] = baseline_function
-        print(f"Applied baseline function {baseline_function} to material: {material}")
+        # Robustly parse parameters (dict or string) and merge with defaults
+        raw_params = row.get("Baseline Parameters", {})
+        if isinstance(raw_params, dict):
+            params = raw_params.copy()
+        elif isinstance(raw_params, str) and raw_params.strip():
+            try:
+                maybe = ast.literal_eval(raw_params)
+                params = (
+                    maybe if isinstance(maybe, dict) else _parse_parameters(raw_params)
+                )
+            except Exception:
+                params = _parse_parameters(raw_params)
+        else:
+            params = {}
 
-    return FTIR_DataFrame
+        func_name = str(baseline_name).strip().upper()
+        defaults = _get_default_parameters(func_name)
+        params = {**defaults, **params}
+        params = _cast_parameter_types(func_name, params)
 
-def parameter_selection(FTIR_DataFrame, materials=None, parameters=None):
-    """
-    Set the baseline parameters for specified materials in the DataFrame.
-
-    Parameters
-    ----------
-    FTIR_DataFrame : pd.DataFrame
-        The DataFrame containing the spectral data.
-    materials : string, optional
-        String of material names to apply the parameters to.
-    parameters : str or dict, optional
-        The parameter values (as dict or string) to assign to all specified materials.
-
-    Returns
-    -------
-    pd.DataFrame
-        The updated DataFrame.
-    """
-
-    # Accept either a string (comma-separated) or a list for materials
-    if materials is None:
-        materials_input = input(
-            "Enter materials to apply baseline parameters to (comma-separated): "
-        ).strip()
-        materials = [mat.strip() for mat in materials_input.split(",")]
-    elif isinstance(materials, str):
-        materials = [mat.strip() for mat in materials.split(",")]
-
-    # Prompt for parameters if not provided
-    if parameters is None:
-        message = (f"Enter baseline parameters (as dict or string) to apply to all "
-                   f"selected materials: ")
-        parameters = input(message).strip()
-    for material in materials:
-        mask = FTIR_DataFrame["Material"] == material
-        FTIR_DataFrame.loc[mask, "Baseline Parameters"] = str(parameters)
-        print(f"Applied parameters {parameters} to material: {material}")
-
-    return FTIR_DataFrame
-
-
-def baseline_correction(FTIR_DataFrame):
-    """
-    Apply baseline correction to the DataFrame.
-
-    Parameters
-    ----------
-    DataFrame_path : str
-        The path to the CSV file to modify.
-
-    Returns
-    -------
-    pd.DataFrame
-        The updated DataFrame.
-    """
-    # Add new columns for Baseline Function and Parameters if they don't exist
-    if "Baseline" not in FTIR_DataFrame.columns:
-        FTIR_DataFrame["Baseline"] = None
-    if "Corrected" not in FTIR_DataFrame.columns:
-        FTIR_DataFrame["Corrected"] = None
-
-    for idx, row in FTIR_DataFrame.iterrows():
-        baseline_name = row["Baseline Function"]
-        parameter_dictionary = (
-            ast.literal_eval(row["Baseline Parameters"])
-            if row["Baseline Parameters"]
-            else {}
-        )
-        # Example: get y-data (Raw Data) and x-data (X-Axis)
+        # Parse data arrays
         try:
-            y_data = ast.literal_eval(row["Raw Data"])
+            y_data = (
+                ast.literal_eval(row.get("Raw Data"))
+                if isinstance(row.get("Raw Data"), str)
+                else row.get("Raw Data")
+            )
         except Exception:
-            y_data = row["Raw Data"]
+            y_data = row.get("Raw Data")
+        try:
+            x_axis = (
+                ast.literal_eval(row.get("X-Axis"))
+                if isinstance(row.get("X-Axis"), str)
+                else row.get("X-Axis")
+            )
+        except Exception:
+            x_axis = row.get("X-Axis")
+        if y_data is None or x_axis is None:
+            print(f"Row {idx}: Missing X-Axis or Raw Data; skipping.")
+            skipped += 1
+            continue
 
         baseline = None
         baseline_corrected = None
+        try:
+            if func_name == "ARPLS":
+                result = arpls(y_data, **params)
+            elif func_name == "IRSQR":
+                result = (
+                    irsqr(y_data, **params, x_data=x_axis)
+                    if "x_data" not in params
+                    else irsqr(y_data, **params)
+                )
+            elif func_name == "FABC":
+                result = fabc(y_data, **params)
+            elif func_name == "MANUAL":
+                anchor_points = params.get("anchor_points", [])
+                if not anchor_points:
+                    raise ValueError("MANUAL baseline requires 'anchor_points'.")
+                # indices of closest x to each anchor point
+                anchor_indices = [
+                    min(range(len(x_axis)), key=lambda i: abs(x_axis[i] - ap))
+                    for ap in anchor_points
+                ]
+                y_anchor = [y_data[i] for i in anchor_indices]
+                baseline = CubicSpline(x=anchor_points, y=y_anchor, extrapolate=True)(
+                    x_axis
+                )
+            else:
+                raise ValueError(f"Unknown baseline function: {baseline_name}")
 
-        if baseline_name == "ARPLS":
-            # Call ARPLS baseline correction
-            baseline = arpls(y_data, **parameter_dictionary)
-            baseline_corrected = [y - b for y, b in zip(y_data, baseline)]
-        elif baseline_name == "IRSQR":
-            # Call IRSQR baseline correction
-            baseline, _ = irsqr(y_data, **parameter_dictionary)
-            baseline_corrected = [y - b for y, b in zip(y_data, baseline)]
-        elif baseline_name == "FABC":
-            # Call FABC baseline correction
-            baseline, _ = fabc(y_data, **parameter_dictionary)
-            baseline_corrected = [y - b for y, b in zip(y_data, baseline)]
-        elif baseline_name == "MANUAL":
-            # Call Manual baseline correction
-            from scipy.interpolate import CubicSpline
-
-            anchor_points = parameter_dictionary.get("anchor_points", [])
-            x_axis = (
-                ast.literal_eval(row["X-Axis"])
-                if isinstance(row["X-Axis"], str)
-                else row["X-Axis"]
-            )
-            # For each anchor point, find the index of the closest value in X-Axis
-            # This ensures that the anchor points correspond to actual data points in 
-            # each spectrum
-            anchor_indices = [
-                min(range(len(x_axis)), key=lambda i: abs(x_axis[i] - ap))
-                for ap in anchor_points
-            ]
-            y_anchor = [y_data[i] for i in anchor_indices]
-            baseline = CubicSpline(x=anchor_points, y=y_anchor, extrapolate=True)(
-                x_axis
-            )
-        else:
-            print(f"Unknown baseline function: {baseline_name} for row {idx}")
+            if baseline is None:
+                # Normalize return type from pybaselines
+                if isinstance(result, tuple):
+                    baseline = result[0]
+                elif isinstance(result, dict):
+                    baseline = result.get("baseline", None)
+                else:
+                    baseline = result
+            baseline = np.asarray(baseline, dtype=float)
+            y_arr = np.asarray(y_data, dtype=float)
+            if baseline.shape != y_arr.shape:
+                raise ValueError(
+                    f"Baseline shape {baseline.shape} does not match data shape {y_arr.shape}."
+                )
+            baseline_corrected = (y_arr - baseline).astype(float)
+        except Exception as e:
+            print(f"Row {idx}: Error computing baseline: {e}")
+            print(f" - Baseline Function: {baseline_name}")
+            print(f" - Baseline Parameters: {params}")
+            skipped += 1
             continue
+
         # Save results back to DataFrame
-        # Cast all baseline values to float before saving
-        if baseline is not None:
-            baseline_floats = [float(val) for val in baseline]
-            FTIR_DataFrame.at[idx, "Baseline"] = baseline_floats
-        else:
-            FTIR_DataFrame.at[idx, "Baseline"] = None
-        # Cast all corrected values to float before saving
-        if baseline_corrected is not None:
-            corrected_floats = [float(val) for val in baseline_corrected]
-            FTIR_DataFrame.at[idx, "Corrected"] = corrected_floats
-        else:
-            FTIR_DataFrame.at[idx, "Corrected"] = None
+        baseline = np.asarray(baseline, dtype=float)
+        baseline_corrected = np.asarray(baseline_corrected, dtype=float)
+        if baseline.ndim > 1:
+            baseline = baseline.flatten()
+        if baseline_corrected.ndim > 1:
+            baseline_corrected = baseline_corrected.flatten()
+        # Store as plain Python lists for portability/CSV round-trip
+        FTIR_DataFrame.at[idx, "Baseline"] = baseline.tolist()
+        FTIR_DataFrame.at[idx, "Baseline-Corrected Data"] = baseline_corrected.tolist()
+        updated += 1
 
     return FTIR_DataFrame
 
@@ -369,13 +364,14 @@ def plot_grouped_spectra(
     raw_data=True,
     baseline=False,
     baseline_corrected=False,
+    normalized=False,
     separate_plots=False,
     include_replicates=True,
     zoom=None,
 ):
     """
-    Plot grouped spectra based on material, condition, and time. 
-    
+    Plot grouped spectra based on material, condition, and time.
+
     Accepts lists or 'any' for each category.
 
     Parameters
@@ -394,13 +390,16 @@ def plot_grouped_spectra(
         Whether to plot the baseline (default is False).
     baseline_corrected : bool, optional
         Whether to plot the baseline-corrected data (default is False).
+    normalized : bool, optional
+        Whether to plot the normalized-and-corrected data from the column
+        'Normalized and Corrected Data' (default is False).
     separate_plots : bool, optional
         Whether to create separate plots for each spectrum (default is False).
     include_replicates : bool, optional
-        Whether to include all replicates or just the first of each group (default is 
+        Whether to include all replicates or just the first of each group (default is
         True).
     zoom : str, optional
-        A string specifying the x-axis zoom range in the format "min-max" (e.g., 
+        A string specifying the x-axis zoom range in the format "min-max" (e.g.,
         "400-4000").
 
     Returns
@@ -429,7 +428,7 @@ def plot_grouped_spectra(
         mask &= FTIR_DataFrame["Time"].isin(time_list)
     filtered_data = FTIR_DataFrame[mask]
 
-    # If not including replicates, keep only the first member of each (Material, 
+    # If not including replicates, keep only the first member of each (Material,
     # Conditions, Time) group
     if not include_replicates:
         filtered_data = filtered_data.sort_values(by=["Material", "Conditions", "Time"])
@@ -441,7 +440,7 @@ def plot_grouped_spectra(
     filtered_data_sorted = filtered_data.sort_values(by="Time")
     x_axis_col = "X-Axis" if "X-Axis" in filtered_data_sorted.columns else "Wavelength"
 
-    # Plot all together (legend in time order) and record colors for each spectrum 
+    # Plot all together (legend in time order) and record colors for each spectrum
     # (including replicates)
     plt.figure(figsize=(10, 6))
     legend_entries = []
@@ -486,28 +485,70 @@ def plot_grouped_spectra(
                     y_data = ast.literal_eval(y_data)
                 except Exception:
                     pass
-            (line_handle,) = plt.plot(
-                x_axis, y_data, "--", label=f"Baseline: {spectrum_label}"
-            )
+            if raw_data or baseline_corrected or normalized:
+                (line_handle,) = plt.plot(
+                    x_axis, y_data, "--", label=f"Baseline: {spectrum_label}"
+                )
+            else:
+                (line_handle,) = plt.plot(
+                    x_axis, y_data, label=f"Baseline: {spectrum_label}"
+                )
             legend_entries.append((line_handle, f"Baseline: {spectrum_label}"))
             color_map[("Baseline", idx)] = line_handle.get_color()
             legend_filepaths.append(file_path)
         if (
             baseline_corrected
-            and "Corrected" in spectrum_row
-            and spectrum_row["Corrected"] is not None
+            and "Baseline-Corrected Data" in spectrum_row
+            and spectrum_row["Baseline-Corrected Data"] is not None
         ):
-            y_data = spectrum_row["Corrected"]
+            y_data = spectrum_row["Baseline-Corrected Data"]
             if isinstance(y_data, str):
                 try:
                     y_data = ast.literal_eval(y_data)
                 except Exception:
                     pass
-            (line_handle,) = plt.plot(
-                x_axis, y_data, ":", label=f"Corrected: {spectrum_label}"
+            if raw_data or baseline or normalized:
+                (line_handle,) = plt.plot(
+                    x_axis,
+                    y_data,
+                    ":",
+                    label=f"Baseline-Corrected: {spectrum_label}",
+                )
+            else:
+                (line_handle,) = plt.plot(
+                    x_axis, y_data, label=f"Baseline-Corrected: {spectrum_label}"
+                )
+            legend_entries.append(
+                (line_handle, f"Baseline-Corrected: {spectrum_label}")
             )
-            legend_entries.append((line_handle, f"Corrected: {spectrum_label}"))
-            color_map[("Corrected", idx)] = line_handle.get_color()
+            color_map[("Baseline-Corrected", idx)] = line_handle.get_color()
+            legend_filepaths.append(file_path)
+        if (
+            normalized
+            and "Normalized and Corrected Data" in spectrum_row
+            and spectrum_row["Normalized and Corrected Data"] is not None
+        ):
+            y_data = spectrum_row["Normalized and Corrected Data"]
+            if isinstance(y_data, str):
+                try:
+                    y_data = ast.literal_eval(y_data)
+                except Exception:
+                    pass
+            if raw_data or baseline or baseline_corrected:
+                (line_handle,) = plt.plot(
+                    x_axis,
+                    y_data,
+                    "-.",
+                    label=f"Normalized and Corrected: {spectrum_label}",
+                )
+            else:
+                (line_handle,) = plt.plot(
+                    x_axis, y_data, label=f"Normalized and Corrected: {spectrum_label}"
+                )
+            legend_entries.append(
+                (line_handle, f"Normalized and Corrected: {spectrum_label}")
+            )
+            color_map[("Normalized and Corrected", idx)] = line_handle.get_color()
             legend_filepaths.append(file_path)
     handles = [entry[0] for entry in legend_entries]
     labels = [entry[1] for entry in legend_entries]
@@ -567,20 +608,56 @@ def plot_grouped_spectra(
                     except Exception:
                         pass
                 color = color_map.get(("Baseline", idx), None)
-                plt.plot(x_axis, y_data, "--", label="Baseline", color=color)
+                if raw_data or baseline_corrected or normalized:
+                    plt.plot(x_axis, y_data, "--", label="Baseline", color=color)
+                else:
+                    plt.plot(x_axis, y_data, label="Baseline", color=color)
             if (
                 baseline_corrected
-                and "Corrected" in row
-                and row["Corrected"] is not None
+                and "Baseline-Corrected Data" in row
+                and row["Baseline-Corrected Data"] is not None
             ):
-                y_data = row["Corrected"]
+                y_data = row["Baseline-Corrected Data"]
                 if isinstance(y_data, str):
                     try:
                         y_data = ast.literal_eval(y_data)
                     except Exception:
                         pass
-                color = color_map.get(("Corrected", idx), None)
-                plt.plot(x_axis, y_data, ":", label="Corrected", color=color)
+                color = color_map.get(("Baseline-Corrected", idx), None)
+                if raw_data or baseline or normalized:
+                    plt.plot(
+                        x_axis,
+                        y_data,
+                        ":",
+                        label="Baseline-Corrected",
+                        color=color,
+                    )
+                else:
+                    plt.plot(x_axis, y_data, label="Baseline-Corrected", color=color)
+            if (
+                normalized
+                and "Normalized and Corrected Data" in row
+                and row["Normalized and Corrected Data"] is not None
+            ):
+                y_data = row["Normalized and Corrected Data"]
+                if isinstance(y_data, str):
+                    try:
+                        y_data = ast.literal_eval(y_data)
+                    except Exception:
+                        pass
+                color = color_map.get(("Normalized and Corrected", idx), None)
+                if raw_data or baseline or baseline_corrected:
+                    plt.plot(
+                        x_axis,
+                        y_data,
+                        "-.",
+                        label="Normalized and Corrected",
+                        color=color,
+                    )
+                else:
+                    plt.plot(
+                        x_axis, y_data, label="Normalized and Corrected", color=color
+                    )
             plt.title(f"Spectrum: {spectrum_label}")
             plt.xlabel("Wavelength (cm¯¹)")
             plt.ylabel("Absorbance (AU)")
@@ -607,18 +684,18 @@ def try_baseline(
     """
     Apply a modifiable baseline to a single spectrum from the DataFrame.
 
-    Allows for on-the-fly parameter adjustments via interactive widgets and 
+    Allows for on-the-fly parameter adjustments via interactive widgets and
     experimentation with different baseline functions.
 
     Parameters
     ----------
     FTIR_DataFrame (pd.DataFrame): The in-memory DataFrame containing all spectra.
-    material (str, optional): Material name to analyze (ignored if filepath is 
+    material (str, optional): Material name to analyze (ignored if filepath is
         provided).
     baseline_function (str): Baseline function to use ('ARPLS', 'IRSQR', 'FABC').
-    parameter_string (str, optional): Baseline parameters as key=value pairs, 
+    parameter_string (str, optional): Baseline parameters as key=value pairs,
         comma-separated.
-    filepath (str, optional): If provided, only process this file (by 'File Location' 
+    filepath (str, optional): If provided, only process this file (by 'File Location'
         + 'File Name').
 
     Returns
@@ -685,7 +762,7 @@ def try_baseline(
             step=1e4,
             description="Smoothness (lam)",
             readout_format=".1e",
-            style={'description_width': 'auto'}
+            style={"description_width": "auto"},
         )
         param_widgets["diff_order"] = widgets.IntSlider(
             value=parameters.get("diff_order", 2),
@@ -693,7 +770,7 @@ def try_baseline(
             max=2,
             step=1,
             description="Differential Order",
-            style={'description_width': 'auto'}
+            style={"description_width": "auto"},
         )
         param_widgets["max_iter"] = widgets.IntSlider(
             value=parameters.get("max_iter", 50),
@@ -701,7 +778,7 @@ def try_baseline(
             max=200,
             step=1,
             description="Max Iterations",
-            style={'description_width': 'auto'}
+            style={"description_width": "auto"},
         )
         param_widgets["tol"] = widgets.FloatSlider(
             value=parameters.get("tol", 1e-3),
@@ -710,10 +787,10 @@ def try_baseline(
             step=1e-4,
             description="Tolerance",
             readout_format=".1e",
-            style={'description_width': 'auto'}
+            style={"description_width": "auto"},
         )
     elif baseline_function.upper() == "IRSQR":
-        # lam: float, quantile: float, num_knots: int, spline_degree: int, diff_order: 
+        # lam: float, quantile: float, num_knots: int, spline_degree: int, diff_order:
         # int, max_iterations: int, tolerance: float, eps: float
         param_widgets["lam"] = widgets.FloatSlider(
             value=parameters.get("lam", 1e6),
@@ -722,7 +799,7 @@ def try_baseline(
             step=1e5,
             description="Smoothness (lam)",
             readout_format=".1e",
-            style={'description_width': 'auto'}
+            style={"description_width": "auto"},
         )
         param_widgets["quantile"] = widgets.FloatSlider(
             value=parameters.get("quantile", 0.05),
@@ -731,7 +808,7 @@ def try_baseline(
             step=0.001,
             description="Quantile",
             readout_format=".3f",
-            style={'description_width': 'auto'}
+            style={"description_width": "auto"},
         )
         param_widgets["num_knots"] = widgets.IntSlider(
             value=parameters.get("num_knots", 100),
@@ -739,7 +816,7 @@ def try_baseline(
             max=500,
             step=5,
             description="Knots",
-            style={'description_width': 'auto'}
+            style={"description_width": "auto"},
         )
         param_widgets["spline_degree"] = widgets.IntSlider(
             value=parameters.get("spline_degree", 3),
@@ -747,7 +824,7 @@ def try_baseline(
             max=5,
             step=1,
             description="Spline Degree",
-            style={'description_width': 'auto'}
+            style={"description_width": "auto"},
         )
         param_widgets["diff_order"] = widgets.IntSlider(
             value=parameters.get("diff_order", 3),
@@ -755,7 +832,7 @@ def try_baseline(
             max=3,
             step=1,
             description="Differential Order",
-            style={'description_width': 'auto'}
+            style={"description_width": "auto"},
         )
         param_widgets["max_iter"] = widgets.IntSlider(
             value=parameters.get("max_iter", 100),
@@ -763,7 +840,7 @@ def try_baseline(
             max=1000,
             step=1,
             description="Max Iterations",
-            style={'description_width': 'auto'}
+            style={"description_width": "auto"},
         )
         param_widgets["tol"] = widgets.FloatSlider(
             value=parameters.get("tol", 1e-6),
@@ -772,10 +849,10 @@ def try_baseline(
             step=1e-7,
             description="Tolerance",
             readout_format=".1e",
-            style={'description_width': 'auto'}
+            style={"description_width": "auto"},
         )
     elif baseline_function.upper() == "FABC":
-        # lam: float, scale: int or None, num_std: float, diff_order: int, min_length: 
+        # lam: float, scale: int or None, num_std: float, diff_order: int, min_length:
         # int
         param_widgets["lam"] = widgets.FloatSlider(
             value=parameters.get("lam", 1e6),
@@ -784,14 +861,16 @@ def try_baseline(
             step=1e5,
             description="Smoothness (lam)",
             readout_format=".1e",
-            style={'description_width': 'auto'}
+            style={"description_width": "auto"},
         )
         raw_data = (
-            ast.literal_eval(row["Raw Data"]) if isinstance(row["Raw Data"], str)
+            ast.literal_eval(row["Raw Data"])
+            if isinstance(row["Raw Data"], str)
             else row["Raw Data"]
         )
         raw_data = (
-            ast.literal_eval(row["Raw Data"]) if isinstance(row["Raw Data"], str)
+            ast.literal_eval(row["Raw Data"])
+            if isinstance(row["Raw Data"], str)
             else row["Raw Data"]
         )
         scale_default = ceil(optimize_window(raw_data) / 2)
@@ -804,7 +883,7 @@ def try_baseline(
             max=500,
             step=1,
             description="Scale",
-            style={'description_width': 'auto'}
+            style={"description_width": "auto"},
         )
         param_widgets["num_std"] = widgets.FloatSlider(
             value=parameters.get("num_std", 3.0),
@@ -813,7 +892,7 @@ def try_baseline(
             step=0.1,
             description="Standard Deviations",
             readout_format=".2f",
-            style={'description_width': 'auto'}
+            style={"description_width": "auto"},
         )
         param_widgets["diff_order"] = widgets.IntSlider(
             value=parameters.get("diff_order", 2),
@@ -821,7 +900,7 @@ def try_baseline(
             max=3,
             step=1,
             description="Differential Order",
-            style={'description_width': 'auto'}
+            style={"description_width": "auto"},
         )
         param_widgets["min_length"] = widgets.IntSlider(
             value=parameters.get("min_length", 2),
@@ -829,7 +908,7 @@ def try_baseline(
             max=6,
             step=1,
             description="Min Baseline Span Length",
-            style={'description_width': 'auto'}
+            style={"description_width": "auto"},
         )
 
     output = widgets.Output()
@@ -856,7 +935,7 @@ def try_baseline(
                 baseline = baseline_result[0]
             elif isinstance(baseline_result, dict):
                 # If a dict is returned, try to get 'baseline' key
-                baseline = baseline_result.get('baseline', None)
+                baseline = baseline_result.get("baseline", None)
                 if baseline is None:
                     print("Error: Baseline function did not return a baseline array.")
                     return
@@ -867,8 +946,10 @@ def try_baseline(
             baseline = np.asarray(baseline)
             y_arr = np.asarray(y)
             if baseline.shape != y_arr.shape:
-                message = (f"Error: Baseline shape {baseline.shape} does not match data"
-                           f" shape {y_arr.shape}.")
+                message = (
+                    f"Error: Baseline shape {baseline.shape} does not match data"
+                    f" shape {y_arr.shape}."
+                )
                 print(message)
                 return
             baseline_corrected = y_arr - baseline
@@ -900,15 +981,17 @@ def try_baseline(
             reset_btn = widgets.Button(
                 description=f"Reset",
                 button_style="info",
-                layout=widgets.Layout(width="70px", margin="0 0 0 10px")
+                layout=widgets.Layout(width="70px", margin="0 0 0 10px"),
             )
             # For 'scale', use the initial scale_val as the reset value
             if key == "scale":
                 reset_value = int(scale_val)
             else:
                 reset_value = defaults.get(key, widget.value)
+
             def make_reset_func(w, default_val):
-                return lambda b: setattr(w, 'value', default_val)
+                return lambda b: setattr(w, "value", default_val)
+
             reset_btn.on_click(make_reset_func(widget, reset_value))
             widget_row = widgets.HBox([widget, reset_btn])
             widget_rows.append(widget_row)
@@ -917,14 +1000,16 @@ def try_baseline(
         reset_all_btn = widgets.Button(
             description="Reset All",
             button_style="warning",
-            layout=widgets.Layout(width="100px", margin="10px 0 0 0")
+            layout=widgets.Layout(width="100px", margin="10px 10px 0 0"),
         )
+
         def reset_all_callback(b):
             for key, widget in param_widgets.items():
                 if key == "scale":
                     widget.value = int(scale_val)
                 elif key in defaults:
                     widget.value = defaults[key]
+
         reset_all_btn.on_click(reset_all_callback)
 
         # Helper to gather current parameter values (widgets + any non-widget ones)
@@ -936,14 +1021,14 @@ def try_baseline(
 
         # Save buttons to persist choices
         save_file_btn = widgets.Button(
-            description="Save for file & close",
+            description="Save for file",
             button_style="success",
-            layout=widgets.Layout(margin="10px 10px 0 0")
+            layout=widgets.Layout(margin="10px 10px 0 0"),
         )
         save_material_btn = widgets.Button(
-            description="Save for material & close",
+            description="Save for material",
             button_style="info",
-            layout=widgets.Layout(margin="10px 10px 0 0")
+            layout=widgets.Layout(margin="10px 10px 0 0"),
         )
 
         def _serialize_params(d):
@@ -951,6 +1036,7 @@ def try_baseline(
             def to_plain(v):
                 try:
                     import numpy as _np
+
                     if isinstance(v, (_np.integer,)):
                         return int(v)
                     if isinstance(v, (_np.floating,)):
@@ -960,6 +1046,7 @@ def try_baseline(
                 except Exception:
                     pass
                 return v
+
             return {k: to_plain(v) for k, v in d.items()}
 
         # Finalize routine: disable/close all widgets and clear outputs to avoid UID errors
@@ -982,7 +1069,9 @@ def try_baseline(
                 except Exception:
                     pass
                 try:
-                    save_file_btn.close(); save_material_btn.close(); reset_all_btn.close()
+                    save_file_btn.close()
+                    save_material_btn.close()
+                    reset_all_btn.close()
                 except Exception:
                     pass
                 # Close interactive binding and its output widget if present
@@ -997,7 +1086,8 @@ def try_baseline(
                     pass
                 try:
                     import matplotlib.pyplot as _plt
-                    _plt.close('all')
+
+                    _plt.close("all")
                 except Exception:
                     pass
                 if container_widget is not None:
@@ -1011,15 +1101,18 @@ def try_baseline(
         def on_save_for_file(b):
             param_vals = _serialize_params(_current_param_values())
             # Persist to the accessed row
-            FTIR_DataFrame.at[row.name, "Baseline Function"] = str(baseline_function).upper()
+            FTIR_DataFrame.at[row.name, "Baseline Function"] = str(
+                baseline_function
+            ).upper()
             FTIR_DataFrame.at[row.name, "Baseline Parameters"] = str(param_vals)
-            # Close UI after saving to avoid UID errors on reruns, then show summary using a fresh Output
-            _finalize_and_close(container_widget=container)
+            # Print a summary of the action (do not auto-close)
             summary_out = widgets.Output()
             display(summary_out)
             with summary_out:
                 try:
-                    _file_path = os.path.join(row.get("File Location", ""), row.get("File Name", ""))
+                    _file_path = os.path.join(
+                        row.get("File Location", ""), row.get("File Name", "")
+                    )
                 except Exception:
                     _file_path = row.get("File Name", "")
                 print("Saved baseline settings for this file:")
@@ -1033,10 +1126,11 @@ def try_baseline(
             if mat_val is None:
                 mat_val = material
             mask = FTIR_DataFrame["Material"] == mat_val
-            FTIR_DataFrame.loc[mask, "Baseline Function"] = str(baseline_function).upper()
+            FTIR_DataFrame.loc[mask, "Baseline Function"] = str(
+                baseline_function
+            ).upper()
             FTIR_DataFrame.loc[mask, "Baseline Parameters"] = str(param_vals)
-            # Close UI after saving to avoid UID errors on reruns, then show summary using a fresh Output
-            _finalize_and_close(container_widget=container)
+            # Print a summary of the action (do not auto-close)
             summary_out = widgets.Output()
             display(summary_out)
             with summary_out:
@@ -1054,8 +1148,15 @@ def try_baseline(
         save_file_btn.on_click(on_save_for_file)
         save_material_btn.on_click(on_save_for_material)
 
-        # Place save buttons to the left of Reset All in a single row
-        controls_footer = widgets.HBox([save_file_btn, save_material_btn, reset_all_btn])
+        # Place save buttons to the left of Reset All in a single row, add a Close button
+        close_btn = widgets.Button(
+            description="Close",
+            button_style="danger",
+            layout=widgets.Layout(margin="10px 0 0 0"),
+        )
+        controls_footer = widgets.HBox(
+            [save_file_btn, save_material_btn, reset_all_btn, close_btn]
+        )
         ui = widgets.VBox(widget_rows + [controls_footer])
         from functools import partial
 
@@ -1065,17 +1166,39 @@ def try_baseline(
         # Keep a handle to the displayed container so we can close it later
         container = widgets.HBox([ui, output])
         display(container)
+
+        # Wire the Close button after container is created so it can be properly closed
+        def on_close(b):
+            try:
+                plt.close("all")
+            except Exception:
+                pass
+            _finalize_and_close(container_widget=container)
+
+        close_btn.on_click(on_close)
     else:
         # No parameters to edit, just plot once
         _plot_baseline()
+        # Provide a simple Close button to clear the plot output in this mode
+        close_btn = widgets.Button(description="Close", button_style="danger")
+
+        def _close_simple(b):
+            try:
+                plt.close("all")
+            except Exception:
+                pass
+            clear_output(wait=True)
+
+        close_btn.on_click(_close_simple)
+        display(close_btn)
 
 
 def test_baseline_choices(FTIR_DataFrame, material=None):
     """
-    Plot three random spectra for a given material, showing baseline results. 
-    
-    Plots raw data, baseline, and baseline-corrected data. The baseline function and 
-    parameters are taken from the DataFrame columns. Assumes user has already filled 
+    Plot three random spectra for a given material, showing baseline results.
+
+    Plots raw data, baseline, and baseline-corrected data. The baseline function and
+    parameters are taken from the DataFrame columns. Assumes user has already filled
     those columns earlier in the workflow.
 
     Parameters
@@ -1120,8 +1243,19 @@ def test_baseline_choices(FTIR_DataFrame, material=None):
         )
         y = np.array(y, dtype=float)
         baseline_func = row.get("Baseline Function", None)
-        params = row.get("Baseline Parameters", {})
-        if not isinstance(params, dict):
+        # Robustly coerce parameters
+        raw_params = row.get("Baseline Parameters", {})
+        if isinstance(raw_params, dict):
+            params = raw_params.copy()
+        elif isinstance(raw_params, str) and raw_params.strip():
+            try:
+                maybe = ast.literal_eval(raw_params)
+                params = (
+                    maybe if isinstance(maybe, dict) else _parse_parameters(raw_params)
+                )
+            except Exception:
+                params = _parse_parameters(raw_params)
+        else:
             params = {}
 
         # Compute baseline
@@ -1131,12 +1265,19 @@ def test_baseline_choices(FTIR_DataFrame, material=None):
             if baseline_func is None:
                 raise ValueError("No baseline function specified.")
             func = baseline_func.strip().upper()
+            # Merge with defaults and cast types
+            defaults = _get_default_parameters(func)
+            params = {**defaults, **params}
+            params = _cast_parameter_types(func, params)
             if func == "ARPLS":
-                baseline = arpls(y, **params)
+                result = arpls(y, **params)
             elif func == "IRSQR":
-                baseline, _ = irsqr(y, **params)
+                if "x_data" in params:
+                    result = irsqr(y, **params)
+                else:
+                    result = irsqr(y, **params, x_data=x)
             elif func == "FABC":
-                baseline, _ = fabc(y, **params)
+                result = fabc(y, **params)
             elif func == "MANUAL":
                 anchor_points = params.get("anchor_points", [])
                 if not anchor_points:
@@ -1146,15 +1287,27 @@ def test_baseline_choices(FTIR_DataFrame, material=None):
                     for ap in anchor_points
                 ]
                 y_anchor = [y[i] for i in anchor_indices]
-                baseline = CubicSpline(x=anchor_points, y=y_anchor, extrapolate=True)(x)
+                result = CubicSpline(x=anchor_points, y=y_anchor, extrapolate=True)(x)
             else:
                 raise ValueError(f"Unknown baseline function: {baseline_func}")
-            baseline = np.array(baseline, dtype=float)
+            # Normalize return type to baseline array
+            if isinstance(result, tuple):
+                baseline = result[0]
+            elif isinstance(result, dict):
+                baseline = result.get("baseline", None)
+                if baseline is None:
+                    raise ValueError(
+                        "Baseline function did not return a baseline array."
+                    )
+            else:
+                baseline = result
+            baseline = np.asarray(baseline, dtype=float)
             baseline_corrected = y - baseline
         except Exception as e:
             print(f"Error computing baseline for row {idx}: {e}")
             print(f" - Baseline Function: {baseline_func}")
             print(f" - Baseline Parameters: {params}")
+            print(f" - X-Axis shape: {np.shape(x)}, Raw Data shape: {np.shape(y)}")
             baseline = np.full_like(y, np.nan)
             baseline_corrected = np.full_like(y, np.nan)
 
@@ -1199,7 +1352,7 @@ def bring_in_DataFrame(DataFrame_path=None):
         The loaded DataFrame.
     """
     if DataFrame_path is None:
-        DataFrame_path = "FTIR_DataFrame.csv"  # Default path if none is provided (will 
+        DataFrame_path = "FTIR_DataFrame.csv"  # Default path if none is provided (will
         # be in active directory)
     else:
         pass
@@ -1213,15 +1366,16 @@ def bring_in_DataFrame(DataFrame_path=None):
         )  # Create a new empty DataFrame if it doesn't exist
     return FTIR_DataFrame, DataFrame_path
 
+
 def anchor_points_selection(
     FTIR_DataFrame, material=None, filepath=None, try_it_out=True
 ):
     """
     Interactively select anchor points for FTIR baseline correction.
 
-    Lets user select anchor points from a spectrum in the DataFrame for baseline 
-    correction. Anchor points are selected by clicking on the plot, and will apply to 
-    each file of that material. After selection, a cubic spline baseline is fit and 
+    Lets user select anchor points from a spectrum in the DataFrame for baseline
+    correction. Anchor points are selected by clicking on the plot, and will apply to
+    each file of that material. After selection, a cubic spline baseline is fit and
     previewed, and the user can accept or redo the selection.
 
     Parameters
@@ -1233,16 +1387,16 @@ def anchor_points_selection(
     filepath : str, optional
         If provided, only process this file (by 'File Location' + 'File Name').
     try_it_out : bool, optional
-        If True, only prints the anchor points (default). If False, saves anchor points 
+        If True, only prints the anchor points (default). If False, saves anchor points
         to 'Baseline Parameters' column for all rows with the same material.
     DataFrame_path : str, optional
-        Path to save the DataFrame as CSV if anchor points are saved (used only if 
+        Path to save the DataFrame as CSV if anchor points are saved (used only if
         try_it_out is False).
 
     Returns
     -------
     None
-        The selected anchor points are stored in the DataFrame under 'Baseline 
+        The selected anchor points are stored in the DataFrame under 'Baseline
         Parameters'.
     """
     SELECTED_ANCHOR_POINTS = []
@@ -1351,7 +1505,7 @@ def anchor_points_selection(
     # --- Accept/Redo logic, defined once and reused ---
     def show_baseline_preview():
         """
-        Show a preview of the cubic spline baseline and baseline-corrected spectrum 
+        Show a preview of the cubic spline baseline and baseline-corrected spectrum
         using the selected anchor points.
 
         Helper function for select_anchor_points().
@@ -1441,7 +1595,8 @@ def anchor_points_selection(
                                 SELECTED_ANCHOR_POINTS
                             )
                             FTIR_DataFrame.at[idx, "Baseline Function"] = "Manual"
-                    message = (f"Anchor points saved to Baseline Parameters and "
+                    message = (
+                        f"Anchor points saved to Baseline Parameters and "
                         f"Baseline Function set to 'Manual' for material '{mat}'."
                     )
                     print(message)
@@ -1463,7 +1618,7 @@ def anchor_points_selection(
         """
         Clear current selection and reset the plot for new anchor point selection.
 
-        Helper function for select_anchor_points(). Clears anchor points and resets the 
+        Helper function for select_anchor_points(). Clears anchor points and resets the
         interactive plot and widgets for a new selection.
         """
         # Clear anchor points and reset plot
@@ -1485,9 +1640,9 @@ def anchor_points_selection(
     def continue_callback(b):
         """
         Handle click on Continue button.
-        
+
         Helper function for select_anchor_points(). Handles the Continue button for the
-        initial anchor selection. If enough points are selected, shows the baseline 
+        initial anchor selection. If enough points are selected, shows the baseline
         preview; otherwise, prompts the user to select more points.
         """
         button_box_out.clear_output()
@@ -1503,7 +1658,7 @@ def anchor_points_selection(
     def redo_callback(b):
         """
         Helper function:
-        Handles the Redo button for the initial anchor selection, resetting the 
+        Handles the Redo button for the initial anchor selection, resetting the
         selection process.
         """
         reset_selection()
@@ -1517,6 +1672,7 @@ def anchor_points_selection(
     with button_box_out:
         display(button_box)
     return None
+
 
 def normalization_peak_selection(FTIR_DataFrame, material=None, filepath=None):
     """
@@ -1631,8 +1787,10 @@ def normalization_peak_selection(FTIR_DataFrame, material=None, filepath=None):
         # dotted vertical line to show first click registered
         vline = dict(
             type="line",
-            x0=x0, x1=x0,
-            y0=min(y_data), y1=max(y_data),
+            x0=x0,
+            x1=x0,
+            y0=min(y_data),
+            y1=max(y_data),
             line=dict(color="red", dash="dot"),
             name=first_vline_name,
         )
@@ -1641,20 +1799,34 @@ def normalization_peak_selection(FTIR_DataFrame, material=None, filepath=None):
     def _draw_selection_visuals(x0, x1):
         # vertical lines
         vline1 = dict(
-            type="line", x0=x0, x1=x0, y0=min(y_data), y1=max(y_data),
-            line=dict(color="red", dash="dash"), name="norm_vline_1"
+            type="line",
+            x0=x0,
+            x1=x0,
+            y0=min(y_data),
+            y1=max(y_data),
+            line=dict(color="red", dash="dash"),
+            name="norm_vline_1",
         )
         vline2 = dict(
-            type="line", x0=x1, x1=x1, y0=min(y_data), y1=max(y_data),
-            line=dict(color="red", dash="dash"), name="norm_vline_2"
+            type="line",
+            x0=x1,
+            x1=x1,
+            y0=min(y_data),
+            y1=max(y_data),
+            line=dict(color="red", dash="dash"),
+            name="norm_vline_2",
         )
         # rectangle shading
         rect = dict(
             type="rect",
-            x0=min(x0, x1), x1=max(x0, x1),
-            y0=min(y_data), y1=max(y_data),
-            fillcolor="rgba(0,128,0,0.15)", line=dict(width=0),
-            layer="below", name=shaded_shape_id,
+            x0=min(x0, x1),
+            x1=max(x0, x1),
+            y0=min(y_data),
+            y1=max(y_data),
+            fillcolor="rgba(0,128,0,0.15)",
+            line=dict(width=0),
+            layer="below",
+            name=shaded_shape_id,
         )
         fig.add_shape(vline1)
         fig.add_shape(vline2)
@@ -1728,6 +1900,7 @@ def normalization_peak_selection(FTIR_DataFrame, material=None, filepath=None):
             return
         FTIR_DataFrame.at[row.name, target_col] = str(rng)
         _finalize_and_clear()
+        print(f"Saved normalization peak range {rng} for this spectrum.")
 
     def _save_for_this_material(b):
         rng = _current_range()
@@ -1745,6 +1918,7 @@ def normalization_peak_selection(FTIR_DataFrame, material=None, filepath=None):
         mask = FTIR_DataFrame["Material"] == mat
         FTIR_DataFrame.loc[mask, target_col] = str(rng)
         _finalize_and_clear()
+        print(f"Saved normalization peak range {rng} for material '{mat}'.")
 
     def _redo(b):
         selected_points.clear()
@@ -1765,16 +1939,17 @@ def normalization_peak_selection(FTIR_DataFrame, material=None, filepath=None):
     display(fig, info_out, msg_out, btn_box)
     return FTIR_DataFrame
 
+
 def spectrum_normalization(
     FTIR_DataFrame,
     material,
 ):
     """
     Normalize baseline-corrected spectra.
-     
-    Normalizes the baseline-corrected spectra so the peak within the normalization range
-    is the same across all files of a material. Uses the largest peak among the group
-    as the target (e.g., if peaks are 10 and 5, the second is doubled).
+
+    For each spectrum of the given material, finds the maximum value within the
+    selected normalization range and divides the entire spectrum by that value,
+    making the local maximum equal to 1.
 
     Parameters
     ----------
@@ -1786,7 +1961,7 @@ def spectrum_normalization(
     Returns
     -------
     pd.DataFrame
-        Updated DataFrame with normalized values written back to source_col.
+        Updated DataFrame with normalized values written to 'Normalized and Corrected Data'.
     """
     if FTIR_DataFrame is None:
         raise ValueError("FTIR_DataFrame must be loaded in.")
@@ -1794,6 +1969,7 @@ def spectrum_normalization(
         raise ValueError("material is required.")
 
     source_column = "Baseline-Corrected Data"
+    dest_column = "Normalized and Corrected Data"
     range_column = "Normalization Peak Wavenumber"
 
     subset = FTIR_DataFrame[FTIR_DataFrame["Material"] == material]
@@ -1808,101 +1984,428 @@ def spectrum_normalization(
             f"loaded correctly."
         )
 
-    # Collect per-row peak within normalization window
-    per_row_peak = {}
-    parsed_rows = {}
+    # Ensure source/destination columns are object dtype (hold per-row lists)
+    if source_column in FTIR_DataFrame.columns:
+        try:
+            FTIR_DataFrame[source_column] = FTIR_DataFrame[source_column].astype(object)
+        except Exception:
+            pass
+    # Ensure destination column exists and is object dtype
+    if dest_column not in FTIR_DataFrame.columns:
+        FTIR_DataFrame[dest_column] = None
+    try:
+        FTIR_DataFrame[dest_column] = FTIR_DataFrame[dest_column].astype(object)
+    except Exception:
+        pass
 
+    # Normalize each spectrum by its own max within the normalization window
+    updated = 0
+    skipped = 0
     for idx, row in subset.iterrows():
         norm_range = row.get(range_column, None)
         if norm_range is None:
-            raise ValueError(
-                f"Row {idx} missing normalization range in column '{range_column}'. "
-                f"Ensure it is set before normalization."
-            )
+            skipped += 1
+            continue
         # Parse normalization range
         if isinstance(norm_range, str):
             try:
                 norm_range = ast.literal_eval(norm_range)
             except Exception:
-                raise ValueError(
-                    f"Row {idx} has invalid normalization range string: '{norm_range}'."
-                )
+                skipped += 1
+                continue
         if not isinstance(norm_range, (list, tuple)) or len(norm_range) != 2:
-            raise ValueError(
-                f"Row {idx} has invalid normalization range: '{norm_range}'. "
-                f"Expected a list or tuple of two numeric values."
-            )
+            skipped += 1
+            continue
         try:
             lo, hi = float(norm_range[0]), float(norm_range[1])
         except Exception:
-            raise ValueError(
-                f"Row {idx} has non-numeric values in normalization range: '{norm_range}'."
-            )
+            skipped += 1
+            continue
+
         x = row.get(x_axis_column, None)
         y = row.get(source_column, None)
         if x is None or y is None:
+            skipped += 1
             continue
         if isinstance(x, str):
             try:
                 x = ast.literal_eval(x)
             except Exception:
+                skipped += 1
                 continue
         if isinstance(y, str):
             try:
                 y = ast.literal_eval(y)
             except Exception:
+                skipped += 1
                 continue
-        if x is None or y is None:
-            continue
         try:
             x_arr = np.asarray(x, dtype=float)
             y_arr = np.asarray(y, dtype=float)
         except Exception:
+            skipped += 1
             continue
         if x_arr.shape[0] != y_arr.shape[0] or x_arr.ndim != 1:
+            skipped += 1
             continue
 
-        # Indices inside [lo, hi] regardless of axis order
         lo_, hi_ = min(lo, hi), max(lo, hi)
         mask = (x_arr >= lo_) & (x_arr <= hi_)
         if not np.any(mask):
+            skipped += 1
             continue
 
         local_peak = np.nanmax(y_arr[mask])
-        if not np.isfinite(local_peak):
+        if not np.isfinite(local_peak) or local_peak <= 0:
+            skipped += 1
             continue
 
-        per_row_peak[idx] = float(local_peak)
-        parsed_rows[idx] = (y_arr,)
-
-    if not per_row_peak:
-        raise ValueError(
-            f"No valid normalization ranges/data for material '{material}'. "
-            f"Ensure '{range_column}' is set and '{source_column}' exists."
-        )
-
-    target_peak = max(per_row_peak.values())
-    if target_peak == 0 or target_peak < 0:
-        raise ValueError(
-            f"Target peak within normalization range is zero or negative; cannot "
-            f"normalize."
-        )
-
-    updated = 0
-    for idx, row_peak in per_row_peak.items():
-        if row_peak <= 0:
-            raise ValueError(
-                f"Row {idx} has non-positive peak {row_peak:.6g}; cannot normalize."
-            )
-        scale = target_peak / row_peak
-        # Retrieve original y_arr again (already parsed)
-        y_arr = parsed_rows[idx][0]
-        y_scaled = (y_arr * scale).astype(float).tolist()
-        FTIR_DataFrame.at[idx, source_column] = y_scaled
+        # Scale this spectrum so its max in the range becomes 1 and write to destination column
+        y_scaled = (y_arr / local_peak).astype(float).tolist()
+        FTIR_DataFrame.at[idx, dest_column] = y_scaled
         updated += 1
 
     print(
-        f"Normalized material '{material}' using target peak {target_peak:.6g} "
-        f"from {len(per_row_peak)} files; updated {updated} files."
+        f"Normalized material '{material}': updated {updated} spectra; skipped {skipped} (missing/invalid range or data). "
+        f"Each spectrum scaled by its own peak within the selected range."
     )
+    return FTIR_DataFrame
+
+
+def find_peak_info(FTIR_DataFrame, materials=None, filepath=None):
+    """
+    Interactive peak finder for normalized spectra.
+
+    - Uses scipy.signal.find_peaks on 'Normalized and Corrected Data'.
+    - Displays a live-updating plot with user-adjustable parameters.
+    - Saves results (lists) to 'Peak Wavenumbers' and 'Peak Absorbances' columns.
+
+    Parameters
+    ----------
+    FTIR_DataFrame : pd.DataFrame
+        The DataFrame containing FTIR spectral data.
+    materials : list[str] | str | None
+        Materials to include; if str, comma-separated is accepted. Ignored if filename is provided.
+    filename : str | None
+        Specific filename to filter by (exact match). If provided, overrides materials.
+
+    Returns
+    -------
+    pd.DataFrame
+        The updated DataFrame (in-place modifications also applied).
+    """
+    if FTIR_DataFrame is None or len(FTIR_DataFrame) == 0:
+        raise ValueError("FTIR_DataFrame must be loaded and non-empty.")
+
+    # Build filtered set
+    if filepath is not None:
+        filtered = FTIR_DataFrame[FTIR_DataFrame["File Path"] == filepath]
+        if filtered.empty:
+            raise ValueError(f"No rows found for filepath '{filepath}'.")
+    elif materials is not None:
+        if isinstance(materials, str):
+            mats = [m.strip() for m in materials.split(",") if m.strip()]
+        else:
+            mats = [str(m).strip() for m in materials]
+        filtered = FTIR_DataFrame[FTIR_DataFrame["Material"].isin(mats)]
+        if filtered.empty:
+            raise ValueError(f"No rows found for materials: {mats}.")
+    else:
+        raise ValueError("Either 'materials' or 'filename' must be provided.")
+
+    # Ensure destination columns exist and are object dtype
+    for col in ("Peak Wavenumbers", "Peak Absorbances"):
+        if col not in FTIR_DataFrame.columns:
+            FTIR_DataFrame[col] = None
+        try:
+            FTIR_DataFrame[col] = FTIR_DataFrame[col].astype(object)
+        except Exception:
+            pass
+
+    def _parse_seq(val):
+        if isinstance(val, str):
+            try:
+                return ast.literal_eval(val)
+            except Exception:
+                return None
+        return val
+
+    # Build spectrum options (index -> label)
+    options = []
+    for idx, r in filtered.iterrows():
+        label = f"{r.get('Material','')} | {r.get('Conditions', r.get('Condition',''))} | T={r.get('Time','')} | {r.get('File Name','')}"
+        options.append((label, idx))
+    if not options:
+        raise ValueError("No spectra available after filtering.")
+
+    # Seed from first spectrum
+    first_idx = options[0][1]
+    x0 = _parse_seq(FTIR_DataFrame.loc[first_idx].get("X-Axis"))
+    y0 = _parse_seq(FTIR_DataFrame.loc[first_idx].get("Normalized and Corrected Data"))
+    if x0 is None or y0 is None:
+        raise ValueError(
+            "Selected spectrum is missing 'X-Axis' or 'Normalized and Corrected Data'."
+        )
+    x0 = np.asarray(x0, dtype=float)
+    y0 = np.asarray(y0, dtype=float)
+    xmin, xmax = (float(np.nanmin(x0)), float(np.nanmax(x0)))
+
+    # Widgets
+    spectrum_sel = widgets.Dropdown(
+        options=options,
+        value=first_idx,
+        description="Spectrum",
+        layout=widgets.Layout(width="70%"),
+    )
+    x_range = widgets.FloatRangeSlider(
+        value=[xmin, xmax],
+        min=xmin,
+        max=xmax,
+        step=(xmax - xmin) / 1000 or 1.0,
+        description="X-range",
+        continuous_update=False,
+        readout_format=".1f",
+        layout=widgets.Layout(width="90%"),
+    )
+    prominence = widgets.FloatSlider(
+        value=0.05,
+        min=0.0,
+        max=1.0,
+        step=0.005,
+        description="Prominence",
+        readout_format=".3f",
+        continuous_update=False,
+        style={"description_width": "auto"},
+    )
+    min_height = widgets.FloatSlider(
+        value=0.0,
+        min=0.0,
+        max=2.0,
+        step=0.01,
+        description="Min height",
+        readout_format=".2f",
+        continuous_update=False,
+        style={"description_width": "auto"},
+    )
+    distance = widgets.IntSlider(
+        value=5,
+        min=1,
+        max=2000,
+        step=1,
+        description="Min distance",
+        continuous_update=False,
+        style={"description_width": "auto"},
+    )
+    width = widgets.IntSlider(
+        value=1,
+        min=1,
+        max=200,
+        step=1,
+        description="Min width",
+        continuous_update=False,
+        style={"description_width": "auto"},
+    )
+    max_peaks = widgets.IntSlider(
+        value=10,
+        min=0,
+        max=100,
+        step=1,
+        description="Max peaks",
+        continuous_update=False,
+        style={"description_width": "auto"},
+    )
+
+    save_file_btn = widgets.Button(description="Save for file", button_style="success")
+    save_all_btn = widgets.Button(description="Save for filtered", button_style="info")
+    close_btn = widgets.Button(description="Close", button_style="danger")
+    msg_out = widgets.Output()
+
+    # Plotly figure
+    fig = go.FigureWidget()
+    fig.add_scatter(x=x0, y=y0, mode="lines", name="Normalized and Corrected")
+    fig.add_scatter(
+        x=[],
+        y=[],
+        mode="markers",
+        name="Peaks",
+        marker=dict(color="red", size=9, symbol="x"),
+    )
+    fig.update_layout(
+        title="Peak Selection (live)",
+        xaxis_title="Wavenumber (cm⁻¹)",
+        yaxis_title="Absorbance (AU)",
+    )
+
+    def _get_xy(row_idx):
+        r = FTIR_DataFrame.loc[row_idx]
+        x = _parse_seq(r.get("X-Axis"))
+        y = _parse_seq(r.get("Normalized and Corrected Data"))
+        if x is None or y is None:
+            return None, None
+        try:
+            x_arr = np.asarray(x, dtype=float)
+            y_arr = np.asarray(y, dtype=float)
+        except Exception:
+            return None, None
+        if x_arr.ndim != 1 or y_arr.ndim != 1 or x_arr.shape[0] != y_arr.shape[0]:
+            return None, None
+        return x_arr, y_arr
+
+    def _compute_peaks_for_xy(x_arr, y_arr, x_min, x_max):
+        # restrict to x-range
+        mask = (x_arr >= x_min) & (x_arr <= x_max)
+        if not np.any(mask):
+            return np.array([], dtype=int), np.array([], dtype=float)
+        y_sub = y_arr[mask]
+        idx_sub = np.where(mask)[0]
+        kwargs = {
+            "prominence": (
+                float(prominence.value) if prominence.value is not None else None
+            ),
+            "distance": int(distance.value) if distance.value is not None else None,
+            "width": int(width.value) if width.value is not None else None,
+        }
+        if min_height.value and float(min_height.value) > 0:
+            kwargs["height"] = float(min_height.value)
+        peaks_local, _props = find_peaks(
+            y_sub, **{k: v for k, v in kwargs.items() if v is not None}
+        )
+        if peaks_local.size == 0:
+            return np.array([], dtype=int), np.array([], dtype=float)
+        peaks_global = idx_sub[peaks_local]
+        # limit to top-N by height if requested
+        if (
+            max_peaks.value
+            and int(max_peaks.value) > 0
+            and peaks_global.size > int(max_peaks.value)
+        ):
+            heights = y_arr[peaks_global]
+            order = np.argsort(heights)[::-1][: int(max_peaks.value)]
+            peaks_global = peaks_global[order]
+        return peaks_global, y_arr[peaks_global]
+
+    def _update_plot(*args):
+        idx = spectrum_sel.value
+        x_arr, y_arr = _get_xy(idx)
+        if x_arr is None:
+            with msg_out:
+                msg_out.clear_output()
+                print("Selected spectrum missing or invalid normalized data.")
+            return
+        # Update traces
+        with fig.batch_update():
+            fig.data[0].x = x_arr
+            fig.data[0].y = y_arr
+        # Update range bounds
+        x_min, x_max = float(np.nanmin(x_arr)), float(np.nanmax(x_arr))
+        x_range.min = x_min
+        x_range.max = x_max
+        lo, hi = x_range.value
+        lo = max(x_min, min(lo, x_max))
+        hi = max(lo, min(hi, x_max))
+        x_range.value = [lo, hi]
+        # Peaks and shading
+        peaks_idx, peaks_y = _compute_peaks_for_xy(x_arr, y_arr, lo, hi)
+        with fig.batch_update():
+            fig.data[1].x = x_arr[peaks_idx] if peaks_idx.size else []
+            fig.data[1].y = peaks_y if peaks_idx.size else []
+            fig.layout.shapes = ()
+            rect = dict(
+                type="rect",
+                x0=lo,
+                x1=hi,
+                y0=float(np.nanmin(y_arr)),
+                y1=float(np.nanmax(y_arr)),
+                fillcolor="rgba(0,128,0,0.12)",
+                line=dict(width=0),
+                layer="below",
+            )
+            fig.add_shape(rect)
+        with msg_out:
+            msg_out.clear_output()
+            print(f"Peaks found: {len(peaks_idx)}")
+
+    def _save_for_file(b):
+        idx = spectrum_sel.value
+        x_arr, y_arr = _get_xy(idx)
+        if x_arr is None:
+            with msg_out:
+                msg_out.clear_output()
+                print("Cannot save: selected spectrum missing normalized data.")
+            return
+        lo, hi = x_range.value
+        peaks_idx, peaks_y = _compute_peaks_for_xy(x_arr, y_arr, float(lo), float(hi))
+        FTIR_DataFrame.at[idx, "Peak Wavenumbers"] = (
+            x_arr[peaks_idx].astype(float).tolist()
+        )
+        FTIR_DataFrame.at[idx, "Peak Absorbances"] = peaks_y.astype(float).tolist()
+        with msg_out:
+            msg_out.clear_output()
+            print(
+                f"Saved {len(peaks_idx)} peaks for file '{FTIR_DataFrame.loc[idx, 'File Name']}'."
+            )
+
+    def _save_for_filtered(b):
+        lo, hi = x_range.value
+        updated, skipped = 0, 0
+        for idx, _row in filtered.iterrows():
+            x_arr, y_arr = _get_xy(idx)
+            if x_arr is None:
+                skipped += 1
+                continue
+            peaks_idx, peaks_y = _compute_peaks_for_xy(
+                x_arr, y_arr, float(lo), float(hi)
+            )
+            FTIR_DataFrame.at[idx, "Peak Wavenumbers"] = (
+                x_arr[peaks_idx].astype(float).tolist()
+            )
+            FTIR_DataFrame.at[idx, "Peak Absorbances"] = peaks_y.astype(float).tolist()
+            updated += 1
+        with msg_out:
+            msg_out.clear_output()
+            print(
+                f"Updated {updated} spectra; skipped {skipped} (missing/invalid data)."
+            )
+
+    def _close_ui(b):
+        try:
+            spectrum_sel.close()
+            x_range.close()
+            prominence.close()
+            min_height.close()
+            distance.close()
+            width.close()
+            max_peaks.close()
+            save_file_btn.close()
+            save_all_btn.close()
+            close_btn.close()
+            msg_out.clear_output()
+            msg_out.close()
+            fig.close()
+        finally:
+            clear_output(wait=True)
+
+    # Wire events
+    spectrum_sel.observe(_update_plot, names="value")
+    x_range.observe(_update_plot, names="value")
+    prominence.observe(_update_plot, names="value")
+    min_height.observe(_update_plot, names="value")
+    distance.observe(_update_plot, names="value")
+    width.observe(_update_plot, names="value")
+    max_peaks.observe(_update_plot, names="value")
+    save_file_btn.on_click(_save_for_file)
+    save_all_btn.on_click(_save_for_filtered)
+    close_btn.on_click(_close_ui)
+
+    controls_row1 = widgets.HBox([spectrum_sel])
+    controls_row2 = widgets.HBox([x_range])
+    controls_row3 = widgets.HBox([prominence, min_height, distance])
+    controls_row4 = widgets.HBox(
+        [width, max_peaks, save_file_btn, save_all_btn, close_btn]
+    )
+    ui = widgets.VBox([controls_row1, controls_row2, controls_row3, controls_row4])
+
+    display(ui, fig, msg_out)
+    _update_plot()
+
     return FTIR_DataFrame
