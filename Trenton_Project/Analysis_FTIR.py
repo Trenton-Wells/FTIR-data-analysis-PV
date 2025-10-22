@@ -1961,7 +1961,8 @@ def spectrum_normalization(
     Returns
     -------
     pd.DataFrame
-        Updated DataFrame with normalized values written to 'Normalized and Corrected Data'.
+        Updated DataFrame with normalized values written to 'Normalized and Corrected 
+        Data'.
     """
     if FTIR_DataFrame is None:
         raise ValueError("FTIR_DataFrame must be loaded in.")
@@ -2060,13 +2061,14 @@ def spectrum_normalization(
             skipped += 1
             continue
 
-        # Scale this spectrum so its max in the range becomes 1 and write to destination column
+        # Scale this spectrum so its max in the range becomes 1 and write to DataFrame
         y_scaled = (y_arr / local_peak).astype(float).tolist()
         FTIR_DataFrame.at[idx, dest_column] = y_scaled
         updated += 1
 
     print(
-        f"Normalized material '{material}': updated {updated} spectra; skipped {skipped} (missing/invalid range or data). "
+        f"Normalized material '{material}': updated {updated} spectra; skipped "
+        f"{skipped} (missing/invalid range or data). "
         f"Each spectrum scaled by its own peak within the selected range."
     )
     return FTIR_DataFrame
@@ -2074,9 +2076,11 @@ def spectrum_normalization(
 
 def find_peak_info(FTIR_DataFrame, materials=None, filepath=None):
     """
-    Interactive peak finder for normalized spectra.
+    Interactive peak finder for normalized and baseline-corrected spectra.
 
     - Uses scipy.signal.find_peaks on 'Normalized and Corrected Data'.
+    - Checkboxes enable up to 3 independent X-range sliders; peaks are found in the 
+    union of enabled ranges.
     - Displays a live-updating plot with user-adjustable parameters.
     - Saves results (lists) to 'Peak Wavenumbers' and 'Peak Absorbances' columns.
 
@@ -2085,9 +2089,10 @@ def find_peak_info(FTIR_DataFrame, materials=None, filepath=None):
     FTIR_DataFrame : pd.DataFrame
         The DataFrame containing FTIR spectral data.
     materials : list[str] | str | None
-        Materials to include; if str, comma-separated is accepted. Ignored if filename is provided.
-    filename : str | None
-        Specific filename to filter by (exact match). If provided, overrides materials.
+        Materials to include; if str, comma-separated is accepted. Ignored if filepath 
+        is provided.
+    filepath : str | None
+        Specific file path to filter by (exact match). If provided, overrides materials.
 
     Returns
     -------
@@ -2133,7 +2138,10 @@ def find_peak_info(FTIR_DataFrame, materials=None, filepath=None):
     # Build spectrum options (index -> label)
     options = []
     for idx, r in filtered.iterrows():
-        label = f"{r.get('Material','')} | {r.get('Conditions', r.get('Condition',''))} | T={r.get('Time','')} | {r.get('File Name','')}"
+        label = (
+            f"{r.get('Material','')} | {r.get('Conditions', r.get('Condition',''))}"
+            f" | T={r.get('Time','')} | {r.get('File Name','')}"
+        )
         options.append((label, idx))
     if not options:
         raise ValueError("No spectra available after filtering.")
@@ -2157,15 +2165,25 @@ def find_peak_info(FTIR_DataFrame, materials=None, filepath=None):
         description="Spectrum",
         layout=widgets.Layout(width="70%"),
     )
-    x_range = widgets.FloatRangeSlider(
-        value=[xmin, xmax],
-        min=xmin,
-        max=xmax,
-        step=(xmax - xmin) / 1000 or 1.0,
-        description="X-range",
-        continuous_update=False,
-        readout_format=".1f",
-        layout=widgets.Layout(width="90%"),
+    # Up to three optional X-range selectors, each gated by a checkbox
+    step_val = (xmax - xmin) / 1000 or 1.0
+    use_r1 = widgets.Checkbox(value=True, description="Use range 1")
+    x_range1 = widgets.FloatRangeSlider(
+        value=[xmin, xmax], min=xmin, max=xmax, step=step_val,
+        description="X-range 1", continuous_update=False, readout_format=".1f",
+        layout=widgets.Layout(width="90%"), disabled=not use_r1.value
+    )
+    use_r2 = widgets.Checkbox(value=False, description="Use range 2")
+    x_range2 = widgets.FloatRangeSlider(
+        value=[xmin, xmax], min=xmin, max=xmax, step=step_val,
+        description="X-range 2", continuous_update=False, readout_format=".1f",
+        layout=widgets.Layout(width="90%"), disabled=not use_r2.value
+    )
+    use_r3 = widgets.Checkbox(value=False, description="Use range 3")
+    x_range3 = widgets.FloatRangeSlider(
+        value=[xmin, xmax], min=xmin, max=xmax, step=step_val,
+        description="X-range 3", continuous_update=False, readout_format=".1f",
+        layout=widgets.Layout(width="90%"), disabled=not use_r3.value
     )
     prominence = widgets.FloatSlider(
         value=0.05,
@@ -2192,7 +2210,7 @@ def find_peak_info(FTIR_DataFrame, materials=None, filepath=None):
         min=1,
         max=2000,
         step=1,
-        description="Min distance",
+        description="Min separation",
         continuous_update=False,
         style={"description_width": "auto"},
     )
@@ -2251,9 +2269,16 @@ def find_peak_info(FTIR_DataFrame, materials=None, filepath=None):
             return None, None
         return x_arr, y_arr
 
-    def _compute_peaks_for_xy(x_arr, y_arr, x_min, x_max):
-        # restrict to x-range
-        mask = (x_arr >= x_min) & (x_arr <= x_max)
+    def _compute_peaks_for_ranges(x_arr, y_arr, ranges):
+        # Build a combined mask for all enabled ranges
+        if not ranges:
+            return np.array([], dtype=int), np.array([], dtype=float)
+        mask = np.zeros(x_arr.shape[0], dtype=bool)
+        for (x_min, x_max) in ranges:
+            if x_min is None or x_max is None:
+                continue
+            lo, hi = (float(min(x_min, x_max)), float(max(x_min, x_max)))
+            mask |= (x_arr >= lo) & (x_arr <= hi)
         if not np.any(mask):
             return np.array([], dtype=int), np.array([], dtype=float)
         y_sub = y_arr[mask]
@@ -2284,6 +2309,16 @@ def find_peak_info(FTIR_DataFrame, materials=None, filepath=None):
             peaks_global = peaks_global[order]
         return peaks_global, y_arr[peaks_global]
 
+    def _current_ranges():
+        rs = []
+        if use_r1.value:
+            rs.append((x_range1.value[0], x_range1.value[1]))
+        if use_r2.value:
+            rs.append((x_range2.value[0], x_range2.value[1]))
+        if use_r3.value:
+            rs.append((x_range3.value[0], x_range3.value[1]))
+        return rs
+
     def _update_plot(*args):
         idx = spectrum_sel.value
         x_arr, y_arr = _get_xy(idx)
@@ -2296,34 +2331,41 @@ def find_peak_info(FTIR_DataFrame, materials=None, filepath=None):
         with fig.batch_update():
             fig.data[0].x = x_arr
             fig.data[0].y = y_arr
-        # Update range bounds
+        # Update bounds for each slider and enable/disable based on checkboxes
         x_min, x_max = float(np.nanmin(x_arr)), float(np.nanmax(x_arr))
-        x_range.min = x_min
-        x_range.max = x_max
-        lo, hi = x_range.value
-        lo = max(x_min, min(lo, x_max))
-        hi = max(lo, min(hi, x_max))
-        x_range.value = [lo, hi]
-        # Peaks and shading
-        peaks_idx, peaks_y = _compute_peaks_for_xy(x_arr, y_arr, lo, hi)
+        for cb, sl in ((use_r1, x_range1), (use_r2, x_range2), (use_r3, x_range3)):
+            sl.min = x_min
+            sl.max = x_max
+            try:
+                lo, hi = sl.value
+            except Exception:
+                lo, hi = x_min, x_max
+            lo = max(x_min, min(lo, x_max))
+            hi = max(lo, min(hi, x_max))
+            sl.value = [lo, hi]
+            sl.disabled = not cb.value
+        # Peaks and shading across all enabled ranges
+        ranges = _current_ranges()
+        peaks_idx, peaks_y = _compute_peaks_for_ranges(x_arr, y_arr, ranges)
         with fig.batch_update():
             fig.data[1].x = x_arr[peaks_idx] if peaks_idx.size else []
             fig.data[1].y = peaks_y if peaks_idx.size else []
             fig.layout.shapes = ()
-            rect = dict(
-                type="rect",
-                x0=lo,
-                x1=hi,
-                y0=float(np.nanmin(y_arr)),
-                y1=float(np.nanmax(y_arr)),
-                fillcolor="rgba(0,128,0,0.12)",
-                line=dict(width=0),
-                layer="below",
-            )
-            fig.add_shape(rect)
+            y0_min = float(np.nanmin(y_arr))
+            y0_max = float(np.nanmax(y_arr))
+            for rng in ranges:
+                lo_i, hi_i = float(min(rng)), float(max(rng))
+                rect = dict(
+                    type="rect", x0=lo_i, x1=hi_i, y0=y0_min, y1=y0_max,
+                    fillcolor="rgba(0,128,0,0.12)", line=dict(width=0), layer="below",
+                )
+                fig.add_shape(rect)
         with msg_out:
             msg_out.clear_output()
-            print(f"Peaks found: {len(peaks_idx)}")
+            if not ranges:
+                print("Enable at least one X-range to find peaks.")
+            else:
+                print(f"Peaks found: {len(peaks_idx)}")
 
     def _save_for_file(b):
         idx = spectrum_sel.value
@@ -2333,8 +2375,13 @@ def find_peak_info(FTIR_DataFrame, materials=None, filepath=None):
                 msg_out.clear_output()
                 print("Cannot save: selected spectrum missing normalized data.")
             return
-        lo, hi = x_range.value
-        peaks_idx, peaks_y = _compute_peaks_for_xy(x_arr, y_arr, float(lo), float(hi))
+        ranges = _current_ranges()
+        if not ranges:
+            with msg_out:
+                msg_out.clear_output()
+                print("Please enable at least one X-range before saving.")
+            return
+        peaks_idx, peaks_y = _compute_peaks_for_ranges(x_arr, y_arr, ranges)
         FTIR_DataFrame.at[idx, "Peak Wavenumbers"] = (
             x_arr[peaks_idx].astype(float).tolist()
         )
@@ -2346,16 +2393,19 @@ def find_peak_info(FTIR_DataFrame, materials=None, filepath=None):
             )
 
     def _save_for_filtered(b):
-        lo, hi = x_range.value
+        ranges = _current_ranges()
+        if not ranges:
+            with msg_out:
+                msg_out.clear_output()
+                print("Please enable at least one X-range before saving.")
+            return
         updated, skipped = 0, 0
         for idx, _row in filtered.iterrows():
             x_arr, y_arr = _get_xy(idx)
             if x_arr is None:
                 skipped += 1
                 continue
-            peaks_idx, peaks_y = _compute_peaks_for_xy(
-                x_arr, y_arr, float(lo), float(hi)
-            )
+            peaks_idx, peaks_y = _compute_peaks_for_ranges(x_arr, y_arr, ranges)
             FTIR_DataFrame.at[idx, "Peak Wavenumbers"] = (
                 x_arr[peaks_idx].astype(float).tolist()
             )
@@ -2370,7 +2420,8 @@ def find_peak_info(FTIR_DataFrame, materials=None, filepath=None):
     def _close_ui(b):
         try:
             spectrum_sel.close()
-            x_range.close()
+            x_range1.close(); x_range2.close(); x_range3.close()
+            use_r1.close(); use_r2.close(); use_r3.close()
             prominence.close()
             min_height.close()
             distance.close()
@@ -2387,7 +2438,8 @@ def find_peak_info(FTIR_DataFrame, materials=None, filepath=None):
 
     # Wire events
     spectrum_sel.observe(_update_plot, names="value")
-    x_range.observe(_update_plot, names="value")
+    for w in (x_range1, x_range2, x_range3, use_r1, use_r2, use_r3):
+        w.observe(_update_plot, names="value")
     prominence.observe(_update_plot, names="value")
     min_height.observe(_update_plot, names="value")
     distance.observe(_update_plot, names="value")
@@ -2398,14 +2450,373 @@ def find_peak_info(FTIR_DataFrame, materials=None, filepath=None):
     close_btn.on_click(_close_ui)
 
     controls_row1 = widgets.HBox([spectrum_sel])
-    controls_row2 = widgets.HBox([x_range])
-    controls_row3 = widgets.HBox([prominence, min_height, distance])
-    controls_row4 = widgets.HBox(
-        [width, max_peaks, save_file_btn, save_all_btn, close_btn]
-    )
-    ui = widgets.VBox([controls_row1, controls_row2, controls_row3, controls_row4])
+    controls_row2 = widgets.HBox([use_r1, x_range1])
+    controls_row3 = widgets.HBox([use_r2, x_range2])
+    controls_row4 = widgets.HBox([use_r3, x_range3])
+    controls_row5 = widgets.HBox([prominence, min_height, distance])
+    controls_row6 = widgets.HBox([width, max_peaks, save_file_btn, save_all_btn, close_btn])
+    ui = widgets.VBox([controls_row1, controls_row2, controls_row3, controls_row4, controls_row5, controls_row6])
 
     display(ui, fig, msg_out)
     _update_plot()
 
     return FTIR_DataFrame
+
+
+def peak_deconvolution(FTIR_DataFrame, materials=None, filepath=None):
+    """
+    Interactively deconvolute found peaks for area analysis.
+
+    Takes the peak info from find_peak_info and utilizes a Pseudo-Voigt model to 
+    approximately model the peak components as a linear combination of Gaussian and 
+    Lorentzian distributions. Allows for live changing of the Gaussian-Lorentzian
+    fraction parameter for each peak.
+
+    Parameters
+    ----------
+    FTIR_DataFrame : pd.DataFrame
+        The DataFrame containing FTIR spectral data.
+    materials : list[str] | str | None
+        Materials to include; if str, comma-separated is accepted. Ignored if filepath 
+        is provided.
+    filepath : str | None
+        Specific file path to filter by (exact match). If provided, overrides materials.
+
+    Returns
+    -------
+    None (update later for Json filling)
+    """
+    import importlib
+    try:
+        _lmfit_models = importlib.import_module("lmfit.models")
+        PseudoVoigtModel = getattr(_lmfit_models, "PseudoVoigtModel")
+    except Exception as e:
+        raise ImportError(
+            "lmfit is required for peak_deconvolution. Please install it (e.g., pip install lmfit)."
+        ) from e
+
+    if FTIR_DataFrame is None or len(FTIR_DataFrame) == 0:
+        raise ValueError("FTIR_DataFrame must be loaded and non-empty.")
+
+    # Filter selection analogous to find_peak_info
+    if filepath is not None:
+        filtered = FTIR_DataFrame[FTIR_DataFrame["File Path"] == filepath]
+        if filtered.empty:
+            raise ValueError(f"No rows found for filepath '{filepath}'.")
+    elif materials is not None:
+        if isinstance(materials, str):
+            mats = [m.strip() for m in materials.split(",") if m.strip()]
+        else:
+            mats = [str(m).strip() for m in materials]
+        filtered = FTIR_DataFrame[FTIR_DataFrame["Material"].isin(mats)]
+        if filtered.empty:
+            raise ValueError(f"No rows found for materials: {mats}.")
+    else:
+        raise ValueError("Either 'materials' or 'filepath' must be provided.")
+
+    # Ensure destination column exists for saving results
+    results_col = "Deconvolution Results"
+    if results_col not in FTIR_DataFrame.columns:
+        FTIR_DataFrame[results_col] = None
+    try:
+        FTIR_DataFrame[results_col] = FTIR_DataFrame[results_col].astype(object)
+    except Exception:
+        pass
+
+    def _parse_seq(val):
+        if isinstance(val, str):
+            try:
+                return ast.literal_eval(val)
+            except Exception:
+                return None
+        return val
+
+    # Build spectrum options
+    options = []
+    for idx, r in filtered.iterrows():
+        label = (
+            f"{r.get('Material','')} | {r.get('Conditions', r.get('Condition',''))}"
+            f" | T={r.get('Time','')} | {r.get('File Name','')}"
+        )
+        options.append((label, idx))
+    if not options:
+        raise ValueError("No spectra available after filtering.")
+
+    # Seed from first spectrum
+    first_idx = options[0][1]
+    x0 = _parse_seq(FTIR_DataFrame.loc[first_idx].get("X-Axis"))
+    y0 = _parse_seq(FTIR_DataFrame.loc[first_idx].get("Normalized and Corrected Data"))
+    if x0 is None or y0 is None:
+        raise ValueError(
+            "Selected spectrum is missing 'X-Axis' or 'Normalized and Corrected Data'."
+        )
+    x0 = np.asarray(x0, dtype=float)
+    y0 = np.asarray(y0, dtype=float)
+    xmin, xmax = (float(np.nanmin(x0)), float(np.nanmax(x0)))
+
+    # Widgets (spectrum and global fit controls; full x-range is always used)
+    spectrum_sel = widgets.Dropdown(
+        options=options,
+        value=first_idx,
+        description="Spectrum",
+        layout=widgets.Layout(width="70%"),
+    )
+    center_window = widgets.FloatSlider(
+        value=15.0, min=0.0, max=100.0, step=1.0,
+        description="Center ±window (cm⁻¹)", continuous_update=False,
+        style={"description_width": "auto"}, readout_format=".0f"
+    )
+    init_sigma = widgets.FloatSlider(
+        value=10.0, min=1.0, max=100.0, step=0.5,
+        description="Init sigma (cm⁻¹)", continuous_update=False,
+        style={"description_width": "auto"}, readout_format=".1f"
+    )
+    save_btn = widgets.Button(description="Save for file", button_style="success")
+    close_btn = widgets.Button(description="Close", button_style="danger")
+    msg_out = widgets.Output()
+
+    # Dynamic per-peak controls: include checkbox + alpha slider per peak
+    alpha_sliders = []  # list[widgets.FloatSlider]
+    include_checkboxes = []  # list[widgets.Checkbox]
+    peak_controls_box = widgets.VBox([])
+
+    # Track last reduced chi-square per spectrum to report refit deltas
+    last_redchi_by_idx = {}
+
+    # Plot figure: data, fit, components (dynamic)
+    fig = go.FigureWidget()
+    fig.add_scatter(x=x0, y=y0, mode="lines", name="Data (Norm+Corr)")
+    fig.add_scatter(x=[], y=[], mode="lines", name="Composite Fit", line=dict(color="red"))
+    fig.update_layout(
+        title="Peak Deconvolution (Pseudo-Voigt)",
+        xaxis_title="Wavenumber (cm⁻¹)",
+        yaxis_title="Absorbance (AU)",
+    )
+
+    def _get_xy(row_idx):
+        r = FTIR_DataFrame.loc[row_idx]
+        x = _parse_seq(r.get("X-Axis"))
+        y = _parse_seq(r.get("Normalized and Corrected Data"))
+        if x is None or y is None:
+            return None, None
+        try:
+            x_arr = np.asarray(x, dtype=float)
+            y_arr = np.asarray(y, dtype=float)
+        except Exception:
+            return None, None
+        if x_arr.ndim != 1 or y_arr.ndim != 1 or x_arr.shape[0] != y_arr.shape[0]:
+            return None, None
+        return x_arr, y_arr
+
+    def _get_peaks(row_idx):
+        r = FTIR_DataFrame.loc[row_idx]
+        xs = _parse_seq(r.get("Peak Wavenumbers"))
+        ys = _parse_seq(r.get("Peak Absorbances"))
+        if xs is None or ys is None:
+            return [], []
+        try:
+            xs = list(xs)
+            ys = list(ys)
+        except Exception:
+            return [], []
+        if len(xs) != len(ys):
+            return [], []
+        # Sort peaks by wavenumber (ascending)
+        try:
+            pairs = sorted(zip(xs, ys), key=lambda t: float(t[0]))
+            xs_sorted, ys_sorted = [list(t) for t in zip(*pairs)] if pairs else ([], [])
+            return xs_sorted, ys_sorted
+        except Exception:
+            return xs, ys
+
+    def _rebuild_alpha_sliders(row_idx):
+        nonlocal alpha_sliders, include_checkboxes
+        xs, ys = _get_peaks(row_idx)
+        alpha_sliders = []
+        include_checkboxes = []
+        children = []
+        if not xs:
+            peak_controls_box.children = [widgets.HTML(
+                "<b>No peaks found for this spectrum.</b> Run find_peak_info first.")]
+            return
+        for i, (cx, cy) in enumerate(zip(xs, ys)):
+            label = widgets.Label(
+                value=f"Peak {i+1} @ {cx:.1f} cm⁻¹",
+                layout=widgets.Layout(width="220px")
+            )
+            cb = widgets.Checkbox(value=True, description="Include", indent=False,
+                                   layout=widgets.Layout(width="100px"))
+            s = widgets.FloatSlider(
+                value=0.5, min=0.0, max=1.0, step=0.01,
+                description="α", continuous_update=False, readout_format=".2f",
+                style={"description_width": "auto"}, layout=widgets.Layout(width="300px")
+            )
+            # Observe changes to refit
+            cb.observe(_fit_and_update_plot, names="value")
+            s.observe(_fit_and_update_plot, names="value")
+            include_checkboxes.append(cb)
+            alpha_sliders.append(s)
+            children.append(widgets.HBox([label, cb, s]))
+        peak_controls_box.children = children
+
+    def _fit_and_update_plot(*_):
+        idx = spectrum_sel.value
+        x_arr, y_arr = _get_xy(idx)
+        if x_arr is None:
+            with msg_out:
+                msg_out.clear_output(); print("Selected spectrum missing normalized data.")
+            return None
+        peaks_x, peaks_y = _get_peaks(idx)
+        if not peaks_x:
+            with msg_out:
+                msg_out.clear_output(); print("No peaks found for this spectrum.")
+            with fig.batch_update():
+                fig.data[0].x = x_arr; fig.data[0].y = y_arr
+                fig.data[1].x = []; fig.data[1].y = []
+                fig.layout.shapes = ()
+                while len(fig.data) > 2:
+                    fig.data = tuple(fig.data[:2])
+            return None
+
+        # Use full x-range for fitting
+        x_sub = x_arr; y_sub = y_arr
+
+        # Determine which peaks are included
+        included = [i for i, cb in enumerate(include_checkboxes) if cb.value]
+        if len(included) == 0:
+            with msg_out:
+                msg_out.clear_output(); print("No peaks selected. Enable one or more to fit.")
+            with fig.batch_update():
+                fig.data[0].x = x_arr; fig.data[0].y = y_arr
+                fig.data[1].x = []; fig.data[1].y = []
+                while len(fig.data) > 2:
+                    fig.data = tuple(fig.data[:2])
+            return None
+
+        # Build composite model
+        comp_model = None
+        params = None
+        comp_traces_needed = len(included)
+        with fig.batch_update():
+            current_components = max(0, len(fig.data) - 2)
+            if current_components > comp_traces_needed:
+                fig.data = tuple(list(fig.data)[: 2 + comp_traces_needed])
+            elif current_components < comp_traces_needed:
+                for _k in range(comp_traces_needed - current_components):
+                    fig.add_scatter(x=[], y=[], mode="lines", line=dict(dash="dot"), name=f"Component {_k+1}")
+
+        for i in included:
+            cx = peaks_x[i]
+            m = PseudoVoigtModel(prefix=f"p{i}_")
+            p = m.make_params()
+            p[f"p{i}_center"].set(value=float(cx), min=float(cx) - center_window.value, max=float(cx) + center_window.value)
+            p[f"p{i}_sigma"].set(value=float(init_sigma.value), min=1e-3, max=1e3)
+            alpha_val = float(alpha_sliders[i].value) if i < len(alpha_sliders) else 0.5
+            p[f"p{i}_fraction"].set(value=alpha_val, min=0.0, max=1.0, vary=False)
+            amp0 = abs(float(peaks_y[i])) * max(1.0, float(init_sigma.value))
+            p[f"p{i}_amplitude"].set(value=amp0, min=0.0)
+
+            if comp_model is None:
+                comp_model = m
+                params = p
+            else:
+                comp_model = comp_model + m
+                params.update(p)
+
+        # Determine if this is a refit (we have a previous redchi for this spectrum)
+        old_redchi = last_redchi_by_idx.get(idx, None)
+        if old_redchi is not None:
+            with msg_out:
+                msg_out.clear_output(); print("Refitting...")
+        else:
+            with msg_out:
+                msg_out.clear_output(); print("Fitting...")
+
+        try:
+            result = comp_model.fit(y_sub, params, x=x_sub)
+            y_fit = result.eval(x=x_arr)
+            comps = result.eval_components(x=x_arr)
+            with fig.batch_update():
+                fig.data[0].x = x_arr; fig.data[0].y = y_arr
+                fig.data[1].x = x_arr; fig.data[1].y = y_fit
+                for comp_idx, i in enumerate(included):
+                    key = f"p{i}_"
+                    y_comp = comps.get(key, np.zeros_like(x_arr))
+                    fig.data[2 + comp_idx].x = x_arr
+                    fig.data[2 + comp_idx].y = y_comp
+            with msg_out:
+                msg_out.clear_output()
+                new_redchi = getattr(result, 'redchi', np.nan)
+                # Store for next time
+                try:
+                    # Print different message when refitting vs initial fit
+                    if old_redchi is not None and np.isfinite(new_redchi) and np.isfinite(old_redchi):
+                        print(f"Refit complete. Reduced chi-square: {old_redchi:.4g} ----> {new_redchi:.4g}")
+                    elif old_redchi is not None:
+                        print("Refit complete.")
+                    else:
+                        print(f"Fit complete. Reduced chi-square: {new_redchi:.4g}")
+                except Exception:
+                    print("Fit complete.")
+                last_redchi_by_idx[idx] = float(new_redchi) if np.isfinite(new_redchi) else new_redchi
+            return result
+        except Exception as e:
+            with msg_out:
+                msg_out.clear_output(); print(f"Fit failed: {e}")
+            return None
+
+    def _on_spectrum_change(*_):
+        _rebuild_alpha_sliders(spectrum_sel.value)
+        _fit_and_update_plot()
+
+    # No range checkboxes to manage
+
+    def _save_for_file(b):
+        idx = spectrum_sel.value
+        res = _fit_and_update_plot()
+        if res is None:
+            return
+        peaks_x, _ = _get_peaks(idx)
+        included = [i for i, cb in enumerate(include_checkboxes) if cb.value]
+        out = []
+        for i in included:
+            cx = peaks_x[i]
+            d = {}
+            for name in ("amplitude", "center", "sigma", "fraction"):
+                p = res.params.get(f"p{i}_{name}")
+                if p is not None:
+                    d[name] = float(p.value)
+            out.append(d)
+        FTIR_DataFrame.at[idx, results_col] = out
+        with msg_out:
+            msg_out.clear_output(); print(f"Saved deconvolution for file '{FTIR_DataFrame.loc[idx, 'File Name']}'.")
+
+    def _close_ui(b):
+        try:
+            spectrum_sel.close()
+            center_window.close(); init_sigma.close()
+            save_btn.close(); close_btn.close()
+            for s in alpha_sliders:
+                s.close()
+            peak_controls_box.close(); msg_out.clear_output(); msg_out.close(); fig.close()
+        finally:
+            clear_output(wait=True)
+
+    # Wire events
+    spectrum_sel.observe(_on_spectrum_change, names="value")
+    for w in (center_window, init_sigma):
+        w.observe(_fit_and_update_plot, names="value")
+    save_btn.on_click(_save_for_file)
+    close_btn.on_click(_close_ui)
+
+    # Layout
+    controls_row1 = widgets.HBox([spectrum_sel])
+    globals_row = widgets.HBox([center_window, init_sigma, save_btn, close_btn])
+    ui = widgets.VBox([controls_row1, peak_controls_box, globals_row])
+
+    display(ui, fig, msg_out)
+    _rebuild_alpha_sliders(first_idx)
+    _fit_and_update_plot()
+
+    return FTIR_DataFrame
+
