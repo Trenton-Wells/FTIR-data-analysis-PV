@@ -18,6 +18,9 @@ import ipywidgets as widgets
 import plotly.graph_objs as go
 from IPython.display import display, clear_output
 from math import ceil
+import importlib
+from plotly.subplots import make_subplots
+import threading
 
 
 # ---- Validation helpers for clearer, user-friendly errors ---- #
@@ -1045,8 +1048,6 @@ def try_baseline(
                 return
             baseline_corrected = y_arr - baseline
 
-            import matplotlib.pyplot as plt
-
             fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10), sharex=True)
             ax1.plot(x, y, label="Raw Data")
             ax1.plot(x, baseline, label=f"{baseline_function} Baseline", linestyle="--")
@@ -1126,13 +1127,12 @@ def try_baseline(
             # Ensure plain Python types for safe storage/round-trip via ast.literal_eval
             def to_plain(v):
                 try:
-                    import numpy as _np
 
-                    if isinstance(v, (_np.integer,)):
+                    if isinstance(v, (np.integer,)):
                         return int(v)
-                    if isinstance(v, (_np.floating,)):
+                    if isinstance(v, (np.floating,)):
                         return float(v)
-                    if isinstance(v, _np.ndarray):
+                    if isinstance(v, np.ndarray):
                         return v.tolist()
                 except Exception:
                     pass
@@ -1177,9 +1177,7 @@ def try_baseline(
                 except Exception:
                     pass
                 try:
-                    import matplotlib.pyplot as _plt
-
-                    _plt.close("all")
+                    plt.close("all")
                 except Exception:
                     pass
                 if container_widget is not None:
@@ -1249,7 +1247,6 @@ def try_baseline(
             [save_file_btn, save_material_btn, reset_all_btn, close_btn]
         )
         ui = widgets.VBox(widget_rows + [controls_footer])
-        from functools import partial
 
         widget_func = widgets.interactive_output(
             _plot_baseline, {k: w for k, w in param_widgets.items()}
@@ -1278,7 +1275,6 @@ def try_baseline(
                 plt.close("all")
             except Exception:
                 pass
-            clear_output(wait=True)
 
         close_btn.on_click(_close_simple)
         display(close_btn)
@@ -1495,7 +1491,6 @@ def anchor_points_selection(
 
     # --- Data selection logic ---
     if filepath is not None:
-        import os
 
         if os.path.sep in filepath:
             folder, fname = os.path.split(filepath)
@@ -1534,7 +1529,8 @@ def anchor_points_selection(
     # --- Widget and button setup (define early for scope) ---
     accept_button = widgets.Button(description="Continue", button_style="success")
     redo_button = widgets.Button(description="Redo", button_style="warning")
-    button_box = widgets.HBox([accept_button, redo_button])
+    close_button = widgets.Button(description="Close", button_style="danger")
+    button_box = widgets.HBox([accept_button, redo_button, close_button])
     button_box_out = widgets.Output()
     done = widgets.Output()
     output = widgets.Output()
@@ -1612,7 +1608,6 @@ def anchor_points_selection(
         spline_y = spline(x_dense)
         y_interp = np.interp(x_data, x_dense, spline_y)
         baseline_corrected = np.array(y_data) - y_interp
-        from plotly.subplots import make_subplots
 
         fig2 = make_subplots(
             rows=2,
@@ -1665,7 +1660,8 @@ def anchor_points_selection(
         # Accept/Redo for preview
         accept2 = widgets.Button(description="Accept", button_style="success")
         redo2 = widgets.Button(description="Redo", button_style="warning")
-        button_box2 = widgets.HBox([accept2, redo2])
+        close2 = widgets.Button(description="Close", button_style="danger")
+        button_box2 = widgets.HBox([accept2, redo2, close2])
         button_box2_out = widgets.Output()
         done2 = widgets.Output()
 
@@ -1700,6 +1696,12 @@ def anchor_points_selection(
 
         accept2.on_click(accept2_callback)
         redo2.on_click(redo2_callback)
+        def _close_preview(b):
+            try:
+                fig2.close()
+            except Exception:
+                pass
+        close2.on_click(_close_preview)
         clear_output(wait=True)
         display(fig2, button_box2_out, done2)
         with button_box2_out:
@@ -1756,6 +1758,25 @@ def anchor_points_selection(
 
     accept_button.on_click(continue_callback)
     redo_button.on_click(redo_callback)
+
+    # Close handler for initial interactive view
+    def _close_initial(b):
+        try:
+            scatter.on_click(None)
+        except Exception:
+            pass
+        try:
+            fig.close()
+        except Exception:
+            pass
+        try:
+            close_button.disabled = True
+            accept_button.disabled = True
+            redo_button.disabled = True
+        except Exception:
+            pass
+
+    close_button.on_click(_close_initial)
 
     # --- Initial display ---
     clear_output(wait=True)  # Ensure output area is reset to avoid UID errors
@@ -1844,7 +1865,7 @@ def normalization_peak_selection(FTIR_DataFrame, material=None, filepath=None):
         description="Save for this material", button_style="info"
     )
     redo_btn = widgets.Button(description="Redo", button_style="warning")
-    cancel_btn = widgets.Button(description="Close", button_style="")
+    cancel_btn = widgets.Button(description="Close", button_style="danger")
     btn_box = widgets.HBox([save_spec_btn, save_mat_btn, redo_btn, cancel_btn])
     info_out = widgets.Output()
     msg_out = widgets.Output()
@@ -1963,24 +1984,27 @@ def normalization_peak_selection(FTIR_DataFrame, material=None, filepath=None):
         return [float(min(x0, x1)), float(max(x0, x1))]
 
     def _finalize_and_clear():
-        # Detach callbacks and disable controls
+        # Detach callbacks and close interactive widgets so UI disappears
         try:
             fig.data[0].on_click(None)
         except Exception:
             pass
+        # Close the plot first
+        try:
+            fig.close()
+        except Exception:
+            pass
+        # Close the entire button box so no greyed-out buttons remain
+        try:
+            btn_box.close()
+        except Exception:
+            pass
+        # Also close individual buttons defensively (in case they were displayed separately)
         for b in (save_spec_btn, save_mat_btn, redo_btn, cancel_btn):
-            b.disabled = True
-        # Clear any widget outputs
-        try:
-            info_out.clear_output()
-        except Exception:
-            pass
-        try:
-            msg_out.clear_output()
-        except Exception:
-            pass
-        # Completely clear the cell output so new interactive UIs can render safely
-        clear_output(wait=True)
+            try:
+                b.close()
+            except Exception:
+                pass
 
     def _save_for_this_spectrum(b):
         rng = _current_range()
@@ -1990,8 +2014,9 @@ def normalization_peak_selection(FTIR_DataFrame, material=None, filepath=None):
                 print("Please select two points before saving.")
             return
         FTIR_DataFrame.at[row.name, target_col] = str(rng)
-        _finalize_and_clear()
-        print(f"Saved normalization peak range {rng} for this spectrum.")
+        with msg_out:
+            clear_output(wait=True)
+            print(f"Saved normalization peak range {rng} for this spectrum.")
 
     def _save_for_this_material(b):
         rng = _current_range()
@@ -2008,8 +2033,9 @@ def normalization_peak_selection(FTIR_DataFrame, material=None, filepath=None):
             return
         mask = FTIR_DataFrame["Material"] == mat
         FTIR_DataFrame.loc[mask, target_col] = str(rng)
-        _finalize_and_clear()
-        print(f"Saved normalization peak range {rng} for material '{mat}'.")
+        with msg_out:
+            clear_output(wait=True)
+            print(f"Saved normalization peak range {rng} for material '{mat}'.")
 
     def _redo(b):
         selected_points.clear()
@@ -2331,8 +2357,8 @@ def find_peak_info(FTIR_DataFrame, materials=None, filepath=None):
     )
     min_height = widgets.FloatSlider(
         value=0.0,
-        min=0.0,
-        max=2.0,
+        min=0.01,
+        max=1.0,
         step=0.01,
         description="Min height",
         readout_format=".2f",
@@ -2342,7 +2368,7 @@ def find_peak_info(FTIR_DataFrame, materials=None, filepath=None):
     distance = widgets.IntSlider(
         value=5,
         min=1,
-        max=2000,
+        max=250,
         step=1,
         description="Min separation",
         continuous_update=False,
@@ -2351,7 +2377,7 @@ def find_peak_info(FTIR_DataFrame, materials=None, filepath=None):
     width = widgets.IntSlider(
         value=1,
         min=1,
-        max=200,
+        max=50,
         step=1,
         description="Min width",
         continuous_update=False,
@@ -2359,8 +2385,8 @@ def find_peak_info(FTIR_DataFrame, materials=None, filepath=None):
     )
     max_peaks = widgets.IntSlider(
         value=10,
-        min=0,
-        max=100,
+        min=1,
+        max=25,
         step=1,
         description="Max peaks",
         continuous_update=False,
@@ -2484,22 +2510,29 @@ def find_peak_info(FTIR_DataFrame, materials=None, filepath=None):
         with fig.batch_update():
             fig.data[1].x = x_arr[peaks_idx] if peaks_idx.size else []
             fig.data[1].y = peaks_y if peaks_idx.size else []
-            fig.layout.shapes = ()
+            # Rebuild all range shapes deterministically for reliability with multiple ranges
             y0_min = float(np.nanmin(y_arr))
             y0_max = float(np.nanmax(y_arr))
-            for rng in ranges:
+            shapes_list = []
+            for i_r, rng in enumerate(ranges):
+                if rng is None:
+                    continue
                 lo_i, hi_i = float(min(rng)), float(max(rng))
-                rect = dict(
-                    type="rect",
-                    x0=lo_i,
-                    x1=hi_i,
-                    y0=y0_min,
-                    y1=y0_max,
-                    fillcolor="rgba(0,128,0,0.12)",
-                    line=dict(width=0),
-                    layer="below",
+                shapes_list.append(
+                    dict(
+                        type="rect",
+                        x0=lo_i,
+                        x1=hi_i,
+                        y0=y0_min,
+                        y1=y0_max,
+                        fillcolor="rgba(0,128,0,0.12)",
+                        line=dict(width=0),
+                        layer="below",
+                        name=f"range_rect_{i_r}",
+                    )
                 )
-                fig.add_shape(rect)
+            # Assign shapes in one shot to avoid inconsistent state when multiple are active
+            fig.layout.shapes = tuple(shapes_list)
         with msg_out:
             msg_out.clear_output()
             if not ranges:
@@ -2575,11 +2608,10 @@ def find_peak_info(FTIR_DataFrame, materials=None, filepath=None):
             save_file_btn.close()
             save_all_btn.close()
             close_btn.close()
-            msg_out.clear_output()
-            msg_out.close()
+            # Leave msg_out displayed so the last messages remain visible
             fig.close()
-        finally:
-            clear_output(wait=True)
+        except Exception:
+            pass
 
     # Wire events
     spectrum_sel.observe(_update_plot, names="value")
@@ -2642,7 +2674,6 @@ def peak_deconvolution(FTIR_DataFrame, materials=None, filepath=None):
     -------
     None (update later for Json filling)
     """
-    import importlib
 
     try:
         _lmfit_models = importlib.import_module("lmfit.models")
@@ -2721,8 +2752,8 @@ def peak_deconvolution(FTIR_DataFrame, materials=None, filepath=None):
     )
     center_window = widgets.FloatSlider(
         value=15.0,
-        min=0.0,
-        max=100.0,
+        min=1.0,
+        max=50.0,
         step=1.0,
         description="Center ±window (cm⁻¹)",
         continuous_update=False,
@@ -2741,7 +2772,37 @@ def peak_deconvolution(FTIR_DataFrame, materials=None, filepath=None):
     )
     save_btn = widgets.Button(description="Save for file", button_style="success")
     close_btn = widgets.Button(description="Close", button_style="danger")
+    # Dedicated status label to avoid Output-widget buffering issues
+    status_html = widgets.HTML(value="")
     msg_out = widgets.Output()
+
+    # Cancellation/interrupt support for long-running fits
+    cancel_event = threading.Event()
+    fit_thread = None
+    # Helper to marshal UI updates back onto the notebook's main IOLoop
+    try:
+        from tornado.ioloop import IOLoop as _IOLoop
+    except Exception:
+        _IOLoop = None
+    # Capture the main thread's IOLoop now; using current() inside a worker thread
+    # can create a new, non-running loop which would drop callbacks.
+    try:
+        _MAIN_IOLOOP = _IOLoop.current() if _IOLoop is not None else None
+    except Exception:
+        _MAIN_IOLOOP = None
+
+    def _on_main_thread(fn, *args, **kwargs):
+        try:
+            if _MAIN_IOLOOP is not None:
+                _MAIN_IOLOOP.add_callback(lambda: fn(*args, **kwargs))
+                return
+        except Exception:
+            pass
+        # Fallback: call directly (may work in some environments)
+        try:
+            fn(*args, **kwargs)
+        except Exception:
+            pass
 
     # Dynamic per-peak controls: include checkbox + alpha slider per peak
     alpha_sliders = []  # list[widgets.FloatSlider]
@@ -2750,6 +2811,8 @@ def peak_deconvolution(FTIR_DataFrame, materials=None, filepath=None):
 
     # Track last reduced chi-square per spectrum to report refit deltas
     last_redchi_by_idx = {}
+    # Store last successful fit result per spectrum for Save action
+    last_result_by_idx = {}
 
     # Plot figure: data, fit, components (dynamic)
     fig = go.FigureWidget()
@@ -2843,6 +2906,8 @@ def peak_deconvolution(FTIR_DataFrame, materials=None, filepath=None):
         peak_controls_box.children = children
 
     def _fit_and_update_plot(*_):
+        nonlocal fit_thread, cancel_event
+
         idx = spectrum_sel.value
         x_arr, y_arr = _get_xy(idx)
         if x_arr is None:
@@ -2850,6 +2915,7 @@ def peak_deconvolution(FTIR_DataFrame, materials=None, filepath=None):
                 msg_out.clear_output()
                 print("Selected spectrum missing normalized data.")
             return None
+
         peaks_x, peaks_y = _get_peaks(idx)
         if not peaks_x:
             with msg_out:
@@ -2864,10 +2930,6 @@ def peak_deconvolution(FTIR_DataFrame, materials=None, filepath=None):
                 while len(fig.data) > 2:
                     fig.data = tuple(fig.data[:2])
             return None
-
-        # Use full x-range for fitting
-        x_sub = x_arr
-        y_sub = y_arr
 
         # Determine which peaks are included
         included = [i for i, cb in enumerate(include_checkboxes) if cb.value]
@@ -2884,9 +2946,7 @@ def peak_deconvolution(FTIR_DataFrame, materials=None, filepath=None):
                     fig.data = tuple(fig.data[:2])
             return None
 
-        # Build composite model
-        comp_model = None
-        params = None
+        # Prepare component traces count on main thread for consistent layout
         comp_traces_needed = len(included)
         with fig.batch_update():
             current_components = max(0, len(fig.data) - 2)
@@ -2894,91 +2954,182 @@ def peak_deconvolution(FTIR_DataFrame, materials=None, filepath=None):
                 fig.data = tuple(list(fig.data)[: 2 + comp_traces_needed])
             elif current_components < comp_traces_needed:
                 for _k in range(comp_traces_needed - current_components):
-                    fig.add_scatter(
-                        x=[],
-                        y=[],
-                        mode="lines",
-                        line=dict(dash="dot"),
-                        name=f"Component {_k+1}",
-                    )
+                    fig.add_scatter(x=[], y=[], mode="lines", line=dict(dash="dot"), name=f"Component {_k+1}")
 
-        for i in included:
-            cx = peaks_x[i]
-            m = PseudoVoigtModel(prefix=f"p{i}_")
-            p = m.make_params()
-            p[f"p{i}_center"].set(
-                value=float(cx),
-                min=float(cx) - center_window.value,
-                max=float(cx) + center_window.value,
-            )
-            p[f"p{i}_sigma"].set(value=float(init_sigma.value), min=1e-3, max=1e3)
-            alpha_val = float(alpha_sliders[i].value) if i < len(alpha_sliders) else 0.5
-            p[f"p{i}_fraction"].set(value=alpha_val, min=0.0, max=1.0, vary=False)
-            amp0 = abs(float(peaks_y[i])) * max(1.0, float(init_sigma.value))
-            p[f"p{i}_amplitude"].set(value=amp0, min=0.0)
-
-            if comp_model is None:
-                comp_model = m
-                params = p
-            else:
-                comp_model = comp_model + m
-                params.update(p)
-
-        # Determine if this is a refit (we have a previous redchi for this spectrum)
-        old_redchi = last_redchi_by_idx.get(idx, None)
-        if old_redchi is not None:
-            with msg_out:
-                msg_out.clear_output()
-                print("Refitting...")
-        else:
-            with msg_out:
-                msg_out.clear_output()
-                print("Fitting...")
-
+        # Cancel any running fit and start a new one in the background
         try:
-            result = comp_model.fit(y_sub, params, x=x_sub)
-            y_fit = result.eval(x=x_arr)
-            comps = result.eval_components(x=x_arr)
-            with fig.batch_update():
-                fig.data[0].x = x_arr
-                fig.data[0].y = y_arr
-                fig.data[1].x = x_arr
-                fig.data[1].y = y_fit
-                for comp_idx, i in enumerate(included):
-                    key = f"p{i}_"
-                    y_comp = comps.get(key, np.zeros_like(x_arr))
-                    fig.data[2 + comp_idx].x = x_arr
-                    fig.data[2 + comp_idx].y = y_comp
-            with msg_out:
-                msg_out.clear_output()
-                new_redchi = getattr(result, "redchi", np.nan)
-                # Store for next time
+            if fit_thread is not None and fit_thread.is_alive():
+                # Signal the currently running worker to stop
                 try:
-                    # Print different message when refitting vs initial fit
-                    if (
-                        old_redchi is not None
-                        and np.isfinite(new_redchi)
-                        and np.isfinite(old_redchi)
-                    ):
-                        print(
-                            f"Refit complete. Reduced chi-square: {old_redchi:.4g}"
-                            f" ----> {new_redchi:.4g}"
-                        )
-                    elif old_redchi is not None:
-                        print("Refit complete.")
-                    else:
-                        print(f"Fit complete. Reduced chi-square: {new_redchi:.4g}")
+                    cancel_event.set()
                 except Exception:
-                    print("Fit complete.")
-                last_redchi_by_idx[idx] = (
-                    float(new_redchi) if np.isfinite(new_redchi) else new_redchi
-                )
-            return result
-        except Exception as e:
+                    pass
+        except Exception:
+            pass
+        # Create a fresh cancel token for this new worker and capture it locally
+        local_cancel = threading.Event()
+        cancel_event = local_cancel
+
+        old_redchi = last_redchi_by_idx.get(idx, None)
+        # Update status label immediately on main thread
+        try:
+            status_html.value = (
+                "<span style='color:#555;'>Refitting...</span>"
+                if old_redchi is not None
+                else "<span style='color:#555;'>Fitting...</span>"
+            )
+        except Exception:
             with msg_out:
                 msg_out.clear_output()
-                print(f"Fit failed: {e}")
-            return None
+                print("Refitting..." if old_redchi is not None else "Fitting...")
+
+        def _worker(local_cancel_token=local_cancel):
+            try:
+                # Use full x-range for fitting inside worker
+                x_sub = x_arr
+                y_sub = y_arr
+
+                # Build composite model
+                comp_model = None
+                params = None
+                for i in included:
+                    cx = peaks_x[i]
+                    m = PseudoVoigtModel(prefix=f"p{i}_")
+                    p = m.make_params()
+                    p[f"p{i}_center"].set(
+                        value=float(cx),
+                        min=float(cx) - center_window.value,
+                        max=float(cx) + center_window.value,
+                    )
+                    p[f"p{i}_sigma"].set(value=float(init_sigma.value), min=1e-3, max=1e3)
+                    alpha_val = float(alpha_sliders[i].value) if i < len(alpha_sliders) else 0.5
+                    p[f"p{i}_fraction"].set(value=alpha_val, min=0.0, max=1.0, vary=False)
+                    amp0 = abs(float(peaks_y[i])) * max(1.0, float(init_sigma.value))
+                    p[f"p{i}_amplitude"].set(value=amp0, min=0.0)
+
+                    if comp_model is None:
+                        comp_model = m
+                        params = p
+                    else:
+                        comp_model = comp_model + m
+                        params.update(p)
+
+                # iter_cb to allow cooperative cancellation
+                def _iter_cb(params_, iter_, resid_, *args, **kws):
+                    if local_cancel_token.is_set():
+                        raise KeyboardInterrupt("Fit cancelled by user")
+
+                result = comp_model.fit(y_sub, params, x=x_sub, iter_cb=_iter_cb)
+                if local_cancel_token.is_set():
+                    return
+                y_fit = result.eval(x=x_arr)
+                comps = result.eval_components(x=x_arr)
+
+                # Persist last successful result for this spectrum
+                try:
+                    last_result_by_idx[idx] = result
+                except Exception:
+                    pass
+
+                def _apply_results_on_ui():
+                    # Always try to update the plot, but don't let plotting failures
+                    # prevent status messages from updating.
+                    plot_ok = True
+                    try:
+                        comp_traces_needed = len(included)
+                        with fig.batch_update():
+                            # Ensure we have exactly 2 + comp_traces_needed traces
+                            current_components = max(0, len(fig.data) - 2)
+                            if current_components > comp_traces_needed:
+                                fig.data = tuple(list(fig.data)[: 2 + comp_traces_needed])
+                            elif current_components < comp_traces_needed:
+                                for _k in range(comp_traces_needed - current_components):
+                                    fig.add_scatter(x=[], y=[], mode="lines", line=dict(dash="dot"), name=f"Component {_k+1}")
+                            # Update data and fit traces
+                            fig.data[0].x = x_arr
+                            fig.data[0].y = y_arr
+                            fig.data[1].x = x_arr
+                            fig.data[1].y = y_fit
+                            # Update component traces safely
+                            for comp_idx, i in enumerate(included):
+                                key = f"p{i}_"
+                                y_comp = comps.get(key, np.zeros_like(x_arr))
+                                fig.data[2 + comp_idx].x = x_arr
+                                fig.data[2 + comp_idx].y = y_comp
+                    except Exception:
+                        plot_ok = False
+                    # Update message regardless of plot success
+                    # Update status label text
+                    new_redchi = getattr(result, "redchi", np.nan)
+                    try:
+                        # Format values consistently, showing change when refitting
+                        try:
+                            old_str = f"{old_redchi:.4g}" if old_redchi is not None else None
+                        except Exception:
+                            old_str = str(old_redchi) if old_redchi is not None else None
+                        try:
+                            new_str = f"{new_redchi:.4g}"
+                        except Exception:
+                            new_str = str(new_redchi)
+                        if old_redchi is not None:
+                            status_html.value = (
+                                f"<span style='color:#000;'>Refit complete. Reduced chi-square: (" \
+                                f"{old_str}) ---&gt; ({new_str})</span>"
+                            )
+                        else:
+                            status_html.value = (
+                                f"<span style='color:#000;'>Fit complete. Reduced chi-square: (" \
+                                f"{new_str})</span>"
+                            )
+                        # Persist the new redchi so subsequent runs are treated as refits
+                        try:
+                            if np.isfinite(new_redchi):
+                                last_redchi_by_idx[idx] = float(new_redchi)
+                        except Exception:
+                            # If np.isfinite is not available or new_redchi is not numeric, store raw
+                            try:
+                                last_redchi_by_idx[idx] = float(new_redchi)
+                            except Exception:
+                                last_redchi_by_idx[idx] = new_redchi
+                        if not plot_ok:
+                            # Also echo a note in the log output
+                            with msg_out:
+                                msg_out.clear_output(wait=True)
+                                print("(Note: Plot update partially failed; re-run to refresh components.)")
+                    except Exception:
+                        status_html.value = "<span style='color:#000;'>Fit complete.</span>"
+                        try:
+                            if np.isfinite(new_redchi):
+                                last_redchi_by_idx[idx] = float(new_redchi)
+                            else:
+                                last_redchi_by_idx[idx] = new_redchi
+                        except Exception:
+                            last_redchi_by_idx[idx] = new_redchi
+
+                _on_main_thread(_apply_results_on_ui)
+            except KeyboardInterrupt:
+                # Cancellation requested
+                def _notify_cancel():
+                    try:
+                        status_html.value = "<span style='color:#a00;'>Fit cancelled.</span>"
+                    except Exception:
+                        with msg_out:
+                            msg_out.clear_output()
+                            print("Fit cancelled.")
+                _on_main_thread(_notify_cancel)
+            except Exception as e:
+                def _notify_error():
+                    try:
+                        status_html.value = f"<span style='color:#a00;'>Fit failed: {e}</span>"
+                    except Exception:
+                        with msg_out:
+                            msg_out.clear_output()
+                            print(f"Fit failed: {e}")
+                _on_main_thread(_notify_error)
+
+        fit_thread = threading.Thread(target=_worker, daemon=True)
+        fit_thread.start()
+        return None
 
     def _on_spectrum_change(*_):
         _rebuild_alpha_sliders(spectrum_sel.value)
@@ -2988,8 +3139,14 @@ def peak_deconvolution(FTIR_DataFrame, materials=None, filepath=None):
 
     def _save_for_file(b):
         idx = spectrum_sel.value
-        res = _fit_and_update_plot()
+        # Use the last completed result if available; if not, trigger a fit and inform
+        # the user to wait for completion.
+        res = last_result_by_idx.get(idx)
         if res is None:
+            _fit_and_update_plot()
+            with msg_out:
+                msg_out.clear_output()
+                print("Fitting... Please click 'Save' again once the fit completes.")
             return
         peaks_x, _ = _get_peaks(idx)
         included = [i for i, cb in enumerate(include_checkboxes) if cb.value]
@@ -3011,6 +3168,11 @@ def peak_deconvolution(FTIR_DataFrame, materials=None, filepath=None):
             )
 
     def _close_ui(b):
+        # Signal cancellation and close widgets promptly
+        try:
+            cancel_event.set()
+        except Exception:
+            pass
         try:
             spectrum_sel.close()
             center_window.close()
@@ -3020,11 +3182,10 @@ def peak_deconvolution(FTIR_DataFrame, materials=None, filepath=None):
             for s in alpha_sliders:
                 s.close()
             peak_controls_box.close()
-            msg_out.clear_output()
-            msg_out.close()
+            # Leave msg_out displayed so the last messages remain visible
             fig.close()
-        finally:
-            clear_output(wait=True)
+        except Exception:
+            pass
 
     # Wire events
     spectrum_sel.observe(_on_spectrum_change, names="value")
@@ -3036,7 +3197,8 @@ def peak_deconvolution(FTIR_DataFrame, materials=None, filepath=None):
     # Layout
     controls_row1 = widgets.HBox([spectrum_sel])
     globals_row = widgets.HBox([center_window, init_sigma, save_btn, close_btn])
-    ui = widgets.VBox([controls_row1, peak_controls_box, globals_row])
+    status_row = widgets.HBox([status_html])
+    ui = widgets.VBox([controls_row1, peak_controls_box, globals_row, status_row])
 
     display(ui, fig, msg_out)
     _rebuild_alpha_sliders(first_idx)

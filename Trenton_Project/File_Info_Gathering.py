@@ -147,7 +147,12 @@ def _gather_file_info(
             parsed_count += 1
             # Print a single-line progress indicator
             try:
-                print(f"\rParsed {parsed_count}/{total_candidates} files", end="", flush=True)
+                pct = (parsed_count / total_candidates * 100) if total_candidates else 0
+                print(
+                    f"\rParsed {parsed_count}/{total_candidates} files ({pct:.1f}%)",
+                    end="",
+                    flush=True,
+                )
             except Exception:
                 pass
             # Read first and second columns from the file, save as list of floats
@@ -297,7 +302,7 @@ def _gather_file_info(
 
     # Finish progress line with newline for clean output
     try:
-        print("\nDone parsing spectral files.")
+        print("\nBasic file information extraction complete.")
     except Exception:
         pass
 
