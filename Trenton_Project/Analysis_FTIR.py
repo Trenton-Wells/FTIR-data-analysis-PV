@@ -21,6 +21,7 @@ from math import ceil
 import importlib
 from plotly.subplots import make_subplots
 import threading
+from lmfit.models import PseudoVoigtModel
 
 
 # ---- Validation helpers for clearer, user-friendly errors ---- #
@@ -4454,3 +4455,319 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
     _rebuild_spectrum_options()
 
     return FTIR_DataFrame
+
+def time_series_fit(FTIR_DataFrame):
+    """Perform time-series fitting on FTIR data in the DataFrame.
+
+    This function analyzes FTIR spectra over time, taking the individual parameters from
+    the DataFrame for each spectrum and averaging to create a time-series fit. The 
+    peaks in each spectrum are then scaled in amplitude, but with the same center and
+    shape parameters across the time series.
+
+    Parameters:
+    -----------
+    FTIR_DataFrame : pd.DataFrame
+        DataFrame containing FTIR spectral data and metadata.
+
+    Returns:
+    --------
+    pd.DataFrame
+        Updated DataFrame with time-series fitting results.
+    """
+    # --- Validation and setup ---
+    if FTIR_DataFrame is None or len(FTIR_DataFrame) == 0:
+        raise ValueError("FTIR_DataFrame must be loaded and non-empty.")
+
+    # Identify condition column name and required columns
+    cond_col = "Conditions" if "Conditions" in FTIR_DataFrame.columns else (
+        "Condition" if "Condition" in FTIR_DataFrame.columns else None
+    )
+    if cond_col is None:
+        raise KeyError("Missing 'Conditions' (or 'Condition') column in DataFrame.")
+
+    required_cols = [
+        "Material",
+        cond_col,
+        "Time",
+        "Deconvolution Results",
+        "X-Axis",
+        "Normalized and Corrected Data",
+        "Time-Series Fit",
+    ]
+    missing = [c for c in required_cols if c not in FTIR_DataFrame.columns]
+    if missing:
+        raise KeyError(
+            f"Missing required column(s): {missing}. Ensure your DataFrame is prepared with prior steps."
+        )
+
+    # Ensure destination column can hold arbitrary Python objects
+    try:
+        FTIR_DataFrame["Time-Series Fit"] = FTIR_DataFrame["Time-Series Fit"].astype(
+            object
+        )
+    except Exception:
+        pass
+
+    def _parse_deconv(val):
+        """Parse a Deconvolution Results cell to a list[dict] or None."""
+        if val is None:
+            return None
+        if isinstance(val, str):
+            try:
+                v = ast.literal_eval(val)
+            except Exception:
+                return None
+        else:
+            v = val
+        if isinstance(v, list):
+            # Ensure items are dicts and sort by center if present
+            try:
+                items = [dict(d) for d in v if isinstance(d, dict)]
+            except Exception:
+                return None
+            try:
+                items = sorted(
+                    items, key=lambda d: float(d.get("center", float("nan")))
+                )
+            except Exception:
+                # If centers not coercible, keep original order
+                pass
+            return items
+        return None
+
+    def _parse_xy(row):
+        """Return (x_arr, y_arr) as 1D float arrays or (None, None)."""
+        x = row.get("X-Axis")
+        y = row.get("Normalized and Corrected Data")
+        if isinstance(x, str):
+            try:
+                x = ast.literal_eval(x)
+            except Exception:
+                return None, None
+        if isinstance(y, str):
+            try:
+                y = ast.literal_eval(y)
+            except Exception:
+                return None, None
+        try:
+            x_arr = np.asarray(x, dtype=float)
+            y_arr = np.asarray(y, dtype=float)
+            if x_arr.ndim != 1 or y_arr.ndim != 1 or x_arr.size != y_arr.size:
+                return None, None
+        except Exception:
+            return None, None
+        return x_arr, y_arr
+
+    def _mode_peak_count(lists_of_peaks):
+        """Return the most common positive length among lists; tie -> max length."""
+        lengths = [len(p) for p in lists_of_peaks if isinstance(p, list) and len(p) > 0]
+        if not lengths:
+            return 0
+        vals, counts = np.unique(lengths, return_counts=True)
+        # Choose value with max count; if tie, the larger length wins
+        max_count = np.max(counts)
+        candidates = [v for v, c in zip(vals, counts) if c == max_count]
+        return int(max(candidates))
+
+    # Collect basic groupings
+    materials = [str(m) for m in FTIR_DataFrame["Material"].dropna().astype(str).unique()]
+    # Gather 'unexposed' masks per material (case-insensitive)
+    def _is_unexposed(val):
+        try:
+            return str(val).strip().lower() == "unexposed"
+        except Exception:
+            return False
+
+    fits_done = 0
+    groups_skipped = []
+
+    for material in materials:
+        df_mat = FTIR_DataFrame[FTIR_DataFrame["Material"].astype(str) == str(material)]
+        if df_mat.empty:
+            continue
+        # Identify available non-unexposed conditions for this material
+        cond_vals = [
+            c
+            for c in df_mat[cond_col].dropna().astype(str).unique().tolist()
+            if not _is_unexposed(c)
+        ]
+        unexp_idxs = df_mat[df_mat[cond_col].apply(_is_unexposed)].index.tolist()
+
+        for cond in cond_vals:
+            # Series rows: same material AND (cond == cond OR unexposed)
+            series_mask = (FTIR_DataFrame["Material"].astype(str) == str(material)) & (
+                (FTIR_DataFrame[cond_col].astype(str) == str(cond))
+                | FTIR_DataFrame[cond_col].apply(_is_unexposed)
+            )
+            series_df = FTIR_DataFrame[series_mask].copy()
+            if series_df.empty:
+                continue
+
+            # Build list of deconvolution results per row (sorted by center)
+            peak_lists = []
+            peak_lists_by_idx = {}
+            for idx, row in series_df.iterrows():
+                peaks = _parse_deconv(row.get("Deconvolution Results"))
+                if peaks is not None and len(peaks) > 0:
+                    peak_lists.append(peaks)
+                    peak_lists_by_idx[idx] = peaks
+
+            k = _mode_peak_count(peak_lists)
+            if k <= 0:
+                groups_skipped.append((material, cond, "no deconvolution results"))
+                continue
+
+            # Aggregate means for center, sigma, fraction across rows with exactly k peaks
+            centers = []
+            sigmas = []
+            fracs = []
+            for peaks in peak_lists:
+                if len(peaks) != k:
+                    continue
+                try:
+                    centers.append([float(p.get("center", np.nan)) for p in peaks])
+                    sigmas.append([float(p.get("sigma", np.nan)) for p in peaks])
+                    fracs.append([float(p.get("fraction", np.nan)) for p in peaks])
+                except Exception:
+                    continue
+            if not centers:
+                groups_skipped.append((material, cond, "inconsistent peak counts"))
+                continue
+            centers = np.asarray(centers, dtype=float)
+            sigmas = np.asarray(sigmas, dtype=float)
+            fracs = np.asarray(fracs, dtype=float)
+            with np.errstate(all="ignore"):
+                avg_center = np.nanmean(centers, axis=0)
+                avg_sigma = np.nanmean(sigmas, axis=0)
+                avg_frac = np.nanmean(fracs, axis=0)
+            # Fallbacks if NaN present
+            for i in range(k):
+                if not np.isfinite(avg_center[i]):
+                    # fallback to median valid value
+                    vals = centers[:, i]
+                    avg_center[i] = np.nanmedian(vals) if np.isfinite(np.nanmedian(vals)) else 0.0
+                if not np.isfinite(avg_sigma[i]):
+                    vals = sigmas[:, i]
+                    avg_sigma[i] = np.nanmedian(vals) if np.isfinite(np.nanmedian(vals)) else 10.0
+                if not np.isfinite(avg_frac[i]):
+                    vals = fracs[:, i]
+                    avg_frac[i] = np.nanmedian(vals) if np.isfinite(np.nanmedian(vals)) else 0.5
+
+            # Optional average amplitude (for initial guesses only)
+            amps = []
+            for peaks in peak_lists:
+                if len(peaks) != k:
+                    continue
+                try:
+                    amps.append([float(p.get("amplitude", np.nan)) for p in peaks])
+                except Exception:
+                    continue
+            avg_amp = None
+            if amps:
+                amps = np.asarray(amps, dtype=float)
+                with np.errstate(all="ignore"):
+                    avg_amp = np.nanmean(amps, axis=0)
+
+            # Build fixed-parameter composite template (centers/sigmas/fractions fixed)
+            def _build_model_with_fixed_params():
+                comp_model = None
+                params = None
+                for i in range(k):
+                    m = PseudoVoigtModel(prefix=f"p{i}_")
+                    p = m.make_params()
+                    p[f"p{i}_center"].set(value=float(avg_center[i]), vary=False)
+                    p[f"p{i}_sigma"].set(value=float(avg_sigma[i]), min=1e-3, max=1e4, vary=False)
+                    p[f"p{i}_fraction"].set(value=float(avg_frac[i]), min=0.0, max=1.0, vary=False)
+                    # amplitude will be initialized later per-spectrum
+                    p[f"p{i}_amplitude"].set(min=0.0, value=float(avg_amp[i]) if isinstance(avg_amp, np.ndarray) else 1.0)
+                    if comp_model is None:
+                        comp_model = m
+                        params = p
+                    else:
+                        comp_model = comp_model + m
+                        params.update(p)
+                return comp_model, params
+
+            # Fit each non-unexposed row in the series with amplitudes free
+            for idx, row in series_df.iterrows():
+                if _is_unexposed(row.get(cond_col)):
+                    # Fill with a simple marker dictionary; do not fit
+                    FTIR_DataFrame.at[idx, "Time-Series Fit"] = {"status": "unexposed"}
+                    continue
+                # Parse x/y
+                x_arr, y_arr = _parse_xy(row)
+                if x_arr is None or y_arr is None or x_arr.size == 0:
+                    # Skip this row quietly
+                    continue
+                # Build model and initialize amplitudes more specifically from this row if possible
+                comp_model, params = _build_model_with_fixed_params()
+                # If the row has a deconvolution with k peaks, use those amplitudes as initial values
+                peaks_row = _parse_deconv(row.get("Deconvolution Results"))
+                if isinstance(peaks_row, list) and len(peaks_row) == k:
+                    for i in range(k):
+                        try:
+                            ai = float(peaks_row[i].get("amplitude", params[f"p{i}_amplitude"].value))
+                            params[f"p{i}_amplitude"].set(value=max(0.0, ai))
+                        except Exception:
+                            pass
+                else:
+                    # Otherwise, seed amplitude by a rough heuristic based on local max
+                    # around each average center (nearest point * sigma)
+                    try:
+                        for i in range(k):
+                            ci = float(avg_center[i])
+                            nearest = int(np.argmin(np.abs(x_arr - ci)))
+                            ai0 = max(0.0, float(y_arr[nearest]) * max(1.0, float(avg_sigma[i])))
+                            params[f"p{i}_amplitude"].set(value=ai0)
+                    except Exception:
+                        pass
+
+                try:
+                    result = comp_model.fit(y_arr, params, x=x_arr)
+                except Exception:
+                    # Skip on fit failure
+                    continue
+
+                # Save a list of peak dicts with fitted amplitude and fixed shape params
+                out = []
+                try:
+                    for i in range(k):
+                        amp = float(result.params.get(f"p{i}_amplitude").value)
+                        out.append(
+                            {
+                                "amplitude": amp,
+                                "center": float(avg_center[i]),
+                                "sigma": float(avg_sigma[i]),
+                                "fraction": float(avg_frac[i]),
+                            }
+                        )
+                    FTIR_DataFrame.at[idx, "Time-Series Fit"] = out
+                    fits_done += 1
+                except Exception:
+                    # Best effort write
+                    pass
+
+        # For any unexposed rows of this material not already marked, write filler dict
+        for idx in unexp_idxs:
+            try:
+                FTIR_DataFrame.at[idx, "Time-Series Fit"] = {"status": "unexposed"}
+            except Exception:
+                pass
+
+    # Optional: report summary to console for user awareness
+    print(f"Time-series fitting complete: {fits_done} spectra fitted. Skipped groups: {len(groups_skipped)}.")
+    if groups_skipped:
+        # Show a compact list of skipped reasons
+        uniq = {}
+        for m, c, r in groups_skipped:
+            key = (m, c, r)
+            uniq[key] = True
+        if len(uniq) <= 10:
+            print("Skipped details:")
+            for (m, c, r) in uniq.keys():
+                print(f"- Material={m}, Condition={c}: {r}")
+        else:
+            print("(Many groups skipped; suppressing detailed list.)")
+
+    return FTIR_DataFrame
+
