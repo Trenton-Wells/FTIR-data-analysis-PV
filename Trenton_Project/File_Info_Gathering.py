@@ -4,12 +4,12 @@
 # NREL Contact: trenton.wells@nrel.gov
 # Personal Contact: trentonwells73@gmail.com
 
-# This script gathers basic spectra file information from a specified root directory 
-# and its subdirectories, extracting details from filenames and parent folder names to 
+# This script gathers basic spectra file information from a specified root directory
+# and its subdirectories, extracting details from filenames and parent folder names to
 # create a structured DataFrame.
-# The DataFrame includes columns for file location, file name, date of scan, 
+# The DataFrame includes columns for file location, file name, date of scan,
 # conditions, material, and time(duration).
-# General usage note: Avoid using separators that are part of material or condition 
+# General usage note: Avoid using separators that are part of material or condition
 # terms, and avoid using extensions that are part of material or condition terms.
 # Word recognition is case-insensitive and looks for whole words only (e.g., "PPE" will
 #  be found, but not "PPE1" or "XPPE").
@@ -26,7 +26,7 @@ def find_term(term, text):
     Find whole word matches of a term in text, case-insensitive.
 
     Helper function to find whole word matches of a term in text, case-insensitive.
-    Adds spaces around text to catch terms at the start/end, since term-finding uses 
+    Adds spaces around text to catch terms at the start/end, since term-finding uses
     spaces on either side to detect whole words.
 
     Parameters:
@@ -60,7 +60,7 @@ def _gather_file_info(
 ):
     """
     Gather file information from a specified root directory and its subdirectories.
-    
+
     Helps file_info_extractor() create a structured DataFrame by extracting details
     from filenames and parent folder names.
     If "ignore" is in the filename, the file will be skipped.
@@ -108,11 +108,14 @@ def _gather_file_info(
             # Apply the same core file filters as the main loop
             if (_file_path, _filename) in processed_files:
                 continue
-            if _filename.startswith('.'):
+            if _filename.startswith("."):
                 continue
-            if 'ignore' in _filename.lower():
+            if "ignore" in _filename.lower():
                 continue
-            if not any(_filename.lower().endswith(file_type.lower()) for file_type in file_types):
+            if not any(
+                _filename.lower().endswith(file_type.lower())
+                for file_type in file_types
+            ):
                 continue
             total_candidates += 1
     print(f"Found {total_candidates} spectral files to parse…")
@@ -170,7 +173,7 @@ def _gather_file_info(
             except Exception:
                 pass
 
-            # Normalize filename and parent folder by removing file extension and 
+            # Normalize filename and parent folder by removing file extension and
             # replacing separators with spaces
             # Makes for easier term-finding
             filename_no_ext = filename
@@ -183,7 +186,7 @@ def _gather_file_info(
                 normalized_parent_folder = normalized_parent_folder.replace(sep, " ")
                 normalized_filename = normalized_filename.replace(sep, " ")
             # Extract date from parent folder or filename
-            # All date formats accepted, as long as they have 2 digits for month and 
+            # All date formats accepted, as long as they have 2 digits for month and
             # day, and 4 digits for year, separated by hyphens
             date_match = re.search(
                 r"(\d{2}-\d{2}-\d{4}|\d{4}-\d{2}-\d{2})", parent_folder
@@ -245,9 +248,10 @@ def _gather_file_info(
             )
             # Print a warning if any value is missing
             if missing_any:
-                message = (f"ValueError: Missing value for file '{filename}'. Results: "
-                f"date={date}, conditions={conditions}, material={material}, "
-                f"time={time}"
+                message = (
+                    f"ValueError: Missing value for file '{filename}'. Results: "
+                    f"date={date}, conditions={conditions}, material={material}, "
+                    f"time={time}"
                 )
                 print(message)
 
@@ -322,8 +326,8 @@ def file_info_extractor(
 ):
     """
     Use file info to create or update a structured DataFrame of scan details.
-    
-    Main function to gather file information and update the provided FTIR_DataFrame in 
+
+    Main function to gather file information and update the provided FTIR_DataFrame in
     memory.
 
     Parameters:
@@ -331,16 +335,16 @@ def file_info_extractor(
     FTIR_DataFrame : pd.DataFrame
         The existing DataFrame to append new data to (will be updated in memory).
     file_types : str or None
-        Comma-separated string of file extensions to consider (e.g. '.csv,.0,.dpt'). If 
+        Comma-separated string of file extensions to consider (e.g. '.csv,.0,.dpt'). If
         None, prompts user for input.
     separators : str or None
-        Comma-separated string of separator characters used in filenames and folder 
+        Comma-separated string of separator characters used in filenames and folder
         names (e.g. '_ , space , -'). If None, prompts user for input.
     material_terms : str or None
-        Comma-separated string of material terms to search for in filenames and folder 
+        Comma-separated string of material terms to search for in filenames and folder
         names. If None, prompts user for input.
     conditions_terms : str or None
-        Comma-separated string of condition terms to search for in filenames and folder 
+        Comma-separated string of condition terms to search for in filenames and folder
         names. If None, prompts user for input.
     directory : str or None
         The root directory to scan. If None, prompts user for input.
@@ -375,7 +379,9 @@ def file_info_extractor(
         "Normalization Peak Wavenumber",
         "Normalized and Corrected Data",
         "Peak Wavenumbers",
-        "Peak Absorbances"
+        "Peak Absorbances",
+        "Deconvolution Results",
+        "Time-Series Fit Results",
     ]
     for column in required_columns:
         if column not in FTIR_DataFrame.columns:
@@ -404,6 +410,7 @@ def file_info_extractor(
 
     # Dictionary columns
     if "Baseline Parameters" in FTIR_DataFrame.columns:
+
         def _to_dict(val):
             if isinstance(val, dict) or pd.isnull(val):
                 return val
@@ -415,7 +422,44 @@ def file_info_extractor(
                 except Exception:
                     pass
             return val
-        FTIR_DataFrame["Baseline Parameters"] = FTIR_DataFrame["Baseline Parameters"].apply(_to_dict)
+
+        FTIR_DataFrame["Baseline Parameters"] = FTIR_DataFrame[
+            "Baseline Parameters"
+        ].apply(_to_dict)
+    if "Deconvolution Results" in FTIR_DataFrame.columns:
+
+        def _to_dict(val):
+            if isinstance(val, dict) or pd.isnull(val):
+                return val
+            if isinstance(val, str):
+                try:
+                    parsed = ast.literal_eval(val)
+                    if isinstance(parsed, dict):
+                        return parsed
+                except Exception:
+                    pass
+            return val
+
+        FTIR_DataFrame["Deconvolution Results"] = FTIR_DataFrame[
+            "Deconvolution Results"
+        ].apply(_to_dict)
+    if "Time-Series Fit Results" in FTIR_DataFrame.columns:
+
+        def _to_dict(val):
+            if isinstance(val, dict) or pd.isnull(val):
+                return val
+            if isinstance(val, str):
+                try:
+                    parsed = ast.literal_eval(val)
+                    if isinstance(parsed, dict):
+                        return parsed
+                except Exception:
+                    pass
+            return val
+
+        FTIR_DataFrame["Time-Series Fit Results"] = FTIR_DataFrame[
+            "Time-Series Fit Results"
+        ].apply(_to_dict)
     # Float columns
     if "Normalization Peak Wavenumber" in FTIR_DataFrame.columns:
         FTIR_DataFrame["Normalization Peak Wavenumber"] = pd.to_numeric(
@@ -430,7 +474,7 @@ def file_info_extractor(
         "Baseline-Corrected Data",
         "Normalized and Corrected Data",
         "Peak Wavenumbers",
-        "Peak Absorbances"
+        "Peak Absorbances",
     ]
     for col in list_float_cols:
         if col in FTIR_DataFrame.columns:
@@ -457,7 +501,9 @@ def file_info_extractor(
     try:
         existing_list_cols = [c for c in list_float_cols if c in FTIR_DataFrame.columns]
         if existing_list_cols:
-            FTIR_DataFrame[existing_list_cols] = FTIR_DataFrame[existing_list_cols].astype(object)
+            FTIR_DataFrame[existing_list_cols] = FTIR_DataFrame[
+                existing_list_cols
+            ].astype(object)
     except Exception:
         # Fallback: coerce individually if bulk coercion fails
         for c in list_float_cols:
@@ -469,20 +515,18 @@ def file_info_extractor(
 
     # Option for if DataFrame should append rows with missing values or not
     if append_missing is None:
-        message = (f"Do you want to append rows with missing values into the DataFrame?"
-                   f" (y/n): "
-                   )
-        append_missing = (
-            input(message)
-            .strip()
-            .lower()
+        message = (
+            f"Do you want to append rows with missing values into the DataFrame?"
+            f" (y/n): "
         )
+        append_missing = input(message).strip().lower()
         append_missing = True if append_missing == "y" else False
 
     # Option for whether to access non-date-labeled subdirectories
     if access_subdirectories is None:
         message = (
-            "Limit scan to only subfolders with date labels (MM-DD-YYYY or YYYY-MM-DD)? (y/n): "
+            f"Limit scan to only subfolders with date labels"
+            f"(MM-DD-YYYY or YYYY-MM-DD)? (y/n): "
         )
         resp = input(message).strip().lower()
         access_subdirectories = False if resp == "y" else True

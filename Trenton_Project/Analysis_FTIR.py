@@ -22,6 +22,8 @@ import importlib
 from plotly.subplots import make_subplots
 import threading
 from lmfit.models import PseudoVoigtModel
+import time
+import html
 
 
 # ---- Validation helpers for clearer, user-friendly errors ---- #
@@ -531,6 +533,22 @@ def plot_grouped_spectra(
         mask &= FTIR_DataFrame["Time"].isin(time_list)
     filtered_data = FTIR_DataFrame[mask]
 
+    # If nothing matches, explain why and bail early instead of showing a blank plot
+    if filtered_data.empty:
+        mats = sorted(set(map(str, FTIR_DataFrame.get("Material", pd.Series([])).dropna().unique())))
+        conds_col = "Conditions" if "Conditions" in FTIR_DataFrame.columns else ("Condition" if "Condition" in FTIR_DataFrame.columns else None)
+        conds = sorted(set(map(str, FTIR_DataFrame.get(conds_col, pd.Series([])).dropna().unique()))) if conds_col else []
+        times_avail = sorted(set(FTIR_DataFrame.get("Time", pd.Series([])).dropna().unique()))
+        print(
+            "No spectra matched the current filters.\n"
+            f" - materials={materials!r}, conditions={conditions!r}, times={times!r}\n"
+            "Try relaxing one or more filters (e.g., set to 'any').\n"
+            f"Available Materials: {mats}\n"
+            f"Available Conditions: {conds}\n"
+            f"Available Times: {times_avail}"
+        )
+        return
+
     # If not including replicates, keep only the first member of each (Material,
     # Conditions, Time) group
     if not include_replicates:
@@ -563,6 +581,10 @@ def plot_grouped_spectra(
                 x_axis = ast.literal_eval(x_axis)
             except Exception:
                 pass
+        # Skip rows with missing/invalid axes
+        if x_axis is None:
+            print(f"Skipping index {idx}: missing X-axis ('{x_axis_col}').")
+            continue
         file_path = os.path.join(
             spectrum_row["File Location"], spectrum_row["File Name"]
         )
@@ -573,10 +595,13 @@ def plot_grouped_spectra(
                     y_data = ast.literal_eval(y_data)
                 except Exception:
                     pass
-            (line_handle,) = plt.plot(x_axis, y_data, label=f"Raw: {spectrum_label}")
-            legend_entries.append((line_handle, f"Raw: {spectrum_label}"))
-            color_map[("Raw", idx)] = line_handle.get_color()
-            legend_filepaths.append(file_path)
+            if y_data is None:
+                print(f"Skipping Raw plot for index {idx}: missing 'Raw Data'.")
+            else:
+                (line_handle,) = plt.plot(x_axis, y_data, label=f"Raw: {spectrum_label}")
+                legend_entries.append((line_handle, f"Raw: {spectrum_label}"))
+                color_map[("Raw", idx)] = line_handle.get_color()
+                legend_filepaths.append(file_path)
         if (
             baseline
             and "Baseline" in spectrum_row
@@ -588,17 +613,20 @@ def plot_grouped_spectra(
                     y_data = ast.literal_eval(y_data)
                 except Exception:
                     pass
-            if raw_data or baseline_corrected or normalized:
-                (line_handle,) = plt.plot(
-                    x_axis, y_data, "--", label=f"Baseline: {spectrum_label}"
-                )
+            if y_data is None:
+                print(f"Skipping Baseline plot for index {idx}: missing 'Baseline'.")
             else:
-                (line_handle,) = plt.plot(
-                    x_axis, y_data, label=f"Baseline: {spectrum_label}"
-                )
-            legend_entries.append((line_handle, f"Baseline: {spectrum_label}"))
-            color_map[("Baseline", idx)] = line_handle.get_color()
-            legend_filepaths.append(file_path)
+                if raw_data or baseline_corrected or normalized:
+                    (line_handle,) = plt.plot(
+                        x_axis, y_data, "--", label=f"Baseline: {spectrum_label}"
+                    )
+                else:
+                    (line_handle,) = plt.plot(
+                        x_axis, y_data, label=f"Baseline: {spectrum_label}"
+                    )
+                legend_entries.append((line_handle, f"Baseline: {spectrum_label}"))
+                color_map[("Baseline", idx)] = line_handle.get_color()
+                legend_filepaths.append(file_path)
         if (
             baseline_corrected
             and "Baseline-Corrected Data" in spectrum_row
@@ -610,22 +638,27 @@ def plot_grouped_spectra(
                     y_data = ast.literal_eval(y_data)
                 except Exception:
                     pass
-            if raw_data or baseline or normalized:
-                (line_handle,) = plt.plot(
-                    x_axis,
-                    y_data,
-                    ":",
-                    label=f"Baseline-Corrected: {spectrum_label}",
+            if y_data is None:
+                print(
+                    f"Skipping Baseline-Corrected plot for index {idx}: missing 'Baseline-Corrected Data'."
                 )
             else:
-                (line_handle,) = plt.plot(
-                    x_axis, y_data, label=f"Baseline-Corrected: {spectrum_label}"
+                if raw_data or baseline or normalized:
+                    (line_handle,) = plt.plot(
+                        x_axis,
+                        y_data,
+                        ":",
+                        label=f"Baseline-Corrected: {spectrum_label}",
+                    )
+                else:
+                    (line_handle,) = plt.plot(
+                        x_axis, y_data, label=f"Baseline-Corrected: {spectrum_label}"
+                    )
+                legend_entries.append(
+                    (line_handle, f"Baseline-Corrected: {spectrum_label}")
                 )
-            legend_entries.append(
-                (line_handle, f"Baseline-Corrected: {spectrum_label}")
-            )
-            color_map[("Baseline-Corrected", idx)] = line_handle.get_color()
-            legend_filepaths.append(file_path)
+                color_map[("Baseline-Corrected", idx)] = line_handle.get_color()
+                legend_filepaths.append(file_path)
         if (
             normalized
             and "Normalized and Corrected Data" in spectrum_row
@@ -637,22 +670,27 @@ def plot_grouped_spectra(
                     y_data = ast.literal_eval(y_data)
                 except Exception:
                     pass
-            if raw_data or baseline or baseline_corrected:
-                (line_handle,) = plt.plot(
-                    x_axis,
-                    y_data,
-                    "-.",
-                    label=f"Normalized and Corrected: {spectrum_label}",
+            if y_data is None:
+                print(
+                    f"Skipping Normalized plot for index {idx}: missing 'Normalized and Corrected Data'."
                 )
             else:
-                (line_handle,) = plt.plot(
-                    x_axis, y_data, label=f"Normalized and Corrected: {spectrum_label}"
+                if raw_data or baseline or baseline_corrected:
+                    (line_handle,) = plt.plot(
+                        x_axis,
+                        y_data,
+                        "-.",
+                        label=f"Normalized and Corrected: {spectrum_label}",
+                    )
+                else:
+                    (line_handle,) = plt.plot(
+                        x_axis, y_data, label=f"Normalized and Corrected: {spectrum_label}"
+                    )
+                legend_entries.append(
+                    (line_handle, f"Normalized and Corrected: {spectrum_label}")
                 )
-            legend_entries.append(
-                (line_handle, f"Normalized and Corrected: {spectrum_label}")
-            )
-            color_map[("Normalized and Corrected", idx)] = line_handle.get_color()
-            legend_filepaths.append(file_path)
+                color_map[("Normalized and Corrected", idx)] = line_handle.get_color()
+                legend_filepaths.append(file_path)
     handles = [entry[0] for entry in legend_entries]
     labels = [entry[1] for entry in legend_entries]
     # Print filepaths in legend order
@@ -663,7 +701,10 @@ def plot_grouped_spectra(
     )
     plt.xlabel("Wavelength (cm¯¹)")
     plt.ylabel("Absorbance (AU)")
-    plt.legend(handles, labels)
+    if handles and labels:
+        plt.legend(handles, labels)
+    else:
+        print("No plottable series found after filtering and data checks.")
     # Set zoom if provided
     if zoom is not None and isinstance(zoom, str):
         try:
@@ -2003,7 +2044,7 @@ def normalization_peak_selection(FTIR_DataFrame, material=None, filepath=None):
             btn_box.close()
         except Exception:
             pass
-        # Also close individual buttons defensively (in case they were displayed 
+        # Also close individual buttons defensively (in case they were displayed
         # separately)
         for b in (save_spec_btn, save_mat_btn, redo_btn, cancel_btn):
             try:
@@ -2427,7 +2468,9 @@ def find_peak_info(FTIR_DataFrame, materials=None, filepath=None):
 
     # Plotly figure
     fig = go.FigureWidget()
-    fig.add_scatter(x=x0.tolist(), y=y0.tolist(), mode="lines", name="Normalized and Corrected")
+    fig.add_scatter(
+        x=x0.tolist(), y=y0.tolist(), mode="lines", name="Normalized and Corrected"
+    )
     fig.add_scatter(
         x=[],
         y=[],
@@ -2537,7 +2580,7 @@ def find_peak_info(FTIR_DataFrame, materials=None, filepath=None):
         with fig.batch_update():
             fig.data[1].x = x_arr[peaks_idx].tolist() if peaks_idx.size else []
             fig.data[1].y = peaks_y.tolist() if peaks_idx.size else []
-            # Rebuild all range shapes deterministically for reliability with multiple 
+            # Rebuild all range shapes deterministically for reliability with multiple
             # ranges
             y0_min = float(np.nanmin(y_arr))
             y0_max = float(np.nanmax(y_arr))
@@ -2559,7 +2602,7 @@ def find_peak_info(FTIR_DataFrame, materials=None, filepath=None):
                         name=f"range_rect_{i_r}",
                     )
                 )
-            # Assign shapes in one shot to avoid inconsistent state when multiple are 
+            # Assign shapes in one shot to avoid inconsistent state when multiple are
             # active
             fig.layout.shapes = tuple(shapes_list)
         with msg_out:
@@ -2847,6 +2890,17 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
         style={"description_width": "auto"},
         readout_format=".0f",
     )
+    # Fit range selector: only peaks within this range will be modeled and shown
+    fit_range = widgets.FloatRangeSlider(
+        value=[xmin, xmax],
+        min=xmin,
+        max=xmax,
+        step=(xmax - xmin) / 1000 or 1.0,
+        description="Fit X-range",
+        continuous_update=False,
+        readout_format=".1f",
+        layout=widgets.Layout(width="90%"),
+    )
     init_sigma = widgets.FloatSlider(
         value=10.0,
         min=1.0,
@@ -2862,11 +2916,19 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
     DEFAULT_INCLUDE = True
     default_center_window_value = float(center_window.value)
     default_init_sigma_value = float(init_sigma.value)
+    default_fit_range_value = (float(fit_range.value[0]), float(fit_range.value[1]))
     # Add peaks workflow controls
+    # Fit button (manual trigger for fitting)
+    fit_btn = widgets.Button(
+        description="Fit",
+        tooltip="Run fit using current settings",
+        button_style="primary",
+        layout=widgets.Layout(width="80px"),
+    )
     add_peaks_btn = widgets.Button(
         description="Add peaks",
         tooltip="Click, then click on the plot to add one or more peaks",
-        button_style="primary",
+        button_style="info",
         layout=widgets.Layout(width="110px"),
     )
     accept_new_peaks_btn = widgets.Button(
@@ -2876,12 +2938,10 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
     )
     # Iterative correction button to minimize reduced chi-square via coordinate descent
     iter_btn = widgets.Button(
-        description="Iteratively correct",
+        description="Optimize",
         button_style="info",
         layout=widgets.Layout(width="175px"),
-        tooltip=(
-            "Adjust α, center window, and init σ to reduce reduced chi-square."
-        ),
+        tooltip=("Adjust α, center window, and init σ to reduce reduced chi-square."),
     )
     cancel_fit_btn = widgets.Button(
         description="Cancel Fit",
@@ -2903,7 +2963,41 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
     close_btn = widgets.Button(description="Close", button_style="danger")
     # Dedicated status label to avoid Output-widget buffering issues
     status_html = widgets.HTML(value="")
-    msg_out = widgets.Output()
+    # Replace Output-based logging with a single HTML widget to avoid renderer
+    # double-echo issues in some notebook front-ends.
+    log_html = widgets.HTML(value="")
+    # De-duplicate log messages: avoid echoing the same text twice in quick succession
+    # Make this thread-safe since some logs originate from worker threads.
+    last_msg_text = ""
+    last_msg_ts = 0.0
+    log_lock = threading.Lock()
+
+    def _log_once(message: str, *, wait: bool = True, clear: bool = True):
+        nonlocal last_msg_text, last_msg_ts
+        # Normalize message to minimize false negatives due to stray whitespace
+        msg_norm = str(message).rstrip()
+        try:
+            now = time.time()
+        except Exception:
+            now = 0.0
+        # Use a small lock to serialize dedup checks across threads
+        with log_lock:
+            # Suppress duplicates of identical text within ~1.0s window
+            if msg_norm == last_msg_text and (now - last_msg_ts) < 1.0:
+                return
+            # Update the HTML log widget directly to avoid Output buffering quirks.
+            try:
+                # Escape to prevent unintended HTML rendering; keep it simple text.
+                safe = html.escape(msg_norm)
+                log_html.value = f"<div style='font-family:monospace; white-space:pre-wrap;'>{safe}</div>"
+            except Exception:
+                # As a last resort, try printing to the notebook output
+                try:
+                    print(msg_norm)
+                except Exception:
+                    pass
+            last_msg_text = msg_norm
+            last_msg_ts = now
     # Reset buttons for globals and all
     reset_center_btn = widgets.Button(
         description="Reset",
@@ -2967,11 +3061,35 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
     peak_controls_box = widgets.VBox([])
 
     # Persisted per-spectrum settings so switching spectra preserves choices
-    per_spec_alpha = {}     # idx -> list[float]
-    per_spec_include = {}   # idx -> list[bool]
-    per_spec_globals = {}   # idx -> { 'center_window': float, 'init_sigma': float }
+    per_spec_alpha = {}  # idx -> list[float]
+    per_spec_include = {}  # idx -> list[bool]
+    per_spec_globals = {}  # idx -> { 'center_window': float, 'init_sigma': float, 'fit_range': (lo,hi) }
+    # Track the last active (Material, Conditions) filter to scope the above caches
+    current_filter_key = (None, None)
+    # Shared, group-scoped manual/template peaks (x positions) that should carry over
+    # when switching spectra within the same Material/Conditions selection.
+    shared_peaks_x = None  # list[float] | None
     # Guard to suppress redundant fits during bulk programmatic updates
     bulk_update_in_progress = False
+    # Lightweight reentrancy/debounce guards to avoid duplicate callbacks
+    on_spectrum_change_inflight = False
+    last_on_spectrum_change_ts = 0.0
+    fit_update_inflight = False
+    last_fit_update_ts = 0.0
+
+    # Lightweight per-button click de-bounce to avoid double-firing handlers
+    last_click_ts = {}
+
+    def _recent_click(key: str, min_interval: float = 0.35) -> bool:
+        try:
+            now = time.time()
+        except Exception:
+            now = 0.0
+        last = last_click_ts.get(key, 0.0)
+        if (now - last) < min_interval:
+            return True
+        last_click_ts[key] = now
+        return False
 
     def _snapshot_current_controls():
         """Persist current UI control values for the active spectrum."""
@@ -2988,19 +3106,44 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
         except Exception:
             per_spec_include[idx] = []
         try:
+            lo, hi = _current_fit_range()
             per_spec_globals[idx] = {
                 "center_window": float(center_window.value),
                 "init_sigma": float(init_sigma.value),
+                "fit_range": (float(lo), float(hi)),
             }
         except Exception:
             pass
 
     def _on_control_change(*_):
-        """Snapshot controls and refit, unless in a bulk update."""
+        """Snapshot controls and mark dirty; no auto-refit."""
+        # During bulk programmatic updates or iterative correction, ignore to prevent
+        # UI thrash and flicker from repeated rebuilds/autoscale changes.
+        try:
+            if iterating_in_progress or bulk_update_in_progress:
+                return
+        except Exception:
+            # If flags are unavailable, proceed normally
+            pass
+        # Update fit range indicator immediately when controls change (esp. fit_range)
+        try:
+            _update_fit_range_indicator()
+        except Exception:
+            pass
+        # Rebuild per-peak controls so only peaks within the current Fit X-range
+        # appear in the include/alpha lists (keeps UI in sync with slider selection).
+        try:
+            idx = spectrum_sel.value
+            _rebuild_alpha_sliders(idx)
+        except Exception:
+            pass
         _snapshot_current_controls()
-        if bulk_update_in_progress:
-            return
-        _fit_and_update_plot()
+        try:
+            status_html.value = (
+                "<span style='color:#555;'>Parameters changed. Click Fit to update.</span>"
+            )
+        except Exception:
+            pass
 
     # Track last reduced chi-square per spectrum to report refit deltas
     last_redchi_by_idx = {}
@@ -3039,9 +3182,8 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
     def _update_cancel_fit_visibility():
         active = False
         try:
-            active = (
-                (fit_thread is not None and fit_thread.is_alive())
-                or (iter_thread is not None and iter_thread.is_alive())
+            active = (fit_thread is not None and fit_thread.is_alive()) or (
+                iter_thread is not None and iter_thread.is_alive()
             )
         except Exception:
             pass
@@ -3100,18 +3242,14 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
         idx = spectrum_sel.value
         x_arr, y_arr = _get_xy(idx)
         if x_arr is None or y_arr is None or x_arr.size == 0:
-            with msg_out:
-                msg_out.clear_output()
-                print("Cannot add peak: current spectrum has no normalized data.")
+            _log_once("Cannot add peak: current spectrum has no normalized data.")
             return
 
         # Snap to nearest x
         try:
             nearest_i = int(np.argmin(np.abs(x_arr - x_clicked)))
         except Exception:
-            with msg_out:
-                msg_out.clear_output()
-                print("Could not determine nearest x for the clicked location.")
+            _log_once("Could not determine nearest x for the clicked location.")
             return
         x_new = float(x_arr[nearest_i])
         # Enforce proximity using Center ±window as minimum separation (customizable)
@@ -3131,14 +3269,9 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
                         f"spaces.</span>"
                     )
                 except Exception:
-                    with msg_out:
-                        msg_out.clear_output()
-                        print(
-                            f"Rejected: {x_new:.3f} cm⁻¹ is within ±{min_sep:.2f} cm⁻¹ "
-                            f"of another selected peak ({existing_x:.3f}). "
-                            f"Tip: reduce the Center ±window to fit peaks in small "
-                            f"spaces."
-                        )
+                    _log_once(
+                        f"Rejected: {x_new:.3f} cm⁻¹ is within ±{min_sep:.2f} cm⁻¹ of another selected peak ({existing_x:.3f}). Tip: reduce the Center ±window to fit peaks in small spaces."
+                    )
                 return
         # Too close to an existing (committed) peak for this spectrum?
         xs_existing, _ys_existing = _get_peaks(idx)
@@ -3154,14 +3287,9 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
                             f"spaces.</span>"
                         )
                     except Exception:
-                        with msg_out:
-                            msg_out.clear_output()
-                            print(
-                                f"Rejected: {x_new:.3f} cm⁻¹ is within ±{min_sep:.2f} "
-                                f"cm⁻¹ of existing peak {float(xe):.3f}. "
-                                f"Tip: reduce the Center ±window to fit peaks in small"
-                                f" spaces."
-                            )
+                        _log_once(
+                            f"Rejected: {x_new:.3f} cm⁻¹ is within ±{min_sep:.2f} cm⁻¹ of existing peak {float(xe):.3f}. Tip: reduce the Center ±window to fit peaks in small spaces."
+                        )
                     return
             except Exception:
                 continue
@@ -3183,12 +3311,9 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
             )
         except Exception:
             pass
-        with msg_out:
-            msg_out.clear_output()
-            print(
-                f"Selected new peak at x = {x_new:.3f} cm⁻¹. Click more points, or "
-                f"'Accept new peaks'."
-            )
+        _log_once(
+            f"Selected new peak at x = {x_new:.3f} cm⁻¹. Click more points, or 'Accept new peaks'."
+        )
 
     # Always register the click handler; it checks the toggle state internally
     try:
@@ -3232,16 +3357,92 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
         except Exception:
             return xs, ys
 
+    def _current_fit_range():
+        try:
+            lo, hi = fit_range.value
+            return float(min(lo, hi)), float(max(lo, hi))
+        except Exception:
+            return xmin, xmax
+
+    def _get_visible_peaks(row_idx):
+        xs, ys = _get_peaks(row_idx)
+        if not xs:
+            return [], []
+        lo, hi = _current_fit_range()
+        xs_f = []
+        ys_f = []
+        for cx, cy in zip(xs, ys):
+            try:
+                cxv = float(cx)
+            except Exception:
+                continue
+            if lo <= cxv <= hi:
+                xs_f.append(cxv)
+                try:
+                    ys_f.append(float(cy))
+                except Exception:
+                    ys_f.append(float("nan"))
+        return xs_f, ys_f
+
+    # Visual indicator of the current Fit X-range on the plot
+    def _update_fit_range_indicator():
+        try:
+            idx = spectrum_sel.value
+        except Exception:
+            return
+        x_arr, y_arr = _get_xy(idx)
+        if x_arr is None or y_arr is None or x_arr.size == 0:
+            return
+        try:
+            lo, hi = _current_fit_range()
+            y0_min = float(np.nanmin(y_arr))
+            y0_max = float(np.nanmax(y_arr))
+        except Exception:
+            return
+        rect = dict(
+            type="rect",
+            x0=float(min(lo, hi)),
+            x1=float(max(lo, hi)),
+            y0=y0_min,
+            y1=y0_max,
+            fillcolor="rgba(0,120,215,0.12)",  # subtle blue
+            line=dict(color="rgba(0,120,215,0.6)", width=1),
+            layer="below",
+            name="fit_range_rect",
+        )
+        try:
+            shapes = list(getattr(fig.layout, "shapes", ()))
+            new_shapes = []
+            for s in shapes:
+                try:
+                    # Skip any prior fit range shape; keep others (e.g., add_peak_marker)
+                    nm = getattr(s, "name", None)
+                except Exception:
+                    nm = None
+                if nm is None:
+                    try:
+                        nm = s.get("name")
+                    except Exception:
+                        nm = None
+                if nm == "fit_range_rect":
+                    continue
+                new_shapes.append(s)
+            new_shapes.append(rect)
+            fig.layout.shapes = tuple(new_shapes)
+        except Exception:
+            # Best-effort; ignore if shapes unavailable
+            pass
+
     def _rebuild_alpha_sliders(row_idx):
         nonlocal alpha_sliders, include_checkboxes
-        xs, ys = _get_peaks(row_idx)
+        xs, ys = _get_visible_peaks(row_idx)
         alpha_sliders = []
         include_checkboxes = []
         children = []
         if not xs:
             peak_controls_box.children = [
                 widgets.HTML(
-                    "<b>No peaks found for this spectrum.</b> Run find_peak_info first."
+                    "<b>No peaks in selected range.</b> Adjust 'Fit X-range' or run find_peak_info first."
                 )
             ]
             return
@@ -3254,7 +3455,11 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
             )
             cb = widgets.Checkbox(
                 value=(
-                    (saved_includes[i] if saved_includes is not None and i < len(saved_includes) else DEFAULT_INCLUDE)
+                    (
+                        saved_includes[i]
+                        if saved_includes is not None and i < len(saved_includes)
+                        else DEFAULT_INCLUDE
+                    )
                 ),
                 description="Include",
                 indent=False,
@@ -3262,7 +3467,9 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
             )
             s = widgets.FloatSlider(
                 value=(
-                    float(saved_alphas[i]) if saved_alphas is not None and i < len(saved_alphas) else DEFAULT_ALPHA
+                    float(saved_alphas[i])
+                    if saved_alphas is not None and i < len(saved_alphas)
+                    else DEFAULT_ALPHA
                 ),
                 min=0.0,
                 max=1.0,
@@ -3291,6 +3498,7 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
                     _snapshot_current_controls()
                     bulk_update_in_progress = False
                     _fit_and_update_plot()
+
                 return _reset_one
 
             rb.on_click(_make_reset_one(s))
@@ -3310,6 +3518,7 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
             return ""
 
     def _rebuild_spectrum_options(*_):
+        nonlocal current_filter_key, bulk_update_in_progress, shared_peaks_x
         # Build candidate set from initial 'filtered' and drop rows without normalized
         # data
         try:
@@ -3317,13 +3526,40 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
             cand = cand[cand["Normalized and Corrected Data"].notna()]
         except Exception:
             cand = filtered
-        # Apply material filter
+        # Read current filter selections
         sel_mat = material_dd.value if hasattr(material_dd, "value") else "any"
+        sel_cond = conditions_dd.value if hasattr(conditions_dd, "value") else "any"
+
+        # If the (Material, Conditions) filter changed, clear any preserved per-spectrum
+        # state so that edits/added peaks do not leak into unrelated spectra groups.
+        new_filter_key = (sel_mat, sel_cond)
+        if new_filter_key != current_filter_key:
+            try:
+                per_spec_alpha.clear()
+                per_spec_include.clear()
+                per_spec_globals.clear()
+                last_redchi_by_idx.clear()
+                last_result_by_idx.clear()
+                # Reset shared peaks template when filter changes
+                shared_peaks_x = None
+                # Reset global sliders to defaults without triggering refits
+                bulk_update_in_progress = True
+                try:
+                    center_window.value = default_center_window_value
+                    init_sigma.value = default_init_sigma_value
+                except Exception:
+                    pass
+                bulk_update_in_progress = False
+            except Exception:
+                pass
+            current_filter_key = new_filter_key
+
+        # Apply material filter
+        
         if sel_mat != "any" and "Material" in cand.columns:
             cand = cand[cand["Material"].astype(str) == str(sel_mat)]
         # Apply conditions/condition filter; always include 'unexposed' rows as they
         # represent time-zero for every condition.
-        sel_cond = conditions_dd.value if hasattr(conditions_dd, "value") else "any"
         if sel_cond != "any":
 
             def _cond_includes_unexposed(r):
@@ -3340,15 +3576,24 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
                 f" | T={r2.get('Time','')} | {r2.get('File Name','')}"
             )
             new_options.append((label, idx2))
-        # Update dropdown
+        # Update dropdown (avoid double-calling the value observer)
         prev_value = spectrum_sel.value
+        try:
+            spectrum_sel.unobserve(_on_spectrum_change, names="value")
+        except Exception:
+            pass
         spectrum_sel.options = new_options
         # Choose value: keep previous if still present; else first option
         valid_values = [v for (_lbl, v) in new_options]
+        value_changed = False
         if prev_value in valid_values:
-            spectrum_sel.value = prev_value
+            # Only assign if the value actually needs to change
+            if spectrum_sel.value != prev_value:
+                spectrum_sel.value = prev_value
+                value_changed = True
         elif valid_values:
             spectrum_sel.value = valid_values[0]
+            value_changed = True
         else:
             # No spectra available, clear plot and controls
             with fig.batch_update():
@@ -3359,29 +3604,50 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
             peak_controls_box.children = [
                 widgets.HTML("<b>No spectra available after filtering.</b>")
             ]
-            with msg_out:
-                msg_out.clear_output()
-                print("No spectra available after filtering selections.")
+            _log_once("No spectra available after filtering selections.")
             return
-        # Trigger downstream updates
-        _on_spectrum_change()
+        # Re-attach observer and trigger a single downstream update
+        try:
+            spectrum_sel.observe(_on_spectrum_change, names="value")
+        except Exception:
+            pass
+        # If we did not change the value (e.g., filters adjusted but selection stable),
+        # explicitly trigger one update to refresh controls/plot exactly once.
+        if not value_changed:
+            _on_spectrum_change()
 
     def _fit_and_update_plot(*_):
         nonlocal fit_thread, cancel_event, fit_cancel_token, iterating_in_progress
+        nonlocal fit_update_inflight, last_fit_update_ts
+        # Debounce/guard: prevent rapid double invocation
+        try:
+            now_ts = time.time()
+        except Exception:
+            now_ts = 0.0
+        if fit_update_inflight:
+            return None
+        if (now_ts - last_fit_update_ts) < 0.03:
+            return None
+        fit_update_inflight = True
+
+        def _finish_fit_guard():
+            nonlocal fit_update_inflight, last_fit_update_ts
+            fit_update_inflight = False
+            try:
+                last_fit_update_ts = time.time()
+            except Exception:
+                last_fit_update_ts = now_ts
 
         idx = spectrum_sel.value
         x_arr, y_arr = _get_xy(idx)
         if x_arr is None:
-            with msg_out:
-                msg_out.clear_output()
-                print("Selected spectrum missing normalized data.")
+            _log_once("Selected spectrum missing normalized data.")
+            _finish_fit_guard()
             return None
 
-        peaks_x, peaks_y = _get_peaks(idx)
+        peaks_x, peaks_y = _get_visible_peaks(idx)
         if not peaks_x:
-            with msg_out:
-                msg_out.clear_output()
-                print("No peaks found for this spectrum.")
+            _log_once("No peaks found in selected fit range.")
             with fig.batch_update():
                 fig.data[0].x = x_arr.tolist()
                 fig.data[0].y = y_arr.tolist()
@@ -3390,14 +3656,13 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
                 fig.layout.shapes = ()
                 while len(fig.data) > 2:
                     fig.data = tuple(fig.data[:2])
+            _finish_fit_guard()
             return None
 
         # Determine which peaks are included
         included = [i for i, cb in enumerate(include_checkboxes) if cb.value]
         if len(included) == 0:
-            with msg_out:
-                msg_out.clear_output()
-                print("No peaks selected. Enable one or more to fit.")
+            _log_once("No peaks selected in current range. Enable one or more to fit.")
             with fig.batch_update():
                 fig.data[0].x = x_arr.tolist()
                 fig.data[0].y = y_arr.tolist()
@@ -3405,6 +3670,7 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
                 fig.data[1].y = []
                 while len(fig.data) > 2:
                     fig.data = tuple(fig.data[:2])
+            _finish_fit_guard()
             return None
 
         # Prepare component traces count on main thread for consistent layout
@@ -3449,9 +3715,7 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
                     else "<span style='color:#555;'>Fitting...</span>"
                 )
             except Exception:
-                with msg_out:
-                    msg_out.clear_output()
-                    print("Refitting..." if old_redchi is not None else "Fitting...")
+                _log_once("Refitting..." if old_redchi is not None else "Fitting...")
 
         def _worker(local_cancel_token=local_cancel):
             try:
@@ -3536,13 +3800,21 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
                             fig.data[0].x = x_arr.tolist()
                             fig.data[0].y = y_arr.tolist()
                             fig.data[1].x = x_arr.tolist()
-                            fig.data[1].y = (y_fit.tolist() if hasattr(y_fit, "tolist") else list(y_fit))
+                            fig.data[1].y = (
+                                y_fit.tolist()
+                                if hasattr(y_fit, "tolist")
+                                else list(y_fit)
+                            )
                             # Update component traces safely
                             for comp_idx, i in enumerate(included):
                                 key = f"p{i}_"
                                 y_comp = comps.get(key, np.zeros_like(x_arr))
                                 fig.data[2 + comp_idx].x = x_arr.tolist()
-                                fig.data[2 + comp_idx].y = (y_comp.tolist() if hasattr(y_comp, "tolist") else list(y_comp))
+                                fig.data[2 + comp_idx].y = (
+                                    y_comp.tolist()
+                                    if hasattr(y_comp, "tolist")
+                                    else list(y_comp)
+                                )
                     except Exception:
                         plot_ok = False
                     # Update message regardless of plot success
@@ -3550,8 +3822,13 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
                     new_redchi = getattr(result, "redchi", np.nan)
                     try:
                         if not iterating_in_progress:
-                            # If an iteration just completed, prefer the pre- vs post-iteration summary
-                            if iter_summary_pending and iter_start_redchi is not None and iter_final_redchi is not None:
+                            # If an iteration just completed, prefer the pre- vs 
+                            # post-iteration summary
+                            if (
+                                iter_summary_pending
+                                and iter_start_redchi is not None
+                                and iter_final_redchi is not None
+                            ):
                                 try:
                                     old_str = f"{float(iter_start_redchi):.4g}"
                                 except Exception:
@@ -3561,7 +3838,8 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
                                 except Exception:
                                     new_str = str(iter_final_redchi)
                                 status_html.value = (
-                                    f"<span style='color:#000;'>Iterative correction complete. Reduced chi-square: ("
+                                    f"<span style='color:#000;'>Iterative correction "
+                                    f"complete. Reduced chi-square: ("
                                     f"{old_str}) ---&gt; ({new_str})</span>"
                                 )
                                 # Clear the pending summary after showing it once
@@ -3570,11 +3848,15 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
                                 # Format values consistently, showing change when refitting
                                 try:
                                     old_str = (
-                                        f"{old_redchi:.4g}" if old_redchi is not None else None
+                                        f"{old_redchi:.4g}"
+                                        if old_redchi is not None
+                                        else None
                                     )
                                 except Exception:
                                     old_str = (
-                                        str(old_redchi) if old_redchi is not None else None
+                                        str(old_redchi)
+                                        if old_redchi is not None
+                                        else None
                                     )
                                 try:
                                     new_str = f"{new_redchi:.4g}"
@@ -3582,23 +3864,23 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
                                     new_str = str(new_redchi)
                                 if old_redchi is not None:
                                     status_html.value = (
-                                        f"<span style='color:#000;'>Refit complete. Reduced "
-                                        f"chi-square: ("
+                                        f"<span style='color:#000;'>Refit complete. "
+                                        f"Reduced chi-square: ("
                                         f"{old_str}) ---&gt; ({new_str})</span>"
                                     )
                                 else:
                                     status_html.value = (
-                                        f"<span style='color:#000;'>Fit complete. Reduced "
-                                        f"chi-square: ("
+                                        f"<span style='color:#000;'>Fit complete. "
+                                        f"Reduced chi-square: ("
                                         f"{new_str})</span>"
                                     )
-                        # Persist the new redchi so subsequent runs are treated as 
+                        # Persist the new redchi so subsequent runs are treated as
                         # refits
                         try:
                             if np.isfinite(new_redchi):
                                 last_redchi_by_idx[idx] = float(new_redchi)
                         except Exception:
-                            # If np.isfinite is not available or new_redchi is not 
+                            # If np.isfinite is not available or new_redchi is not
                             # numeric, store raw
                             try:
                                 last_redchi_by_idx[idx] = float(new_redchi)
@@ -3606,12 +3888,7 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
                                 last_redchi_by_idx[idx] = new_redchi
                         if not plot_ok:
                             # Also echo a note in the log output
-                            with msg_out:
-                                msg_out.clear_output(wait=True)
-                                print(
-                                    f"(Note: Plot update partially failed; re-run to "
-                                    f"refresh components.)"
-                                )
+                            _log_once("(Note: Plot update partially failed; re-run to refresh components.)")
                     except Exception:
                         if not iterating_in_progress:
                             status_html.value = (
@@ -3640,9 +3917,7 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
                                 "<span style='color:#a00;'>Fit cancelled.</span>"
                             )
                         except Exception:
-                            with msg_out:
-                                msg_out.clear_output()
-                                print("Fit cancelled.")
+                            _log_once("Fit cancelled.")
                     try:
                         _update_cancel_fit_visibility()
                     except Exception:
@@ -3658,9 +3933,7 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
                                 f"<span style='color:#a00;'>Fit failed: {e}</span>"
                             )
                         except Exception:
-                            with msg_out:
-                                msg_out.clear_output()
-                                print(f"Fit failed: {e}")
+                            _log_once(f"Fit failed: {e}")
                     try:
                         _update_cancel_fit_visibility()
                     except Exception:
@@ -3674,46 +3947,127 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
             _update_cancel_fit_visibility()
         except Exception:
             pass
+        _finish_fit_guard()
         return None
 
     def _on_spectrum_change(*_):
-        nonlocal bulk_update_in_progress
-        # Snapshot previous spectrum's controls before switching
-        _snapshot_current_controls()
-        idx = spectrum_sel.value
-        # Restore per-spectrum globals and per-peak controls without triggering many fits
-        bulk_update_in_progress = True
+        nonlocal bulk_update_in_progress, shared_peaks_x
+        nonlocal on_spectrum_change_inflight, last_on_spectrum_change_ts
+        # Debounce/guard: prevent rapid double invocation
         try:
-            g = per_spec_globals.get(idx)
-            if g is not None:
-                try:
-                    center_window.value = float(g.get("center_window", center_window.value))
-                except Exception:
-                    pass
-                try:
-                    init_sigma.value = float(g.get("init_sigma", init_sigma.value))
-                except Exception:
-                    pass
+            now_ts = time.time()
         except Exception:
-            pass
-        _rebuild_alpha_sliders(idx)
-        bulk_update_in_progress = False
-        _fit_and_update_plot()
+            now_ts = 0.0
+        if on_spectrum_change_inflight:
+            return
+        if (now_ts - last_on_spectrum_change_ts) < 0.03:
+            return
+        on_spectrum_change_inflight = True
+        try:
+            # Snapshot previous spectrum's controls before switching
+            _snapshot_current_controls()
+            idx = spectrum_sel.value
+            # If a shared peaks template exists for this filter group, apply it to the
+            # newly selected spectrum (recompute Y from its data), so user-added peaks
+            # carry over when switching spectra within the same Material/Conditions.
+            try:
+                if shared_peaks_x is not None and isinstance(shared_peaks_x, (list, tuple)):
+                    x_arr, y_arr = _get_xy(idx)
+                    if x_arr is not None and y_arr is not None:
+                        xs = [float(v) for v in shared_peaks_x]
+                        ys = []
+                        try:
+                            for xv in xs:
+                                i = int(np.argmin(np.abs(x_arr - xv)))
+                                ys.append(float(y_arr[i]))
+                        except Exception:
+                            ys = [float("nan") for _ in xs]
+                        FTIR_DataFrame.at[idx, "Peak Wavenumbers"] = xs
+                        FTIR_DataFrame.at[idx, "Peak Absorbances"] = ys
+                        # Peak definitions changed for this spectrum; clear per-peak UI
+                        try:
+                            per_spec_alpha.pop(idx, None)
+                            per_spec_include.pop(idx, None)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            # Restore per-spectrum globals and per-peak controls without triggering many 
+            # fits
+            bulk_update_in_progress = True
+            try:
+                g = per_spec_globals.get(idx)
+                if g is not None:
+                    try:
+                        center_window.value = float(
+                            g.get("center_window", center_window.value)
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        init_sigma.value = float(g.get("init_sigma", init_sigma.value))
+                    except Exception:
+                        pass
+                    try:
+                        fr = g.get("fit_range")
+                        if isinstance(fr, (list, tuple)) and len(fr) == 2:
+                            lo, hi = float(fr[0]), float(fr[1])
+                            # clamp to bounds
+                            lo = max(float(fit_range.min), min(lo, float(fit_range.max)))
+                            hi = max(lo, min(hi, float(fit_range.max)))
+                            fit_range.value = [lo, hi]
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            _rebuild_alpha_sliders(idx)
+            bulk_update_in_progress = False
+            # Refresh the fit range overlay for the new spectrum
+            try:
+                _update_fit_range_indicator()
+            except Exception:
+                pass
+            # Freeze y-axis to this spectrum's data range to reduce flicker on updates
+            try:
+                _fix_y_range(idx)
+            except Exception:
+                pass
+            # Clear any prior fit from plot; wait for user to click Fit
+            try:
+                with fig.batch_update():
+                    fig.data[1].x = []
+                    fig.data[1].y = []
+                    while len(fig.data) > 2:
+                        fig.data = tuple(fig.data[:2])
+            except Exception:
+                pass
+            try:
+                status_html.value = (
+                    "<span style='color:#555;'>Spectrum changed. Click Fit to compute.</span>"
+                )
+            except Exception:
+                pass
+        finally:
+            on_spectrum_change_inflight = False
+            try:
+                last_on_spectrum_change_ts = time.time()
+            except Exception:
+                last_on_spectrum_change_ts = now_ts
 
     # No range checkboxes to manage
 
     def _save_for_file(b):
+        if _recent_click("save_for_file"):
+            return
         idx = spectrum_sel.value
         # Use the last completed result if available; if not, trigger a fit and inform
         # the user to wait for completion.
         res = last_result_by_idx.get(idx)
         if res is None:
-            _fit_and_update_plot()
-            with msg_out:
-                msg_out.clear_output()
-                print("Fitting... Please click 'Save' again once the fit completes.")
+            _log_once("No current fit. Click 'Fit' to compute, then click 'Save' again.")
             return
-        peaks_x, _ = _get_peaks(idx)
+        # Only save parameters for peaks in the currently selected fit range
+        peaks_x, _ = _get_visible_peaks(idx)
         included = [i for i, cb in enumerate(include_checkboxes) if cb.value]
         out = []
         for i in included:
@@ -3725,12 +4079,9 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
                     d[name] = float(p.value)
             out.append(d)
         FTIR_DataFrame.at[idx, results_col] = out
-        with msg_out:
-            msg_out.clear_output()
-            print(
-                f"Saved deconvolution for file "
-                f"'{FTIR_DataFrame.loc[idx, 'File Name']}'."
-            )
+        _log_once(
+            f"Saved deconvolution for file '{FTIR_DataFrame.loc[idx, 'File Name']}'."
+        )
 
     def _close_ui(b):
         # Signal cancellation and close widgets promptly
@@ -3765,7 +4116,7 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
                 ui.close()
             except Exception:
                 pass
-            # Leave msg_out displayed so the last messages remain visible
+            # Leave the log widget displayed so the last message remains visible
             fig.close()
         except Exception:
             pass
@@ -3774,8 +4125,9 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
     spectrum_sel.observe(_on_spectrum_change, names="value")
     material_dd.observe(_rebuild_spectrum_options, names="value")
     conditions_dd.observe(_rebuild_spectrum_options, names="value")
-    for w in (center_window, init_sigma):
+    for w in (center_window, init_sigma, fit_range):
         w.observe(_on_control_change, names="value")
+
     # Wire reset buttons
     def _reset_center(_b=None):
         nonlocal bulk_update_in_progress
@@ -3786,7 +4138,12 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
             pass
         _snapshot_current_controls()
         bulk_update_in_progress = False
-        _fit_and_update_plot()
+        try:
+            status_html.value = (
+                "<span style='color:#555;'>Center window reset. Click Fit to update.</span>"
+            )
+        except Exception:
+            pass
 
     def _reset_sigma(_b=None):
         nonlocal bulk_update_in_progress
@@ -3797,7 +4154,12 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
             pass
         _snapshot_current_controls()
         bulk_update_in_progress = False
-        _fit_and_update_plot()
+        try:
+            status_html.value = (
+                "<span style='color:#555;'>Init sigma reset. Click Fit to update.</span>"
+            )
+        except Exception:
+            pass
 
     def _reset_all(_b=None):
         nonlocal bulk_update_in_progress
@@ -3809,6 +4171,11 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
             pass
         try:
             init_sigma.value = default_init_sigma_value
+        except Exception:
+            pass
+        try:
+            lo, hi = default_fit_range_value
+            fit_range.value = [float(lo), float(hi)]
         except Exception:
             pass
         # Reset per-peak controls
@@ -3824,13 +4191,56 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
             pass
         _snapshot_current_controls()
         bulk_update_in_progress = False
-        _fit_and_update_plot()
+        try:
+            status_html.value = (
+                "<span style='color:#555;'>All controls reset. Click Fit to update.</span>"
+            )
+        except Exception:
+            pass
 
     reset_center_btn.on_click(_reset_center)
     reset_sigma_btn.on_click(_reset_sigma)
     reset_all_btn.on_click(_reset_all)
+    
+    def _on_fit_click(_b=None):
+        if _recent_click("fit"):
+            return
+        _fit_and_update_plot()
+
+    fit_btn.on_click(_on_fit_click)
     save_btn.on_click(_save_for_file)
     close_btn.on_click(_close_ui)
+
+    # Helper: quietly set a widget attribute without triggering control-change side effects
+    def _set_quiet(widget, attr, value):
+        """Set a widget attribute while suppressing on_change observers."""
+        nonlocal bulk_update_in_progress
+        bulk_update_in_progress = True
+        try:
+            setattr(widget, attr, value)
+        except Exception:
+            pass
+        finally:
+            bulk_update_in_progress = False
+
+    # Fix y-axis range to the current data to prevent autoscale flicker during updates
+    def _fix_y_range(idx):
+        try:
+            x_arr, y_arr = _get_xy(idx)
+        except Exception:
+            x_arr, y_arr = None, None
+        if y_arr is None:
+            return
+        try:
+            y0_min = float(np.nanmin(y_arr))
+            y0_max = float(np.nanmax(y_arr))
+        except Exception:
+            return
+        try:
+            with fig.batch_update():
+                fig.update_yaxes(autorange=False, range=[y0_min, y0_max])
+        except Exception:
+            pass
 
     def _iteratively_correct_worker():
         """Coordinate-descent style tuning of parameters to reduce reduced chi-square.
@@ -3840,8 +4250,9 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
         change only if reduced chi-square improves. Stops when a full sweep makes no
         improvements, or after a safety cap of sweeps.
         """
-        import time
-        nonlocal iterating_in_progress, iter_start_redchi, iter_final_redchi, iter_summary_pending
+
+        nonlocal iterating_in_progress, iter_start_redchi
+        nonlocal iter_final_redchi, iter_summary_pending
 
         idx = spectrum_sel.value
 
@@ -3885,9 +4296,7 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
         if not np.isfinite(start_rc):
             # No prior redchi recorded; compute once.
             try:
-                status_html.value = (
-                    "<span style='color:#555;'>Iteratively correcting (pre-fit)...</span>"
-                )
+                status_html.value = "<span style='color:#555;'>Iteratively correcting (pre-fit)...</span>"
             except Exception:
                 pass
             start_rc = _run_fit_and_wait()
@@ -3936,12 +4345,11 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
         if len(included_idxs) == 0:
             try:
                 status_html.value = (
-                    "<span style='color:#a00;'>Cannot iterate: no peaks selected.</span>"
+                    f"<span style='color:#a00;'>Cannot iterate: no peaks "
+                    f"selected.</span>"
                 )
             except Exception:
-                with msg_out:
-                    msg_out.clear_output()
-                    print("Cannot iterate: no peaks selected.")
+                _log_once("Cannot iterate: no peaks selected.")
             try:
                 _on_main_thread(_update_cancel_fit_visibility)
             except Exception:
@@ -4000,7 +4408,8 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
                     # Show running total and break to final message below
                     try:
                         status_html.value = (
-                            f"<span style='color:#a00;'>Iterative correction cancelled.</span>"
+                            f"<span style='color:#a00;'>Iterative correction "
+                            f"cancelled.</span>"
                         )
                     except Exception:
                         pass
@@ -4025,15 +4434,16 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
                     continue
                 v0 = float(sld.value)
                 step = float(alpha_steps.get(i, 0.1))
+
                 # Define actions
                 def set_plus(v0=v0, sld=sld, step=step):
-                    sld.value = _clamp(v0 + step, 0.0, 1.0)
+                    _set_quiet(sld, "value", _clamp(v0 + step, 0.0, 1.0))
 
                 def set_minus(v0=v0, sld=sld, step=step):
-                    sld.value = _clamp(v0 - step, 0.0, 1.0)
+                    _set_quiet(sld, "value", _clamp(v0 - step, 0.0, 1.0))
 
                 def restore(v0=v0, sld=sld):
-                    sld.value = v0
+                    _set_quiet(sld, "value", v0)
 
                 # Use getter label for debugging (not printed)
                 _, kept = _try_adjust(
@@ -4048,7 +4458,8 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
                     iteration_changes += 1
                     try:
                         status_html.value = (
-                            f"<span style='color:#555;'>iterating... (iterations so far: {iteration_changes})</span>"
+                            f"<span style='color:#555;'>iterating... "
+                            f"(iterations so far: {iteration_changes})</span>"
                         )
                     except Exception:
                         pass
@@ -4062,17 +4473,29 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
             cw0 = float(center_window.value)
 
             def cw_plus(cw0=cw0):
-                center_window.value = _clamp(
-                    cw0 + center_step, float(center_window.min), float(center_window.max)
+                _set_quiet(
+                    center_window,
+                    "value",
+                    _clamp(
+                        cw0 + center_step,
+                        float(center_window.min),
+                        float(center_window.max),
+                    ),
                 )
 
             def cw_minus(cw0=cw0):
-                center_window.value = _clamp(
-                    cw0 - center_step, float(center_window.min), float(center_window.max)
+                _set_quiet(
+                    center_window,
+                    "value",
+                    _clamp(
+                        cw0 - center_step,
+                        float(center_window.min),
+                        float(center_window.max),
+                    ),
                 )
 
             def cw_restore(cw0=cw0):
-                center_window.value = cw0
+                _set_quiet(center_window, "value", cw0)
 
             _, kept = _try_adjust(
                 getter=lambda: center_window.value,
@@ -4086,7 +4509,8 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
                 iteration_changes += 1
                 try:
                     status_html.value = (
-                        f"<span style='color:#555;'>iterating... (iterations so far: {iteration_changes})</span>"
+                        f"<span style='color:#555;'>iterating... "
+                        f"(iterations so far: {iteration_changes})</span>"
                     )
                 except Exception:
                     pass
@@ -4100,17 +4524,25 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
             sg0 = float(init_sigma.value)
 
             def sg_plus(sg0=sg0):
-                init_sigma.value = _clamp(
-                    sg0 + sigma_step, float(init_sigma.min), float(init_sigma.max)
+                _set_quiet(
+                    init_sigma,
+                    "value",
+                    _clamp(
+                        sg0 + sigma_step, float(init_sigma.min), float(init_sigma.max)
+                    ),
                 )
 
             def sg_minus(sg0=sg0):
-                init_sigma.value = _clamp(
-                    sg0 - sigma_step, float(init_sigma.min), float(init_sigma.max)
+                _set_quiet(
+                    init_sigma,
+                    "value",
+                    _clamp(
+                        sg0 - sigma_step, float(init_sigma.min), float(init_sigma.max)
+                    ),
                 )
 
             def sg_restore(sg0=sg0):
-                init_sigma.value = sg0
+                _set_quiet(init_sigma, "value", sg0)
 
             _, kept = _try_adjust(
                 getter=lambda: init_sigma.value,
@@ -4124,7 +4556,8 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
                 iteration_changes += 1
                 try:
                     status_html.value = (
-                        f"<span style='color:#555;'>iterating... (iterations so far: {iteration_changes})</span>"
+                        f"<span style='color:#555;'>iterating... "
+                        f"(iterations so far: {iteration_changes})</span>"
                     )
                 except Exception:
                     pass
@@ -4150,16 +4583,16 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
                     f"Reduced chi-square: ({old_str}) ---&gt; ({new_str})</span>"
                 )
         except Exception:
-            with msg_out:
-                msg_out.clear_output()
-                if cancel_event.is_set():
-                    print(
-                        f"Iterative correction cancelled. Reduced chi-square: ({old_str}) -> ({new_str})"
-                    )
-                else:
-                    print(
-                        f"Iterative correction complete. Reduced chi-square: ({old_str}) -> ({new_str})"
-                    )
+            if cancel_event.is_set():
+                _log_once(
+                    f"Iterative correction cancelled. Reduced chi-square: (" 
+                    f"{old_str}) -> ({new_str})"
+                )
+            else:
+                _log_once(
+                    f"Iterative correction complete. Reduced chi-square: (" 
+                    f"{old_str}) -> ({new_str})"
+                )
         # Remember iteration summary for the next refit message
         iter_final_redchi = base_rc
         iter_summary_pending = True
@@ -4173,12 +4606,15 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
 
     # Wire the iterative correct to run in background and support cancellation
     def _on_iteratively_correct_click(b):
+        if _recent_click("iteratively_correct"):
+            return
         nonlocal iter_thread, iterating_in_progress, cancel_event, iter_start_redchi
         try:
             if iter_thread is not None and iter_thread.is_alive():
                 try:
                     status_html.value = (
-                        "<span style='color:#a60;'>Iterative correction is already running.</span>"
+                        f"<span style='color:#a60;'>Iterative correction"
+                        f" is already running.</span>"
                     )
                 except Exception:
                     pass
@@ -4213,6 +4649,8 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
     iter_btn.on_click(_on_iteratively_correct_click)
 
     def _on_cancel_fit(b):
+        if _recent_click("cancel_fit"):
+            return
         # Signal cancellation for any active fit/iteration
         try:
             cancel_event.set()
@@ -4234,11 +4672,15 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
             _update_cancel_fit_visibility()
         except Exception:
             pass
+
     cancel_fit_btn.on_click(_on_cancel_fit)
 
     # Layout
     controls_row_filters = widgets.HBox([material_dd, conditions_dd])
     controls_row_spectrum = widgets.HBox([spectrum_sel])
+    # Place the Fit X-range slider above the peak modification section
+    fit_range_row = widgets.HBox([fit_range])
+    # Keep other global parameters grouped below the peak controls
     globals_column = widgets.VBox(
         [
             widgets.HBox([center_window, reset_center_btn]),
@@ -4248,6 +4690,7 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
     reset_all_row = widgets.HBox([reset_all_btn])
     buttons_row = widgets.HBox(
         [
+            fit_btn,
             add_peaks_btn,
             accept_new_peaks_btn,
             redo_new_peaks_btn,
@@ -4263,6 +4706,7 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
         [
             controls_row_filters,
             controls_row_spectrum,
+            fit_range_row,
             peak_controls_box,
             globals_column,
             reset_all_row,
@@ -4273,6 +4717,8 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
 
     # --- Add-peaks workflow callbacks ---
     def _enter_add_mode(b=None):
+        if _recent_click("enter_add_mode"):
+            return
         nonlocal adding_mode
         adding_mode = True
         new_peak_xs.clear()
@@ -4296,21 +4742,18 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
             conditions_dd.disabled = True
         except Exception:
             pass
-        with msg_out:
-            msg_out.clear_output()
-            print(
-                f"Add-peaks mode: click one or more x-locations on the plot. Then "
-                f"accept/redo/cancel."
-            )
+        _log_once(
+            "Add-peaks mode: click one or more x-locations on the plot. Then accept/redo/cancel."
+        )
 
     def _accept_new_peaks(b=None):
-        nonlocal adding_mode
+        if _recent_click("accept_new_peaks"):
+            return
+        nonlocal adding_mode, shared_peaks_x
         idx = spectrum_sel.value
         x_arr, y_arr = _get_xy(idx)
         if x_arr is None:
-            with msg_out:
-                msg_out.clear_output()
-                print("Cannot accept: current spectrum has no normalized data.")
+            _log_once("Cannot accept: current spectrum has no normalized data.")
             return
         if len(new_peak_xs) == 0:
             # Nothing selected; just exit mode
@@ -4359,6 +4802,11 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
         # Persist back to DataFrame for this spectrum
         FTIR_DataFrame.at[idx, "Peak Wavenumbers"] = [float(v) for v in xs_sorted]
         FTIR_DataFrame.at[idx, "Peak Absorbances"] = [float(v) for v in ys_sorted]
+        # Update the shared/template peaks for this filter group so they carry over
+        try:
+            shared_peaks_x = [float(v) for v in xs_sorted]
+        except Exception:
+            shared_peaks_x = xs_sorted
 
         # Peaks changed; clear any saved per-peak settings for this spectrum
         try:
@@ -4369,7 +4817,13 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
 
         # Rebuild UI and refit with the updated peaks
         _rebuild_alpha_sliders(idx)
-        _fit_and_update_plot()
+        # Do not auto-fit; wait for user to click Fit
+        try:
+            status_html.value = (
+                "<span style='color:#555;'>Peaks updated. Click Fit to update.</span>"
+            )
+        except Exception:
+            pass
 
         # Exit add mode and clean up visuals
         _clear_add_peak_shapes()
@@ -4403,22 +4857,20 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
             try:
                 status_html.value = f"<span style='color:#a00;'>{msg}</span>"
             except Exception:
-                with msg_out:
-                    msg_out.clear_output()
-                    print(msg)
+                _log_once(msg)
         else:
-            with msg_out:
-                msg_out.clear_output()
-                print("New peaks accepted and added to the current spectrum.")
+            _log_once("New peaks accepted and added to the current spectrum.")
 
     def _redo_new_peaks(b=None):
+        if _recent_click("redo_new_peaks"):
+            return
         new_peak_xs.clear()
         _clear_add_peak_shapes()
-        with msg_out:
-            msg_out.clear_output()
-            print("Selection cleared. Click on the plot to select peaks again.")
+        _log_once("Selection cleared. Click on the plot to select peaks again.")
 
     def _cancel_new_peaks(b=None):
+        if _recent_click("cancel_new_peaks"):
+            return
         nonlocal adding_mode
         adding_mode = False
         new_peak_xs.clear()
@@ -4441,26 +4893,25 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
             conditions_dd.disabled = False
         except Exception:
             pass
-        with msg_out:
-            msg_out.clear_output()
-            print("Peak addition cancelled. No changes were made.")
+        _log_once("Peak addition cancelled. No changes were made.")
 
     add_peaks_btn.on_click(_enter_add_mode)
     accept_new_peaks_btn.on_click(_accept_new_peaks)
     redo_new_peaks_btn.on_click(_redo_new_peaks)
     cancel_new_peaks_btn.on_click(_cancel_new_peaks)
 
-    display(ui, fig, msg_out)
+    display(ui, fig, log_html)
     # Seed options with current filters (defaults 'any') and trigger initial updates
     _rebuild_spectrum_options()
 
     return FTIR_DataFrame
 
-def time_series_fit(FTIR_DataFrame):
+
+def time_series_fitting(FTIR_DataFrame):
     """Perform time-series fitting on FTIR data in the DataFrame.
 
     This function analyzes FTIR spectra over time, taking the individual parameters from
-    the DataFrame for each spectrum and averaging to create a time-series fit. The 
+    the DataFrame for each spectrum and averaging to create a time-series fit. The
     peaks in each spectrum are then scaled in amplitude, but with the same center and
     shape parameters across the time series.
 
@@ -4479,8 +4930,10 @@ def time_series_fit(FTIR_DataFrame):
         raise ValueError("FTIR_DataFrame must be loaded and non-empty.")
 
     # Identify condition column name and required columns
-    cond_col = "Conditions" if "Conditions" in FTIR_DataFrame.columns else (
-        "Condition" if "Condition" in FTIR_DataFrame.columns else None
+    cond_col = (
+        "Conditions"
+        if "Conditions" in FTIR_DataFrame.columns
+        else ("Condition" if "Condition" in FTIR_DataFrame.columns else None)
     )
     if cond_col is None:
         raise KeyError("Missing 'Conditions' (or 'Condition') column in DataFrame.")
@@ -4497,7 +4950,8 @@ def time_series_fit(FTIR_DataFrame):
     missing = [c for c in required_cols if c not in FTIR_DataFrame.columns]
     if missing:
         raise KeyError(
-            f"Missing required column(s): {missing}. Ensure your DataFrame is prepared with prior steps."
+            f"Missing required column(s): {missing}. Ensure your DataFrame is prepared "
+            f"with prior steps."
         )
 
     # Ensure destination column can hold arbitrary Python objects
@@ -4570,7 +5024,10 @@ def time_series_fit(FTIR_DataFrame):
         return int(max(candidates))
 
     # Collect basic groupings
-    materials = [str(m) for m in FTIR_DataFrame["Material"].dropna().astype(str).unique()]
+    materials = [
+        str(m) for m in FTIR_DataFrame["Material"].dropna().astype(str).unique()
+    ]
+
     # Gather 'unexposed' masks per material (case-insensitive)
     def _is_unexposed(val):
         try:
@@ -4617,7 +5074,8 @@ def time_series_fit(FTIR_DataFrame):
                 groups_skipped.append((material, cond, "no deconvolution results"))
                 continue
 
-            # Aggregate means for center, sigma, fraction across rows with exactly k peaks
+            # Aggregate means for center, sigma, fraction across rows with exactly k 
+            # peaks
             centers = []
             sigmas = []
             fracs = []
@@ -4645,13 +5103,19 @@ def time_series_fit(FTIR_DataFrame):
                 if not np.isfinite(avg_center[i]):
                     # fallback to median valid value
                     vals = centers[:, i]
-                    avg_center[i] = np.nanmedian(vals) if np.isfinite(np.nanmedian(vals)) else 0.0
+                    avg_center[i] = (
+                        np.nanmedian(vals) if np.isfinite(np.nanmedian(vals)) else 0.0
+                    )
                 if not np.isfinite(avg_sigma[i]):
                     vals = sigmas[:, i]
-                    avg_sigma[i] = np.nanmedian(vals) if np.isfinite(np.nanmedian(vals)) else 10.0
+                    avg_sigma[i] = (
+                        np.nanmedian(vals) if np.isfinite(np.nanmedian(vals)) else 10.0
+                    )
                 if not np.isfinite(avg_frac[i]):
                     vals = fracs[:, i]
-                    avg_frac[i] = np.nanmedian(vals) if np.isfinite(np.nanmedian(vals)) else 0.5
+                    avg_frac[i] = (
+                        np.nanmedian(vals) if np.isfinite(np.nanmedian(vals)) else 0.5
+                    )
 
             # Optional average amplitude (for initial guesses only)
             amps = []
@@ -4676,10 +5140,27 @@ def time_series_fit(FTIR_DataFrame):
                     m = PseudoVoigtModel(prefix=f"p{i}_")
                     p = m.make_params()
                     p[f"p{i}_center"].set(value=float(avg_center[i]), vary=False)
-                    p[f"p{i}_sigma"].set(value=float(avg_sigma[i]), min=1e-3, max=1e4, vary=False)
-                    p[f"p{i}_fraction"].set(value=float(avg_frac[i]), min=0.0, max=1.0, vary=False)
+                    p[f"p{i}_sigma"].set(
+                        value=float(avg_sigma[i]),
+                        min=1e-3,
+                        max=1e4,
+                        vary=False,
+                    )
+                    p[f"p{i}_fraction"].set(
+                        value=float(avg_frac[i]),
+                        min=0.0,
+                        max=1.0,
+                        vary=False,
+                    )
                     # amplitude will be initialized later per-spectrum
-                    p[f"p{i}_amplitude"].set(min=0.0, value=float(avg_amp[i]) if isinstance(avg_amp, np.ndarray) else 1.0)
+                    p[f"p{i}_amplitude"].set(
+                        min=0.0,
+                        value=(
+                            float(avg_amp[i])
+                            if isinstance(avg_amp, np.ndarray)
+                            else 1.0
+                        ),
+                    )
                     if comp_model is None:
                         comp_model = m
                         params = p
@@ -4699,14 +5180,20 @@ def time_series_fit(FTIR_DataFrame):
                 if x_arr is None or y_arr is None or x_arr.size == 0:
                     # Skip this row quietly
                     continue
-                # Build model and initialize amplitudes more specifically from this row if possible
+                # Build model and initialize amplitudes more specifically from this row 
+                # if possible
                 comp_model, params = _build_model_with_fixed_params()
-                # If the row has a deconvolution with k peaks, use those amplitudes as initial values
+                # If the row has a deconvolution with k peaks, use those amplitudes as 
+                # initial values
                 peaks_row = _parse_deconv(row.get("Deconvolution Results"))
                 if isinstance(peaks_row, list) and len(peaks_row) == k:
                     for i in range(k):
                         try:
-                            ai = float(peaks_row[i].get("amplitude", params[f"p{i}_amplitude"].value))
+                            ai = float(
+                                peaks_row[i].get(
+                                    "amplitude", params[f"p{i}_amplitude"].value
+                                )
+                            )
                             params[f"p{i}_amplitude"].set(value=max(0.0, ai))
                         except Exception:
                             pass
@@ -4717,7 +5204,10 @@ def time_series_fit(FTIR_DataFrame):
                         for i in range(k):
                             ci = float(avg_center[i])
                             nearest = int(np.argmin(np.abs(x_arr - ci)))
-                            ai0 = max(0.0, float(y_arr[nearest]) * max(1.0, float(avg_sigma[i])))
+                            ai0 = max(
+                                0.0,
+                                float(y_arr[nearest]) * max(1.0, float(avg_sigma[i])),
+                            )
                             params[f"p{i}_amplitude"].set(value=ai0)
                     except Exception:
                         pass
@@ -4755,7 +5245,10 @@ def time_series_fit(FTIR_DataFrame):
                 pass
 
     # Optional: report summary to console for user awareness
-    print(f"Time-series fitting complete: {fits_done} spectra fitted. Skipped groups: {len(groups_skipped)}.")
+    print(
+        f"Time-series fitting complete: {fits_done} spectra fitted. "
+        f"Skipped groups: {len(groups_skipped)}."
+    )
     if groups_skipped:
         # Show a compact list of skipped reasons
         uniq = {}
@@ -4764,10 +5257,9 @@ def time_series_fit(FTIR_DataFrame):
             uniq[key] = True
         if len(uniq) <= 10:
             print("Skipped details:")
-            for (m, c, r) in uniq.keys():
+            for m, c, r in uniq.keys():
                 print(f"- Material={m}, Condition={c}: {r}")
         else:
             print("(Many groups skipped; suppressing detailed list.)")
 
     return FTIR_DataFrame
-
