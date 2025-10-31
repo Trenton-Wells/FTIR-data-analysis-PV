@@ -5,6 +5,7 @@
 # Personal Contact: trentonwells73@gmail.com
 import pandas as pd
 import os
+import re
 import matplotlib.pyplot as plt
 import numpy as np
 from pybaselines.whittaker import arpls
@@ -24,7 +25,748 @@ import threading
 from lmfit.models import PseudoVoigtModel
 import time
 import html
+import json
 
+def batch_rename_files(
+    directory=None,
+    replace_spaces=None,
+    iso_date_rename=None,
+    file_rename=None,
+    character_to_use=None,
+    pairs_input=None,
+):
+    """
+    Change file & folder names in a directory by replacing spaces, dates, and words.
+    
+    Scans a directory and its subdirectories to rename files by replacing spaces and/or 
+    specified words in filenames. Folder names will not be changed for space/word 
+    replacement. If ISO date renaming is enabled, dates in both filenames and folder 
+    names will be updated. Recommended to use this tool if file names have inconsistent 
+    naming conventions that may cause issues.
+
+    Parameters:
+    -----------
+        directory (str): Directory to scan. If None, prompts user for input.
+
+    Returns:
+    -----------
+        Renamed files in place; prints changes to console.
+    """
+    def _date_change_ISO(directory):
+        """
+        Rename dates in filenames and folder names in the given directory to ISO format.
+
+        ISO format is YYYY-MM-DD. This is an international standard date format and has 
+        the added benefit of sorting chronologically when sorted alphabetically.
+
+        Parameters:
+        -----------
+        directory (str): Directory to scan. Must be a valid directory path.
+
+        Returns:
+        -----------
+        Renamed files and folders in place; prints changes to console.
+        """
+        date_patterns = [
+            # MM-DD-YYYY or M-D-YYYY
+            r"(\b\d{1,2}-\d{1,2}-\d{4}\b)",
+            # YYYY-MM-DD
+            r"(\b\d{4}-\d{1,2}-\d{1,2}\b)",
+            # MMDDYYYY
+            r"(\b\d{2}\d{2}\d{4}\b)",
+            # YYYYMMDD
+            r"(\b\d{4}\d{2}\d{2}\b)",
+        ]
+
+        def _convert_to_iso(date_str):
+            # If already in ISO format (YYYY-MM-DD), return as is
+            if re.match(r"^\d{4}-\d{2}-\d{2}$", date_str):
+                return date_str
+            # MM-DD-YYYY or M-D-YYYY
+            match = re.match(r"^(\d{1,2})-(\d{1,2})-(\d{4})$", date_str)
+            if match:
+                m, d, y = match.groups()
+                return f"{y}-{int(m):02d}-{int(d):02d}"
+            # MMDDYYYY
+            match = re.match(r"^(\d{2})(\d{2})(\d{4})$", date_str)
+            if match:
+                m, d, y = match.groups()
+                return f"{y}-{m}-{d}"
+            # YYYYMMDD
+            match = re.match(r"^(\d{4})(\d{2})(\d{2})$", date_str)
+            if match:
+                y, m, d = match.groups()
+                return f"{y}-{m}-{d}"
+            return date_str
+
+        print("Renaming dates in filenames to ISO format...")
+        for root, dirs, files in os.walk(directory):
+            # Rename folders in current directory
+            for current_dir in dirs:
+                new_dirname = current_dir
+                for pattern in date_patterns:
+                    for date_match in re.findall(pattern, current_dir):
+                        iso_date = _convert_to_iso(date_match)
+                        if iso_date != date_match:
+                            message = (
+                                f"In folder '{current_dir}': changing date"
+                                f" '{date_match}' to '{iso_date}'"
+                            )
+                            print(message)
+                            new_dirname = new_dirname.replace(date_match, iso_date)
+                if new_dirname != current_dir:
+                    old_dirpath = os.path.join(root, current_dir)
+                    new_dirpath = os.path.join(root, new_dirname)
+                    print(f"Renaming folder: {old_dirpath} to {new_dirpath}")
+                    os.rename(old_dirpath, new_dirpath)
+
+            # Rename files in current directory
+            for current_filename in files:
+                new_filename = current_filename
+                for pattern in date_patterns:
+                    for date_match in re.findall(pattern, current_filename):
+                        iso_date = _convert_to_iso(date_match)
+                        if iso_date != date_match:
+                            message = (
+                                f"In file '{current_filename}': changing date"
+                                f" '{date_match}' to '{iso_date}'"
+                            )
+                            print(message)
+                            new_filename = new_filename.replace(date_match, iso_date)
+                if new_filename != current_filename:
+                    old_filepath = os.path.join(root, current_filename)
+                    new_filepath = os.path.join(root, new_filename)
+                    print(f"Renaming: {old_filepath} to {new_filepath}")
+                    os.rename(old_filepath, new_filepath)
+        print("Date renaming to ISO format complete.")
+    # If no directory is provided, prompt the user for input
+    if directory is None:
+        directory = input("Enter the directory to scan: ").strip()
+    if not os.path.isdir(directory):
+        raise FileNotFoundError(f"Directory not found: {directory}")
+    print(f"Scanning directory: {directory}")
+
+    # Option to replace spaces in filenames with different separator character
+    if replace_spaces is None:
+        replace_spaces_input = (
+            input("Do you want to replace spaces in filenames? (y/n): ").strip().lower()
+        )
+        if replace_spaces_input == "y":
+            replace_spaces = True
+    if replace_spaces:
+        if character_to_use is None:
+            character_to_use = input(
+                "Enter the separator to use instead of spaces (e.g. _): "
+            ).strip()
+        print("Replacing spaces now...")
+        for root, dirs, files in os.walk(directory):
+            for current_filename in files:
+                if " " in current_filename:
+                    old_filepath = os.path.join(root, current_filename)
+                    new_filename = current_filename.replace(" ", character_to_use)
+                    new_filepath = os.path.join(root, new_filename)
+                    print(f"Renaming: {old_filepath} to {new_filepath}")
+                    os.rename(old_filepath, new_filepath)
+        print("Space replacement complete.")
+    else:
+        print("No spaces will be replaced in filenames.")
+
+    # Option to batch rename dates to ISO format (YYYY-MM-DD)
+    if iso_date_rename is None:
+        message = (f"Do you want to convert all dates in filenames to ISO format"
+                   f" (YYYY-MM-DD)? (y/n): ")
+        iso_date_input = (
+            input(message)
+            .strip()
+            .lower()
+        )
+        if iso_date_input == "y":
+            iso_date_rename = True
+    if iso_date_rename:
+        _date_change_ISO(directory)
+    else:
+        print("No dates will be changed in filenames.")
+
+    if file_rename:
+        if pairs_input is None:
+            message = (f"Enter words to find and their replacements as comma-separated"
+                       f" pairs (e.g. old1:new1,old2:new2): ")
+            pairs_input = input(message).strip()
+        word_pairs = [pair.split(":") for pair in pairs_input.split(",") if ":" in pair]
+        print("Renaming files by replacing specified words...")
+        for root, dirs, files in os.walk(directory):
+            for current_filename in files:
+                new_filename = current_filename
+                for word_to_find, word_to_replace in word_pairs:
+                    new_filename = new_filename.replace(word_to_find, word_to_replace)
+                if new_filename != current_filename:
+                    old_filepath = os.path.join(root, current_filename)
+                    new_filepath = os.path.join(root, new_filename)
+                    print(f"Renaming: {old_filepath} to {new_filepath}")
+                    os.rename(old_filepath, new_filepath)
+        print("Batch word replacement complete.")
+    else:
+        print("No words will be replaced in filenames.")
+
+def file_info_extractor(
+    FTIR_DataFrame,
+    file_types=None,
+    separators=None,
+    material_terms=None,
+    conditions_terms=None,
+    directory=None,
+    append_missing=None,
+    access_subdirectories=True,
+    track_replicates=False,
+):
+    """
+    Use file info to create or update a structured DataFrame of scan details.
+
+    Main function to gather file information and update the provided FTIR_DataFrame in
+    memory.
+
+    Parameters:
+    -----------
+    FTIR_DataFrame : pd.DataFrame
+        The existing DataFrame to append new data to (will be updated in memory).
+    file_types : str or None
+        Comma-separated string of file extensions to consider (e.g. '.csv,.0,.dpt'). If
+        None, prompts user for input.
+    separators : str or None
+        Comma-separated string of separator characters used in filenames and folder
+        names (e.g. '_ , space , -'). If None, prompts user for input.
+    material_terms : str or None
+        Comma-separated string of material terms to search for in filenames and folder
+        names. If None, prompts user for input.
+    conditions_terms : str or None
+        Comma-separated string of condition terms to search for in filenames and folder
+        names. If None, prompts user for input.
+    directory : str or None
+        The root directory to scan. If None, prompts user for input.
+    append_missing : bool or None
+        Whether to append rows with missing values. If None, prompts user for input.
+    access_subdirectories : bool or None
+        If False, only descend into immediate subfolders of 'directory' whose names
+        contain a date label (MM-DD-YYYY or YYYY-MM-DD). If None, prompts user for
+        input. Default is True.
+    track_replicates : bool or None
+        Whether to print groups of replicate files. If None, prompts user for input.
+
+    Returns:
+    --------
+    FTIR_DataFrame : pd.DataFrame
+        The updated DataFrame with new file info appended.
+    """
+    # --- Helper functions (scoped to file_info_extractor) --- #
+    def _find_term(term, text):
+        """
+        Find whole word matches of a term in text, case-insensitive.
+
+        Adds spaces around text to catch terms at the start/end, since term-finding uses
+        spaces on either side to detect whole words.
+        """
+        return (
+            re.search(rf"(?<!\S){re.escape(term)}(?!\S)", f" {text} ", re.IGNORECASE)
+            is not None
+        )
+
+    def _gather_file_info(
+        FTIR_DataFrame,
+        file_types,
+        separators,
+        material_terms,
+        conditions_terms,
+        directory,
+        append_missing,
+        access_subdirectories=True,
+        track_replicates=False,
+    ):
+        """
+        Gather file information from a specified root directory and its subdirectories.
+
+        Helps file_info_extractor() create a structured DataFrame by extracting details
+        from filenames and parent folder names.
+        If "ignore" is in the filename, the file will be skipped.
+        """
+        # Info is first derived from parent folder names, then filenames if not found
+
+        data = []
+        grouped_files = {}
+        print("Scanning directory for spectral files...")
+        # Build set of processed files
+        # This prevents re-processing files that are already in the DataFrame
+        processed_files = set()
+        for _, row in FTIR_DataFrame.iterrows():
+            processed_files.add((row["File Location"], row["File Name"]))
+        # Pre-count candidate files for progress tracking
+        total_candidates = 0
+        for _file_path, _dirnames, _filenames in os.walk(directory):
+            if not access_subdirectories:
+                if os.path.normpath(_file_path) == os.path.normpath(directory):
+                    date_regex = re.compile(
+                        r"(\d{2}-\d{2}-\d{4}|\d{4}-\d{2}-\d{2})"
+                    )
+                    _dirnames[:] = [d for d in _dirnames if date_regex.search(d)]
+            for _filename in _filenames:
+                # Apply the same core file filters as the main loop
+                if (_file_path, _filename) in processed_files:
+                    continue
+                if _filename.startswith("."):
+                    continue
+                if "ignore" in _filename.lower():
+                    continue
+                if not any(
+                    _filename.lower().endswith(file_type.lower())
+                    for file_type in file_types
+                ):
+                    continue
+                total_candidates += 1
+        print(f"Found {total_candidates} spectral files to parse…")
+
+        parsed_count = 0
+
+        for file_path, dirnames, filenames in os.walk(directory):
+            # Optionally restrict traversal to only date-labeled immediate subfolders
+            if not access_subdirectories:
+                # Only filter when we are at the root directory level
+                if os.path.normpath(file_path) == os.path.normpath(directory):
+                    date_regex = re.compile(
+                        r"(\d{2}-\d{2}-\d{4}|\d{4}-\d{2}-\d{2})"
+                    )
+                    dirnames[:] = [d for d in dirnames if date_regex.search(d)]
+            parent_folder = os.path.basename(file_path)
+            for filename in filenames:
+                # Skip files already in DataFrame
+                if (file_path, filename) in processed_files:
+                    continue
+                first_column_list = []
+                second_column_list = []
+                # Skip hidden files, system files, and files with 'ignore' in the name
+                if filename.startswith("."):
+                    continue
+                if "ignore" in filename.lower():
+                    continue
+                # Skip files that do not match the specified file types
+                if not any(
+                    filename.lower().endswith(file_type.lower())
+                    for file_type in file_types
+                ):
+                    continue
+                # Update progress for each candidate file encountered
+                parsed_count += 1
+                # Print a single-line progress indicator
+                try:
+                    pct = (
+                        parsed_count / total_candidates * 100
+                    ) if total_candidates else 0
+                    print(
+                        f"\rParsed {parsed_count}/{total_candidates} files ({pct:.1f}%)",
+                        end="",
+                        flush=True,
+                    )
+                except Exception:
+                    pass
+                # Read first and second columns from the file, save as list of floats
+                full_file_path = os.path.join(file_path, filename)
+                try:
+                    with open(full_file_path, "r") as data_file:
+                        for line in data_file:
+                            parts = line.strip().split()
+                            if len(parts) >= 2:
+                                try:
+                                    first_column_list.append(float(parts[0]))
+                                    second_column_list.append(float(parts[1]))
+                                except ValueError:
+                                    continue
+                except Exception:
+                    pass
+
+                # Normalize filename and parent folder by removing file extension and
+                # replacing separators with spaces
+                # Makes for easier term-finding
+                filename_no_ext = filename
+                for file_type in file_types:
+                    if filename_no_ext.lower().endswith(file_type.lower()):
+                        filename_no_ext = filename_no_ext[: -(len(file_type))]
+                normalized_filename = filename_no_ext
+                normalized_parent_folder = parent_folder
+                for sep in separators:
+                    normalized_parent_folder = normalized_parent_folder.replace(
+                        sep, " "
+                    )
+                    normalized_filename = normalized_filename.replace(sep, " ")
+                # Extract date from parent folder or filename
+                # All date formats accepted, as long as they have 2 digits for month and
+                # day, and 4 digits for year, separated by hyphens
+                date_match = re.search(
+                    r"(\d{2}-\d{2}-\d{4}|\d{4}-\d{2}-\d{2})", parent_folder
+                )
+                date = date_match.group(0) if date_match else None
+                if not date:
+                    date_match_filename = re.search(
+                        r"(\d{2}-\d{2}-\d{4}|\d{4}-\d{2}-\d{2})", filename
+                    )
+                    date = (
+                        date_match_filename.group(0) if date_match_filename else None
+                    )
+                conditions = next(
+                    (
+                        term
+                        for term in conditions_terms
+                        if _find_term(term, normalized_parent_folder)
+                    ),
+                    None,
+                )
+                # Extract conditions from parent folder or filename
+                if not conditions:
+                    conditions = next(
+                        (
+                            term
+                            for term in conditions_terms
+                            if _find_term(term, normalized_filename)
+                        ),
+                        None,
+                    )
+                material = next(
+                    (
+                        term
+                        for term in material_terms
+                        if _find_term(term, normalized_parent_folder)
+                    ),
+                    None,
+                )
+                # Extract material from parent folder or filename
+                if not material:
+                    material = next(
+                        (
+                            term
+                            for term in material_terms
+                            if _find_term(term, normalized_filename)
+                        ),
+                        None,
+                    )
+                time_match = re.search(
+                    r"(\d+)(?:H|hr)", parent_folder, re.IGNORECASE
+                )
+                # Extract time(duration) from parent folder or filename
+                if time_match:
+                    time = int(time_match.group(1))
+                else:
+                    time_match = re.search(
+                        r"(\d+)(?:H|hr)", filename, re.IGNORECASE
+                    )
+                    time = int(time_match.group(1)) if time_match else None
+                # If condition is 'unexposed', set time to 0
+                if conditions is not None and conditions.lower() == "unexposed":
+                    time = 0
+                missing_any = (
+                    date is None
+                    or conditions is None
+                    or material is None
+                    or time is None
+                )
+                # Print a warning if any value is missing
+                if missing_any:
+                    message = (
+                        f"ValueError: Missing value for file '{filename}'. Results: "
+                        f"date={date}, conditions={conditions}, material={material}, "
+                        f"time={time}"
+                    )
+                    print(message)
+
+                data_row = {
+                    "File Location": file_path,
+                    "File Name": filename,
+                    "Date": date,
+                    "Conditions": conditions,
+                    "Material": material,
+                    "Time": time,
+                    "X-Axis": first_column_list,
+                    "Raw Data": second_column_list,
+                }
+                if append_missing:
+                    data.append(data_row)
+                else:
+                    if not missing_any:
+                        data.append(data_row)
+
+        # Group files by (material, conditions, time) after all files are processed
+
+        # Optionally print replicate groups to the console
+        if track_replicates is None:
+            track_replicates = (
+                input("Do you want to print groups of replicate files? (y/n): ")
+                .strip()
+                .lower()
+            )
+            track_replicates = True if track_replicates == "y" else False
+        if track_replicates:
+            replicate_groups = {}
+            for row in data:
+                mat = row.get("Material", None)
+                cond = row.get("Conditions", None)
+                t = row.get("Time", None)
+                group_key = (mat, cond, t)
+                # Store both file name and parent folder
+                replicate_groups.setdefault(group_key, []).append(
+                    (row["File Name"], os.path.basename(row["File Location"]))
+                )
+            print("Replicate groups (groups with more than one file):")
+            for group_key, file_list in replicate_groups.items():
+                if len(file_list) > 1:
+                    # Format: [(file, parent_folder), ...]
+                    formatted = [
+                        f"{fname} (parent folder: {pfolder})"
+                        for fname, pfolder in file_list
+                    ]
+                    print(f"Replicate group {group_key}: {formatted}")
+
+        # Finish progress line with newline for clean output
+        try:
+            print("\nBasic file information extraction complete.")
+        except Exception:
+            pass
+
+        return data, grouped_files
+    # Ensure required columns exist
+    required_columns = [
+        "File Location",
+        "File Name",
+        "Date",
+        "Conditions",
+        "Material",
+        "Time",
+        "X-Axis",
+        "Raw Data",
+        "Baseline Function",
+        "Baseline Parameters",
+        "Baseline",
+        "Baseline-Corrected Data",
+        "Normalization Peak Wavenumber",
+        "Normalized and Corrected Data",
+        "Peak Wavenumbers",
+        "Peak Absorbances",
+        "Deconvolution Results",
+        "Time-Series Fit Results",
+    ]
+    for column in required_columns:
+        if column not in FTIR_DataFrame.columns:
+            FTIR_DataFrame[column] = None
+
+    # Cast columns to correct dtype
+    # String columns
+    string_cols = [
+        "File Location",
+        "File Name",
+        "Date",
+        "Conditions",
+        "Material",
+        "Baseline Function",
+        "Baseline Parameters",
+    ]
+    for col in string_cols:
+        if col in FTIR_DataFrame.columns:
+            FTIR_DataFrame[col] = FTIR_DataFrame[col].astype("string")
+
+    # Integer columns
+    if "Time" in FTIR_DataFrame.columns:
+        FTIR_DataFrame["Time"] = pd.to_numeric(
+            FTIR_DataFrame["Time"], errors="coerce"
+        ).astype("Int64")
+
+    # Dictionary columns
+    if "Baseline Parameters" in FTIR_DataFrame.columns:
+
+        def _to_dict(val):
+            if isinstance(val, dict) or pd.isnull(val):
+                return val
+            if isinstance(val, str):
+                try:
+                    parsed = ast.literal_eval(val)
+                    if isinstance(parsed, dict):
+                        return parsed
+                except Exception:
+                    pass
+            return val
+
+        FTIR_DataFrame["Baseline Parameters"] = FTIR_DataFrame[
+            "Baseline Parameters"
+        ].apply(_to_dict)
+    if "Deconvolution Results" in FTIR_DataFrame.columns:
+
+        def _to_dict(val):
+            if isinstance(val, dict) or pd.isnull(val):
+                return val
+            if isinstance(val, str):
+                try:
+                    parsed = ast.literal_eval(val)
+                    if isinstance(parsed, dict):
+                        return parsed
+                except Exception:
+                    pass
+            return val
+
+        FTIR_DataFrame["Deconvolution Results"] = FTIR_DataFrame[
+            "Deconvolution Results"
+        ].apply(_to_dict)
+    if "Time-Series Fit Results" in FTIR_DataFrame.columns:
+
+        def _to_dict(val):
+            if isinstance(val, dict) or pd.isnull(val):
+                return val
+            if isinstance(val, str):
+                try:
+                    parsed = ast.literal_eval(val)
+                    if isinstance(parsed, dict):
+                        return parsed
+                except Exception:
+                    pass
+            return val
+
+        FTIR_DataFrame["Time-Series Fit Results"] = FTIR_DataFrame[
+            "Time-Series Fit Results"
+        ].apply(_to_dict)
+    # Float columns
+    if "Normalization Peak Wavenumber" in FTIR_DataFrame.columns:
+        FTIR_DataFrame["Normalization Peak Wavenumber"] = pd.to_numeric(
+            FTIR_DataFrame["Normalization Peak Wavenumber"], errors="coerce"
+        ).astype("float")
+
+    # Columns that are lists of floats (leave as object, but ensure lists of floats)
+    list_float_cols = [
+        "X-Axis",
+        "Raw Data",
+        "Baseline",
+        "Baseline-Corrected Data",
+        "Normalized and Corrected Data",
+        "Peak Wavenumbers",
+        "Peak Absorbances",
+    ]
+    for col in list_float_cols:
+        if col in FTIR_DataFrame.columns:
+
+            def to_float_list(val):
+                if isinstance(val, list):
+                    return [float(x) for x in val]
+                elif pd.isnull(val):
+                    return val
+                try:
+                    import ast
+
+                    parsed = ast.literal_eval(val)
+                    if isinstance(parsed, list):
+                        return [float(x) for x in parsed]
+                except Exception:
+                    pass
+
+                return val
+
+            FTIR_DataFrame[col] = FTIR_DataFrame[col].apply(to_float_list)
+
+    # Ensure list-like columns are stored with object dtype (per-row lists)
+    try:
+        existing_list_cols = [c for c in list_float_cols if c in FTIR_DataFrame.columns]
+        if existing_list_cols:
+            FTIR_DataFrame[existing_list_cols] = FTIR_DataFrame[
+                existing_list_cols
+            ].astype(object)
+    except Exception:
+        # Fallback: coerce individually if bulk coercion fails
+        for c in list_float_cols:
+            if c in FTIR_DataFrame.columns:
+                try:
+                    FTIR_DataFrame[c] = FTIR_DataFrame[c].astype(object)
+                except Exception:
+                    pass
+
+    # Option for if DataFrame should append rows with missing values or not
+    if append_missing is None:
+        message = (
+            f"Do you want to append rows with missing values into the DataFrame?"
+            f" (y/n): "
+        )
+        append_missing = input(message).strip().lower()
+        append_missing = True if append_missing == "y" else False
+
+    # Option for whether to access non-date-labeled subdirectories
+    if access_subdirectories is None:
+        message = (
+            f"Limit scan to only subfolders with date labels"
+            f"(MM-DD-YYYY or YYYY-MM-DD)? (y/n): "
+        )
+        resp = input(message).strip().lower()
+        access_subdirectories = False if resp == "y" else True
+
+    # Get file types
+    if file_types is None:
+        file_types = input(
+            "Enter file types to scan, separated by commas (e.g. .csv,.0,.dpt): "
+        ).strip()
+    file_types = [ft.strip() for ft in file_types.split(",") if ft.strip()]
+
+    # Get separators
+    if separators is None:
+        separators = input(
+            "Enter separator(s) used in filenames and folder names (e.g. _ or space): "
+        ).strip()
+    if separators.lower() == "space":
+        separators = [" "]
+    separators = [sep.strip() for sep in separators.split(",") if sep.strip()]
+
+    # Get material terms
+    if material_terms is None:
+        material_terms = (
+            input(
+                "Enter material terms to find, separated by commas (e.g. CPC,PPE,PO): "
+            )
+            .strip()
+            .lower()
+        )
+    material_terms = [
+        term.strip() for term in material_terms.split(",") if term.strip()
+    ]
+
+    # Get condition terms
+    if conditions_terms is None:
+        conditions_terms = (
+            input(
+                "Enter condition terms to find, separated by commas (e.g. A3,A4,A5): "
+            )
+            .strip()
+            .lower()
+        )
+    conditions_terms = [
+        term.strip() for term in conditions_terms.split(",") if term.strip()
+    ]
+
+    if directory is None:
+        directory = input("Enter the path to the folder to be scanned: ").strip()
+        if not os.path.isdir(directory):
+            raise FileNotFoundError(f"Directory not found: {directory}")
+
+    # Gather new file info
+    data, grouped_files = _gather_file_info(
+        FTIR_DataFrame=FTIR_DataFrame,
+        file_types=file_types,
+        separators=separators,
+        material_terms=material_terms,
+        conditions_terms=conditions_terms,
+        directory=directory,
+        append_missing=append_missing,
+        access_subdirectories=access_subdirectories,
+        track_replicates=track_replicates,
+    )
+
+    # Append new data to FTIR_DataFrame
+    if data:
+        new_data = pd.DataFrame(data)
+        FTIR_DataFrame = pd.concat([FTIR_DataFrame, new_data], ignore_index=True)
+        FTIR_DataFrame.drop_duplicates(
+            subset=["File Location", "File Name"], inplace=True
+        )
+        FTIR_DataFrame.reset_index(drop=True, inplace=True)
+
+    return FTIR_DataFrame
 
 # ---- Validation helpers for clearer, user-friendly errors ---- #
 def _require_columns(df, columns, context="DataFrame"):
@@ -1321,6 +2063,216 @@ def try_baseline(
 
         close_btn.on_click(_close_simple)
         display(close_btn)
+
+
+def JSON_population(
+    FTIR_DataFrame,
+    materials_json_path=None,
+):
+    """
+    Populate materials.json with materials, conditions, and time values from FTIR_DataFrame.
+
+    Parameters
+    ------
+    FTIR_DataFrame : pd.DataFrame
+        In-memory FTIR dataset containing at least the columns 'Material',
+        'Conditions', and 'Time'.
+    materials_json_path : str | None
+        Path to the materials.json file. Defaults to Trenton_Project/materials.json
+        alongside this module.
+
+    Behavior
+    --------
+    - Preserves existing M000 metadata block as-is.
+    - Adds or updates entries (M001, M002, ...) for each unique material in the
+      DataFrame, creating a minimal structure compatible with materials_backup.json:
+        {
+          "name": material,
+          "alias": material,
+          "peaks": {
+            "1": {
+              "name": "",
+              "center_wavenumber": 0,
+              "sg": 0,
+              "sl": 0,
+              "f": 0,
+              "conditions": {
+                 <condition>: {"time": [...], "A": []}, ...
+              }
+            }
+          }
+        }
+    """
+    # Validate required columns early for clearer errors
+    _require_columns(
+        FTIR_DataFrame,
+        ["Material", "Conditions", "Time"],
+        context="FTIR_DataFrame (JSON_population)",
+    )
+
+    # Resolve default path relative to this file
+    if materials_json_path is None:
+        base_dir = os.path.dirname(__file__)
+        materials_json_path = os.path.join(base_dir, "materials.json")
+
+    # Load existing JSON; expect a top-level list containing a single object
+    try:
+        with open(materials_json_path, "r", encoding="utf-8") as f:
+            content = json.load(f)
+    except FileNotFoundError:
+        # Initialize with an empty shell if missing (will add M000 if present later)
+        content = [{}]
+    if not isinstance(content, list) or not content:
+        # Normalize to expected shape
+        content = [content if isinstance(content, dict) else {}]
+    top = content[0]
+
+    # Build reverse index from existing entries by alias/name to code keys (Mxxx)
+    def _material_key_lookup(material_str):
+        for code_key, payload in top.items():
+            if not isinstance(payload, dict):
+                continue
+            alias = payload.get("alias")
+            name = payload.get("name")
+            if alias == material_str or name == material_str:
+                return code_key
+        return None
+
+    # Compute next available M### index
+    def _next_material_code():
+        nums = []
+        for k in top.keys():
+            if isinstance(k, str) and len(k) == 4 and k.startswith("M") and k[1:].isdigit():
+                nums.append(int(k[1:]))
+        nxt = max(nums) + 1 if nums else 0
+        return f"M{nxt:03d}"
+
+    # Extract materials, conditions, times from DataFrame
+    # Normalize data: coerce to strings/ints where appropriate, drop missing
+    df = FTIR_DataFrame.copy()
+    # Drop rows without Material or Conditions
+    df = df[~df["Material"].isna() & ~df["Conditions"].isna()]
+
+    # Ensure Time is numeric (nullable ints), ignore NaN times for the time list
+    try:
+        df["Time"] = pd.to_numeric(df["Time"], errors="coerce")
+    except Exception:
+        pass
+
+    # Iterate materials
+    for material in sorted(df["Material"].dropna().astype(str).unique()):
+        mat_df = df[df["Material"].astype(str) == material]
+
+        # Build condition -> sorted unique times mapping
+        cond_map = {}
+        for condition, cdf in mat_df.groupby("Conditions"):
+            if pd.isna(condition):
+                continue
+            cond_str = str(condition)
+            times = (
+                cdf["Time"].dropna().astype(float).astype(int).sort_values().unique().tolist()
+            )
+            # Always include conditions, even when no valid times were found (time: [])
+            cond_map[cond_str] = {"time": times, "A": []}
+
+        # If no conditions found for this material, skip writing this material
+        if not cond_map:
+            continue
+
+        # Find existing code or allocate a new one
+        code = _material_key_lookup(material)
+        if code is None:
+            code = _next_material_code()
+
+        # Prepare minimal peaks structure (one peak only: "1")
+        peaks = {
+            "1": {
+                "name": "",
+                "center_wavenumber": 0,
+                "sg": 0,
+                "sl": 0,
+                "f": 0,
+                "conditions": cond_map,
+            }
+        }
+
+        payload = top.get(code, {}) if isinstance(top.get(code, {}), dict) else {}
+        # Do not overwrite existing name/alias; only set if missing. If different values
+        # are already present, report that overwrite was blocked.
+        if "name" not in payload:
+            payload["name"] = material
+        else:
+            if str(payload.get("name")) != str(material):
+                print(
+                    f"[JSON_population] Overwrite blocked for {code}.name: keeping existing '{payload.get('name')}', observed '{material}'."
+                )
+        if "alias" not in payload:
+            payload["alias"] = material
+        else:
+            if str(payload.get("alias")) != str(material):
+                print(
+                    f"[JSON_population] Overwrite blocked for {code}.alias: keeping existing '{payload.get('alias')}', observed '{material}'."
+                )
+
+        # Merge peaks non-destructively; keep existing peaks and fields
+        existing_peaks = payload.get("peaks", {})
+        if not isinstance(existing_peaks, dict):
+            existing_peaks = {}
+
+        # Ensure peak "1" exists; if it does, don't overwrite numeric fields
+        peak1 = existing_peaks.get("1", {})
+        if not isinstance(peak1, dict):
+            peak1 = {}
+        # Set defaults only if missing
+        peak1.setdefault("name", "")
+        peak1.setdefault("center_wavenumber", 0)
+        peak1.setdefault("sg", 0)
+        peak1.setdefault("sl", 0)
+        peak1.setdefault("f", 0)
+
+        # Merge conditions: union times; keep existing A arrays intact. If an existing
+        # condition is found, we do not overwrite its values—report actions taken.
+        existing_conditions = peak1.get("conditions", {})
+        if not isinstance(existing_conditions, dict):
+            existing_conditions = {}
+        for cond_str, new_payload in cond_map.items():
+            if cond_str in existing_conditions and isinstance(existing_conditions[cond_str], dict):
+                # Merge times
+                old_times = existing_conditions[cond_str].get("time", [])
+                try:
+                    old_times_list = list(old_times) if isinstance(old_times, (list, tuple)) else []
+                except Exception:
+                    old_times_list = []
+                new_times_list = list(new_payload.get("time", []))
+                merged = sorted({int(t) for t in old_times_list if pd.notna(t)} | {int(t) for t in new_times_list})
+                # Preserve existing A array (or default [])
+                A_list = existing_conditions[cond_str].get("A", [])
+                if not isinstance(A_list, list):
+                    A_list = []
+                # Logging: explicitly note non-overwrite behavior
+                if old_times_list or A_list:
+                    print(
+                        "[JSON_population] Existing entry preserved for "
+                        f"{code}.peaks['1'].conditions['{cond_str}'] — "
+                        f"merged times (old {len(old_times_list)} + new {len(new_times_list)} -> {len(merged)}); "
+                        f"kept existing A (len {len(A_list)})."
+                    )
+                existing_conditions[cond_str] = {"time": merged, "A": A_list}
+            else:
+                # New condition: add as-is with empty A list (already provided)
+                times_copy = list(new_payload.get("time", []))
+                existing_conditions[cond_str] = {"time": times_copy, "A": []}
+
+        peak1["conditions"] = existing_conditions
+        existing_peaks["1"] = peak1
+        payload["peaks"] = existing_peaks
+        top[code] = payload
+
+    # Write back to file with pretty formatting
+    with open(materials_json_path, "w", encoding="utf-8") as f:
+        json.dump(content, f, indent=4, ensure_ascii=False)
+
+    print(f"materials.json updated at: {materials_json_path}")
 
 
 def test_baseline_choices(FTIR_DataFrame, material=None):
@@ -2980,6 +3932,7 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
     close_btn = widgets.Button(description="Close", button_style="danger")
     # Dedicated status label to avoid Output-widget buffering issues
     status_html = widgets.HTML(value="")
+    optimize_status_html = widgets.HTML(value="")
     # Replace Output-based logging with a single HTML widget to avoid renderer
     # double-echo issues in some notebook front-ends.
     log_html = widgets.HTML(value="")
@@ -5289,6 +6242,314 @@ def time_series_fitting(FTIR_DataFrame):
                 pass
         print(f"Time-series fit complete for selection (Material={material}, Condition={condition}). Fitted {fits_done} spectra.")
 
+    def _optimize_centers_for_selection(material, condition):
+        """Iteratively optimize shared centers and per-spectrum amplitudes to reduce SSE.
+
+        Approach:
+        - Coordinate descent on shared centers. For each peak, try +/- step shifts.
+        - For every center trial, re-fit amplitudes per spectrum with centers/σ/α fixed
+          against the 'Normalized and Corrected Data' to get the best amplitudes.
+        - Accept moves that lower the total SSE; shrink step when no progress; stop
+          after a few passes or when below tolerance.
+
+        Returns a status message and the optimized centers list (or None on failure).
+        """
+        # Build series subset (Material matches; Conditions match or are 'unexposed')
+        series_mask = (FTIR_DataFrame["Material"].astype(str) == str(material)) & (
+            (FTIR_DataFrame[cond_col].astype(str) == str(condition))
+            | FTIR_DataFrame[cond_col].apply(_is_unexposed)
+        )
+        series_df = FTIR_DataFrame[series_mask].copy()
+        if series_df.empty:
+            return "No spectra found for the selected Material/Conditions.", None
+
+        # Seed shared parameters from deconvolution results
+        peak_lists = []
+        for _idx, _row in series_df.iterrows():
+            pk = _parse_deconv(_row.get("Deconvolution Results"))
+            if pk:
+                peak_lists.append(pk)
+        k = _mode_peak_count(peak_lists)
+        if k <= 0:
+            return "Selected series has no usable deconvolution results.", None
+
+        centers, sigmas, fracs = [], [], []
+        for pk in peak_lists:
+            if len(pk) != k:
+                continue
+            try:
+                centers.append([float(p.get("center", np.nan)) for p in pk])
+                sigmas.append([float(p.get("sigma", np.nan)) for p in pk])
+                fracs.append([float(p.get("fraction", np.nan)) for p in pk])
+            except Exception:
+                continue
+        if not centers:
+            return "Selected series has inconsistent peak counts; cannot average.", None
+        centers = np.asarray(centers, dtype=float)
+        sigmas = np.asarray(sigmas, dtype=float)
+        fracs = np.asarray(fracs, dtype=float)
+        with np.errstate(all="ignore"):
+            cen = np.nanmean(centers, axis=0)
+            sig = np.nanmean(sigmas, axis=0)
+            frc = np.nanmean(fracs, axis=0)
+        for i in range(k):
+            if not np.isfinite(cen[i]):
+                vals = centers[:, i]
+                cen[i] = np.nanmedian(vals) if np.isfinite(np.nanmedian(vals)) else 0.0
+            if not np.isfinite(sig[i]):
+                vals = sigmas[:, i]
+                sig[i] = np.nanmedian(vals) if np.isfinite(np.nanmedian(vals)) else 10.0
+            if not np.isfinite(frc[i]):
+                vals = fracs[:, i]
+                frc[i] = np.nanmedian(vals) if np.isfinite(np.nanmedian(vals)) else 0.5
+
+        # Determine global x-bounds across the series
+        try:
+            x_min = float("inf")
+            x_max = float("-inf")
+            for _idx, _row in series_df.iterrows():
+                x_arr, y_arr = _parse_xy(_row)
+                if x_arr is None or y_arr is None or x_arr.size == 0:
+                    continue
+                x_min = min(x_min, float(np.nanmin(x_arr)))
+                x_max = max(x_max, float(np.nanmax(x_arr)))
+            if not np.isfinite(x_min) or not np.isfinite(x_max):
+                x_min, x_max = 0.0, 1.0
+        except Exception:
+            x_min, x_max = 0.0, 1.0
+
+        def _build_model_fixed(cen_arr):
+            comp = None
+            params = None
+            for i in range(k):
+                m = PseudoVoigtModel(prefix=f"p{i}_")
+                p = m.make_params()
+                p[f"p{i}_center"].set(value=float(cen_arr[i]), vary=False)
+                p[f"p{i}_sigma"].set(value=float(sig[i]), min=1e-3, max=1e4, vary=False)
+                p[f"p{i}_fraction"].set(value=float(frc[i]), min=0.0, max=1.0, vary=False)
+                p[f"p{i}_amplitude"].set(min=0.0, value=1.0)
+                if comp is None:
+                    comp = m
+                    params = p
+                else:
+                    comp = comp + m
+                    params.update(p)
+            return comp, params
+
+        def _fit_and_sse(cen_arr, assign=False, capture=None):
+            comp, base = _build_model_fixed(cen_arr)
+            total = 0.0
+            cache = {}
+            for _idx, _row in series_df.iterrows():
+                # Always compute residuals against processed data
+                # Explicitly read from 'X-Axis' and 'Normalized and Corrected Data'
+                x_val = _row.get("X-Axis")
+                y_val = _row.get("Normalized and Corrected Data")
+                if isinstance(x_val, str):
+                    try:
+                        x_val = ast.literal_eval(x_val)
+                    except Exception:
+                        x_val = None
+                if isinstance(y_val, str):
+                    try:
+                        y_val = ast.literal_eval(y_val)
+                    except Exception:
+                        y_val = None
+                try:
+                    x_arr = np.asarray(x_val, dtype=float)
+                    y_arr = np.asarray(y_val, dtype=float)
+                    if x_arr.ndim != 1 or y_arr.ndim != 1 or x_arr.size != y_arr.size:
+                        continue
+                except Exception:
+                    continue
+                p = base.copy()
+                peaks_row = _parse_deconv(_row.get("Deconvolution Results"))
+                if isinstance(peaks_row, list) and len(peaks_row) == k:
+                    for i in range(k):
+                        try:
+                            ai = float(peaks_row[i].get("amplitude", p[f"p{i}_amplitude"].value))
+                            p[f"p{i}_amplitude"].set(value=max(0.0, ai))
+                        except Exception:
+                            pass
+                else:
+                    for i in range(k):
+                        try:
+                            ci = float(cen_arr[i])
+                            nearest = int(np.argmin(np.abs(x_arr - ci)))
+                            ai0 = max(0.0, float(y_arr[nearest]) * max(1.0, float(sig[i])))
+                            p[f"p{i}_amplitude"].set(value=ai0)
+                        except Exception:
+                            pass
+                try:
+                    res = comp.fit(y_arr, p, x=x_arr)
+                    y_fit = comp.eval(res.params, x=x_arr)
+                    err = y_arr - y_fit
+                    total += float(np.nansum(err * err))
+                    if assign:
+                        fit_list = []
+                        for j in range(k):
+                            try:
+                                amp = float(res.params.get(f"p{j}_amplitude").value)
+                            except Exception:
+                                amp = float("nan")
+                            fit_list.append({
+                                "amplitude": amp,
+                                "center": float(cen_arr[j]),
+                                "sigma": float(sig[j]),
+                                "fraction": float(frc[j]),
+                            })
+                        cache[_idx] = fit_list
+                except Exception:
+                    total += 1e12
+            if assign:
+                for _idx, fit_list in cache.items():
+                    try:
+                        FTIR_DataFrame.at[_idx, "Time-Series Fit Results"] = fit_list
+                    except Exception:
+                        pass
+                if capture is not None:
+                    try:
+                        capture.clear()
+                        capture.update(cache)
+                    except Exception:
+                        pass
+            return total
+
+        # Initial evaluation: fit amplitudes with seed centers and write results
+        cen_init = cen.copy()
+        cen_curr = cen.copy()
+        init_cache = {}
+        best_sse = _fit_and_sse(cen_curr, assign=True, capture=init_cache)
+        initial_sse = best_sse
+        # Track the centers corresponding to the current best SSE explicitly
+        best_centers = cen_curr.copy()
+
+        # Step size based on sigma scale
+        try:
+            sig_med = float(np.nanmedian(sig)) if np.isfinite(np.nanmedian(sig)) else 10.0
+        except Exception:
+            sig_med = 10.0
+        step = max(0.5, min(10.0, 0.2 * sig_med))
+        min_step = 0.05
+        max_passes = 10
+        tol = 1e-6
+
+        passes_done = 0
+        moves_attempted = 0
+        moves_accepted = 0
+        for _pass in range(max_passes):
+            improved = False
+            for i in range(k):
+                for direction in (-1.0, 1.0):
+                    cen_try = cen_curr.copy()
+                    cen_try[i] = float(np.clip(cen_try[i] + direction * step, x_min, x_max))
+                    sse_try = _fit_and_sse(cen_try, assign=False)
+                    moves_attempted += 1
+                    if sse_try + tol < best_sse:
+                        cen_curr = cen_try
+                        best_sse = sse_try
+                        best_centers = cen_try.copy()
+                        improved = True
+                        moves_accepted += 1
+                        break
+            if not improved:
+                step *= 0.5
+                if step < min_step:
+                    break
+            passes_done += 1
+
+        # Final amplitudes re-fit and saved using the optimized centers (best found)
+        final_cache = {}
+        # Ensure we evaluate and assign using the best centers discovered
+        cen_curr = best_centers.copy()
+        final_sse = _fit_and_sse(cen_curr, assign=True, capture=final_cache)
+        # Report delta: negative means decreased SSE
+        delta = final_sse - initial_sse
+        msg = (
+            f"Optimized centers and amplitudes over {series_df.shape[0]} spectra. SSE: {initial_sse:.6g} -> {final_sse:.6g}"
+            + (f" (Δ={delta:.6g})" if np.isfinite(delta) else "")
+        )
+        # Build detailed summary
+        try:
+            center_deltas = (cen_curr - cen_init).tolist()
+        except Exception:
+            center_deltas = None
+        # Compute mean amplitude per peak across spectra (before vs after)
+        def _mean_amps(cache_dict):
+            means = []
+            try:
+                for j in range(k):
+                    vals = []
+                    for _v in cache_dict.values():
+                        try:
+                            a = float(_v[j].get("amplitude", float("nan")))
+                            if np.isfinite(a):
+                                vals.append(a)
+                        except Exception:
+                            pass
+                    means.append(float(np.nanmean(vals)) if len(vals) else float("nan"))
+            except Exception:
+                pass
+            return means
+        amp_init_means = _mean_amps(init_cache)
+        amp_final_means = _mean_amps(final_cache)
+        try:
+            amp_delta_means = [
+                (amp_final_means[i] - amp_init_means[i]) if i < len(amp_init_means) and np.isfinite(amp_init_means[i]) and np.isfinite(amp_final_means[i]) else float("nan")
+                for i in range(max(len(amp_init_means), len(amp_final_means)))
+            ]
+        except Exception:
+            amp_delta_means = []
+        # Build per-spectrum amplitude deltas (final - initial) for each peak
+        amp_delta_by_spectrum = []
+        try:
+            # Sort spectra by numeric Time if available
+            df_order = series_df.copy()
+            try:
+                df_order["_sort_time"] = pd.to_numeric(df_order.get("Time", np.nan), errors="coerce")
+                df_order["_sort_time"] = df_order["_sort_time"].fillna(float("inf"))
+                df_order = df_order.sort_values(by=["_sort_time"], kind="mergesort")
+            except Exception:
+                pass
+            for _idx, _row in df_order.iterrows():
+                init_list = init_cache.get(_idx)
+                final_list = final_cache.get(_idx)
+                label = f"T={_row.get('Time')}"
+                deltas = []
+                if isinstance(init_list, list) and isinstance(final_list, list):
+                    for j in range(k):
+                        try:
+                            a0 = float(init_list[j].get("amplitude", float("nan")))
+                        except Exception:
+                            a0 = float("nan")
+                        try:
+                            a1 = float(final_list[j].get("amplitude", float("nan")))
+                        except Exception:
+                            a1 = float("nan")
+                        try:
+                            d = a1 - a0 if np.isfinite(a0) and np.isfinite(a1) else float("nan")
+                        except Exception:
+                            d = float("nan")
+                        deltas.append(d)
+                amp_delta_by_spectrum.append({"label": label, "deltas": deltas})
+        except Exception:
+            amp_delta_by_spectrum = []
+        summary = {
+            "initial_sse": float(initial_sse) if np.isfinite(initial_sse) else None,
+            "final_sse": float(final_sse) if np.isfinite(final_sse) else None,
+            "passes": int(passes_done),
+            "moves_attempted": int(moves_attempted),
+            "moves_accepted": int(moves_accepted),
+            "initial_centers": cen_init.tolist(),
+            "final_centers": cen_curr.tolist(),
+            "center_deltas": center_deltas,
+            "amp_initial_means": amp_init_means,
+            "amp_final_means": amp_final_means,
+            "amp_delta_means": amp_delta_means,
+            "amp_delta_by_spectrum": amp_delta_by_spectrum,
+        }
+        return msg, cen_curr.tolist(), summary
+
     # ---------------------------- UI helpers ----------------------------- #
     def _series_df(material_val, condition_val):
         df = FTIR_DataFrame.copy()
@@ -5449,8 +6710,18 @@ def time_series_fitting(FTIR_DataFrame):
         layout=widgets.Layout(width="180px"),
         tooltip="Run time-series deconvolution for the selected Material/Conditions",
     )
+    opt_btn = widgets.Button(
+        description="Optimize",
+        button_style="info",
+        layout=widgets.Layout(width="180px"),
+        tooltip=(
+            "Iteratively optimize shared peak centers and per-spectrum amplitudes to "
+            "minimize SSE against Normalized and Corrected Data"
+        ),
+    )
     close_btn = widgets.Button(description="Close", button_style="danger")
     status_html = widgets.HTML(value="")
+    optimize_status_html = widgets.HTML(value="")
     # Tables: Peak Areas (per-time amplitudes) and Peak Wavenumbers (shared centers)
     A_table_html = widgets.HTML(value="")
     WN_table_html = widgets.HTML(value="")
@@ -5728,6 +6999,169 @@ def time_series_fitting(FTIR_DataFrame):
             return
         _plot_series(with_fits=True)
 
+    def _on_optimize_click(_b=None):
+        try:
+            status_html.value = "<span style='color:#555;'>Optimizing centers and amplitudes (this may take a moment)...</span>"
+        except Exception:
+            pass
+        # Compute SSE for the current selection BEFORE optimization using current stored fits
+        def _series_sse(material_val, condition_val):
+            try:
+                df_sel = _series_df(material_val, condition_val)
+            except Exception:
+                return float("nan")
+            total = 0.0
+            any_added = False
+            for _idx, _row in df_sel.iterrows():
+                try:
+                    x_arr, y_arr, y_fit = _eval_timeseries_fit(_row)
+                    if x_arr is None or y_arr is None or y_fit is None:
+                        continue
+                    # ensure arrays
+                    y_fit_arr = np.asarray(y_fit, dtype=float)
+                    y_arr = np.asarray(y_arr, dtype=float)
+                    if y_fit_arr.shape != y_arr.shape:
+                        n = min(y_fit_arr.size, y_arr.size)
+                        if n <= 0:
+                            continue
+                        y_fit_arr = y_fit_arr[:n]
+                        y_arr = y_arr[:n]
+                    mask = np.isfinite(y_arr) & np.isfinite(y_fit_arr)
+                    if not np.any(mask):
+                        continue
+                    err = y_arr[mask] - y_fit_arr[mask]
+                    total += float(np.sum(err * err))
+                    any_added = True
+                except Exception:
+                    continue
+            return total if any_added else float("nan")
+
+        try:
+            sse_before_calc = _series_sse(material_dd.value, conditions_dd.value)
+        except Exception:
+            sse_before_calc = float("nan")
+        try:
+            result = _optimize_centers_for_selection(material_dd.value, conditions_dd.value)
+            # Backward compatibility if tuple size differs
+            if isinstance(result, tuple) and len(result) == 3:
+                msg, centers_out, summary = result
+            elif isinstance(result, tuple) and len(result) == 2:
+                msg, centers_out = result
+                summary = None
+            else:
+                msg = str(result)
+                centers_out = None
+                summary = None
+            if centers_out is None:
+                status_html.value = f"<span style='color:#a00;'>{msg}</span>"
+                try:
+                    optimize_status_html.value = f"<div style='color:#a00'>{msg}</div>"
+                except Exception:
+                    pass
+            else:
+                status_html.value = f"<span style='color:#0a0;'>{msg}</span>"
+                # Build a persistent, detailed optimization log
+                try:
+                    # Compute SSE AFTER optimization using updated fits stored in the DataFrame
+                    try:
+                        sse_after_calc = _series_sse(material_dd.value, conditions_dd.value)
+                    except Exception:
+                        sse_after_calc = float("nan")
+                    if summary is None:
+                        optimize_status_html.value = f"<div><b>Optimization</b>: {msg}</div>"
+                    else:
+                        # Compose a compact table of per-peak changes
+                        centers0 = summary.get("initial_centers", []) or []
+                        centers1 = summary.get("final_centers", []) or []
+                        deltas = summary.get("center_deltas", []) or []
+                        amp0 = summary.get("amp_initial_means", []) or []
+                        amp1 = summary.get("amp_final_means", []) or []
+                        ampd = summary.get("amp_delta_means", []) or []
+                        rows = []
+                        klen = max(len(centers0), len(centers1), len(deltas))
+                        for i in range(klen):
+                            c0 = centers0[i] if i < len(centers0) else None
+                            c1 = centers1[i] if i < len(centers1) else None
+                            dd = deltas[i] if i < len(deltas) else None
+                            def _fmt(v):
+                                try:
+                                    return f"{float(v):.6g}"
+                                except Exception:
+                                    return ""
+                            rows.append(f"<tr><td>Peak {i+1}</td><td>{_fmt(c0)}</td><td>{_fmt(c1)}</td><td>{_fmt(dd)}</td></tr>")
+                        table_html = (
+                            "<table style='border-collapse:collapse'>"
+                            "<thead><tr><th></th><th>Initial center</th><th>Final center</th><th>Δ center</th></tr></thead>"
+                            f"<tbody>{''.join(rows)}</tbody></table>"
+                        )
+                        # Amplitude change table by spectrum (Δ per peak)
+                        delta_by_spec = summary.get("amp_delta_by_spectrum", []) or []
+                        # Determine max number of peaks to render
+                        kmax = 0
+                        for item in delta_by_spec:
+                            try:
+                                kmax = max(kmax, len(item.get("deltas", [])))
+                            except Exception:
+                                pass
+                        # Build header and body rows
+                        header_cells = "".join(["<th>Series</th>"] + [f"<th>Peak {i+1} Δ</th>" for i in range(kmax)])
+                        body_rows = []
+                        def _fmtd(v):
+                            try:
+                                return f"{float(v):.6g}"
+                            except Exception:
+                                return ""
+                        for item in delta_by_spec:
+                            label = item.get("label", "")
+                            deltas = item.get("deltas", []) or []
+                            cells = [f"<td>{label}</td>"]
+                            for i in range(kmax):
+                                val = deltas[i] if i < len(deltas) else None
+                                cells.append(f"<td>{_fmtd(val)}</td>")
+                            body_rows.append(f"<tr>{''.join(cells)}</tr>")
+                        amp_table_html = (
+                            "<table style='border-collapse:collapse'>"
+                            f"<thead><tr>{header_cells}</tr></thead>"
+                            f"<tbody>{''.join(body_rows)}</tbody></table>"
+                        )
+                        # Prefer recomputed SSE for consistent selection and evaluation; fallback to optimizer-reported values
+                        sse0 = sse_before_calc if np.isfinite(sse_before_calc) else summary.get("initial_sse")
+                        if sse0 is None or not np.isfinite(sse0):
+                            sse0 = None
+                        sse1 = sse_after_calc if np.isfinite(sse_after_calc) else summary.get("final_sse")
+                        if sse1 is None or not np.isfinite(sse1):
+                            sse1 = None
+                        try:
+                            # Display delta as (final - initial): negative means decreased SSE
+                            delta_disp = (sse1 - sse0) if (sse0 is not None and sse1 is not None) else None
+                        except Exception:
+                            delta_disp = None
+                        passes_done = summary.get("passes")
+                        m_att = summary.get("moves_attempted")
+                        m_acc = summary.get("moves_accepted")
+                        optimize_status_html.value = (
+                            "<div style='margin-top:8px'><b>Optimization Summary</b></div>"
+                                                        + (
+                                                                f"<div>SSE: {sse0:.6g} → {sse1:.6g} (Δ={delta_disp:.6g}, final − initial) | Passes: {passes_done} | Moves: {m_acc}/{m_att} accepted</div>"
+                                                                if (sse0 is not None and sse1 is not None)
+                                                                else f"<div>Passes: {passes_done} | Moves: {m_acc}/{m_att} accepted</div>"
+                                                            )
+                            + "<div style='color:#555; margin-top:2px'>(Amplitudes re-fit per spectrum during optimization)</div>"
+                            + f"<div style='margin-top:6px'><b>Peak Centers</b></div>"
+                            + f"<div style='margin-top:2px'>{table_html}</div>"
+                            + f"<div style='margin-top:8px'><b>Amplitude Changes by Spectrum (Δ = final − initial)</b></div>"
+                            + f"<div style='margin-top:2px'>{amp_table_html}</div>"
+                        )
+                except Exception:
+                    pass
+        except Exception as e:
+            try:
+                status_html.value = f"<span style='color:#a00;'>Optimize failed: {e}</span>"
+            except Exception:
+                pass
+            return
+        _plot_series(with_fits=True)
+
     def _on_save_click(_b=None):
         """Save per-row peak wavenumbers (centers), alphas (fractions), sigmas, and areas (amplitudes) into 'Time-Series Fit Results'."""
         try:
@@ -5885,6 +7319,7 @@ def time_series_fitting(FTIR_DataFrame):
             fit_btn.close()
             close_btn.close()
             status_html.close()
+            optimize_status_html.close()
             ui.close()
             fig.close()
         except Exception:
@@ -5893,6 +7328,7 @@ def time_series_fitting(FTIR_DataFrame):
     material_dd.observe(_on_material_change, names="value")
     conditions_dd.observe(_on_conditions_change, names="value")
     fit_btn.on_click(_on_fit_click)
+    opt_btn.on_click(_on_optimize_click)
     # Add Save button to save per-row results (wavenumbers + areas) back into 'Time-Series Fit Results'
     save_btn = widgets.Button(
         description="Save",
@@ -5903,12 +7339,10 @@ def time_series_fitting(FTIR_DataFrame):
     save_btn.on_click(_on_save_click)
     close_btn.on_click(_on_close)
 
-    controls = widgets.HBox([material_dd, conditions_dd, fit_btn, save_btn, close_btn])
-    ui = widgets.VBox([controls, status_html])
+    controls = widgets.HBox([material_dd, conditions_dd, fit_btn, opt_btn, save_btn, close_btn])
+    ui = widgets.VBox([controls, status_html, optimize_status_html])
     display(ui, fig, WN_table_html, A_table_html)
     _plot_series(with_fits=False)
 
     return FTIR_DataFrame
-
-
 
