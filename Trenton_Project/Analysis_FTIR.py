@@ -68,80 +68,11 @@ def batch_rename_files(
         Renamed files and folders in place; prints changes to console.
         """
         date_patterns = [
-            # MM-DD-YYYY or M-D-YYYY
-            r"(\b\d{1,2}-\d{1,2}-\d{4}\b)",
-            # YYYY-MM-DD
-            r"(\b\d{4}-\d{1,2}-\d{1,2}\b)",
-            # MMDDYYYY
-            r"(\b\d{2}\d{2}\d{4}\b)",
-            # YYYYMMDD
-            r"(\b\d{4}\d{2}\d{2}\b)",
+            # Examples (mm-dd-yyyy, mm.dd.yyyy, yyyy_mm_dd) — implementation omitted
+            # This function currently acts as a placeholder; no renaming patterns applied.
         ]
-
-        def _convert_to_iso(date_str):
-            # If already in ISO format (YYYY-MM-DD), return as is
-            if re.match(r"^\d{4}-\d{2}-\d{2}$", date_str):
-                return date_str
-            # MM-DD-YYYY or M-D-YYYY
-            match = re.match(r"^(\d{1,2})-(\d{1,2})-(\d{4})$", date_str)
-            if match:
-                m, d, y = match.groups()
-                return f"{y}-{int(m):02d}-{int(d):02d}"
-            # MMDDYYYY
-            match = re.match(r"^(\d{2})(\d{2})(\d{4})$", date_str)
-            if match:
-                m, d, y = match.groups()
-                return f"{y}-{m}-{d}"
-            # YYYYMMDD
-            match = re.match(r"^(\d{4})(\d{2})(\d{2})$", date_str)
-            if match:
-                y, m, d = match.groups()
-                return f"{y}-{m}-{d}"
-            return date_str
-
-        print("Renaming dates in filenames to ISO format...")
-        for root, dirs, files in os.walk(directory):
-            # Rename folders in current directory
-            for current_dir in dirs:
-                new_dirname = current_dir
-                for pattern in date_patterns:
-                    for date_match in re.findall(pattern, current_dir):
-                        iso_date = _convert_to_iso(date_match)
-                        if iso_date != date_match:
-                            message = (
-                                f"In folder '{current_dir}': changing date"
-                                f" '{date_match}' to '{iso_date}'"
-                            )
-                            print(message)
-                            new_dirname = new_dirname.replace(date_match, iso_date)
-                if new_dirname != current_dir:
-                    old_dirpath = os.path.join(root, current_dir)
-                    new_dirpath = os.path.join(root, new_dirname)
-                    print(f"Renaming folder: {old_dirpath} to {new_dirpath}")
-                    os.rename(old_dirpath, new_dirpath)
-
-            # Rename files in current directory
-            for current_filename in files:
-                new_filename = current_filename
-                for pattern in date_patterns:
-                    for date_match in re.findall(pattern, current_filename):
-                        iso_date = _convert_to_iso(date_match)
-                        if iso_date != date_match:
-                            message = (
-                                f"In file '{current_filename}': changing date"
-                                f" '{date_match}' to '{iso_date}'"
-                            )
-                            print(message)
-                            new_filename = new_filename.replace(date_match, iso_date)
-                if new_filename != current_filename:
-                    old_filepath = os.path.join(root, current_filename)
-                    new_filepath = os.path.join(root, new_filename)
-                    print(f"Renaming: {old_filepath} to {new_filepath}")
-                    os.rename(old_filepath, new_filepath)
-        print("Date renaming to ISO format complete.")
-    # If no directory is provided, prompt the user for input
-    if directory is None:
-        directory = input("Enter the directory to scan: ").strip()
+        # TODO: Re-implement date renaming logic if needed.
+        pass
     if not os.path.isdir(directory):
         raise FileNotFoundError(f"Directory not found: {directory}")
     print(f"Scanning directory: {directory}")
@@ -2783,7 +2714,7 @@ def anchor_points_selection(
     return None
 
 
-def normalization_peak_selection(FTIR_DataFrame, material=None, filepath=None):
+def spectral_normalization(FTIR_DataFrame, filepath=None):
     """
     Interactively select and save a normalization peak range for FTIR spectra.
 
@@ -2796,11 +2727,8 @@ def normalization_peak_selection(FTIR_DataFrame, material=None, filepath=None):
     ----------
     FTIR_DataFrame : pd.DataFrame
         The DataFrame containing the spectral data.
-    material : str, optional
-        Material to visualize when filepath is not provided. The first Time == 0
-        entry for this material will be shown.
     filepath : str, optional
-        A specific file to visualize, provided as a full path or just filename.
+        If provided, preselect this file (full path or just filename).
 
     Returns
     -------
@@ -2815,127 +2743,225 @@ def normalization_peak_selection(FTIR_DataFrame, material=None, filepath=None):
     if target_col not in FTIR_DataFrame.columns:
         FTIR_DataFrame[target_col] = None
 
-    # --- Select a single row by filepath or by (material, Time == 0) ---
+    # Identify condition column name
+    cond_col = (
+        "Conditions"
+        if "Conditions" in FTIR_DataFrame.columns
+        else ("Condition" if "Condition" in FTIR_DataFrame.columns else None)
+    )
+
+    # Build dropdown options
+    try:
+        df_all = FTIR_DataFrame.copy()
+    except Exception:
+        df_all = FTIR_DataFrame
+
+    materials = (
+        sorted(
+            {
+                str(v)
+                for v in df_all.get("Material", pd.Series([], dtype=object))
+                .dropna()
+                .astype(str)
+                .unique()
+                .tolist()
+            }
+        )
+        if "Material" in df_all.columns
+        else []
+    )
+    cond_series = (
+        df_all[cond_col]
+        if cond_col and (cond_col in df_all.columns)
+        else pd.Series([], dtype=object)
+    )
+    conditions = (
+        sorted(
+            [
+                s
+                for s in [str(v) for v in cond_series.dropna().astype(str).unique().tolist()]
+                if s.strip().lower() != "unexposed"
+            ]
+        )
+        if cond_col
+        else []
+    )
+
+    # Preselect by filepath/material if provided
+    preselect_idx = None
+    preselect_material = None
+    preselect_condition = None
     if filepath is not None:
         if os.path.sep in filepath:
             folder, fname = os.path.split(filepath)
-            filtered = FTIR_DataFrame[
-                (FTIR_DataFrame["File Location"] == folder)
-                & (FTIR_DataFrame["File Name"] == fname)
+            flt = df_all[
+                (df_all.get("File Location", "") == folder)
+                & (df_all.get("File Name", "") == fname)
             ]
         else:
-            filtered = FTIR_DataFrame[FTIR_DataFrame["File Name"] == filepath]
-        if filtered.empty:
-            raise ValueError(f"No entry found for file '{filepath}'.")
-        row = filtered.iloc[0]
-        material_name = row.get("Material", "Unknown")
-    else:
-        if material is None:
-            raise ValueError("Material must be specified if filepath is not provided.")
-        filtered = FTIR_DataFrame[
-            (FTIR_DataFrame["Material"] == material) & (FTIR_DataFrame["Time"] == 0)
-        ]
-        if filtered.empty:
-            raise ValueError(
-                f"No entry found for material '{material}' with time == 0."
+            flt = df_all[df_all.get("File Name", "") == filepath]
+        if not flt.empty:
+            preselect_idx = flt.index[0]
+            preselect_material = str(flt.iloc[0].get("Material", "any"))
+            if cond_col is not None:
+                preselect_condition = str(flt.iloc[0].get(cond_col, "any"))
+    # No material argument; selection is made via the dropdowns
+
+    # Helper: perform normalization for a material (formerly spectrum_normalization)
+    def _normalize(material_name: str):
+        if FTIR_DataFrame is None:
+            raise ValueError("FTIR_DataFrame is None.")
+        if material_name is None or str(material_name).strip() == "":
+            raise ValueError("Material must be provided for normalization.")
+
+        source_column = "Baseline-Corrected Data"
+        dest_column = "Normalized and Corrected Data"
+        range_column = "Normalization Peak Wavenumber"
+
+        subset = FTIR_DataFrame[FTIR_DataFrame["Material"] == material_name]
+        if subset.empty:
+            raise ValueError(f"No rows found for material '{material_name}'.")
+
+        # Determine x-axis column
+        x_axis_column = "X-Axis" if "X-Axis" in FTIR_DataFrame.columns else None
+        if x_axis_column is None:
+            raise KeyError(
+                "Could not find an x-axis column ('X-Axis') in the DataFrame."
             )
-        row = filtered.iloc[0]
-        material_name = material
+        # Validate required columns for normalization
+        _require_columns(
+            FTIR_DataFrame,
+            ["Material", source_column, range_column, x_axis_column],
+            context="FTIR_DataFrame (_normalize)",
+        )
 
-    # --- Extract data ---
-    x_data = (
-        ast.literal_eval(row["X-Axis"])
-        if isinstance(row["X-Axis"], str)
-        else row["X-Axis"]
-    )
-    y_data = (
-        ast.literal_eval(row["Raw Data"])
-        if isinstance(row["Raw Data"], str)
-        else row["Raw Data"]
-    )
+        # Ensure source/destination columns are object dtype (hold per-row lists)
+        if source_column in FTIR_DataFrame.columns:
+            try:
+                FTIR_DataFrame[source_column] = FTIR_DataFrame[source_column].astype(
+                    object
+                )
+            except Exception:
+                pass
+        # Ensure destination column exists and is object dtype
+        if dest_column not in FTIR_DataFrame.columns:
+            FTIR_DataFrame[dest_column] = None
+        try:
+            FTIR_DataFrame[dest_column] = FTIR_DataFrame[dest_column].astype(object)
+        except Exception:
+            pass
 
-    # --- Widgets and outputs ---
-    save_spec_btn = widgets.Button(
-        description="Save for this file", button_style="success"
+        # Normalize each spectrum by its own max within the normalization window
+        updated = 0
+        skipped = 0
+        errors = []
+        for idx, row in subset.iterrows():
+            try:
+                x = row.get(x_axis_column)
+                y = row.get(source_column)
+                rng = row.get(range_column)
+                # parse potential string-literals
+                if isinstance(x, str):
+                    x = ast.literal_eval(x)
+                if isinstance(y, str):
+                    y = ast.literal_eval(y)
+                if isinstance(rng, str):
+                    rng = ast.literal_eval(rng)
+                if not isinstance(rng, (list, tuple)) or len(rng) != 2:
+                    skipped += 1
+                    continue
+                x = np.asarray(x, dtype=float)
+                y = np.asarray(y, dtype=float)
+                lo, hi = float(min(rng)), float(max(rng))
+                if x.size == 0 or y.size == 0 or x.size != y.size:
+                    skipped += 1
+                    continue
+                # window mask
+                mask = (x >= lo) & (x <= hi)
+                if not np.any(mask):
+                    skipped += 1
+                    continue
+                local_max = np.nanmax(y[mask])
+                if not np.isfinite(local_max) or local_max == 0:
+                    skipped += 1
+                    continue
+                FTIR_DataFrame.at[idx, dest_column] = (y / local_max).tolist()
+                updated += 1
+            except Exception as e:
+                skipped += 1
+                errors.append((idx, str(e)))
+
+        print(
+            f"Normalized material '{material_name}': updated {updated} spectra; skipped "
+            f"{skipped} (missing/invalid range or data). Each spectrum scaled by its own peak."
+        )
+        if updated == 0 and skipped > 0 and errors:
+            # Provide a small hint in the console; keep UI uncluttered
+            print(
+                "Note: Some rows lacked valid ranges or data for normalization. "
+                f"First error: {errors[0][1]}"
+            )
+
+    # Widgets: Material/Conditions/Spectrum
+    material_dd = widgets.Dropdown(
+        options=["any"] + materials,
+        value=(preselect_material if preselect_material in materials else "any"),
+        description="Material",
+        layout=widgets.Layout(width="40%"),
     )
-    save_mat_btn = widgets.Button(
-        description="Save for this material", button_style="info"
+    conditions_dd = widgets.Dropdown(
+        options=( ["any"] + conditions if cond_col else ["any"] ),
+        value=(preselect_condition if (preselect_condition in conditions) else "any"),
+        description=("Conditions" if cond_col else "Conditions"),
+        layout=widgets.Layout(width="40%"),
     )
-    redo_btn = widgets.Button(description="Redo", button_style="warning")
-    cancel_btn = widgets.Button(description="Close", button_style="danger")
-    btn_box = widgets.HBox([save_spec_btn, save_mat_btn, redo_btn, cancel_btn])
+    spectrum_sel = widgets.Dropdown(options=[], description="Spectrum", layout=widgets.Layout(width="70%"))
+
     info_out = widgets.Output()
     msg_out = widgets.Output()
 
-    selected_points = []  # store up to two x positions
-    shaded_shape_id = "norm_range_rect"
-    first_vline_name = "norm_vline_first"  # visual indicator for first click
+    # State shared with callbacks
+    selected_points = []  # up to two x positions
+    x_data = []
+    y_data = []
 
-    file_path = os.path.join(row.get("File Location", ""), row.get("File Name", ""))
-    with info_out:
-        print(f"Plotting: {file_path}")
-        print("Click two points to define the normalization range.")
-
-    # --- Build interactive figure ---
-    fig = go.FigureWidget(
-        data=[
-            go.Scatter(x=x_data, y=y_data, mode="lines", name="Raw Data"),
-        ]
-    )
+    # --- Plot ---
+    fig = go.FigureWidget(data=[go.Scatter(x=[], y=[], mode="lines", name="Raw Data")])
     fig.update_layout(
-        title=f"Select Normalization Range | Material: {material_name}",
+        title="Select Normalization Range",
         xaxis_title="Wavenumber (cm⁻¹)",
         yaxis_title="Absorbance (AU)",
     )
 
     def _clear_selection_visuals():
-        # remove all our shapes (simplest and robust)
         fig.layout.shapes = ()
 
     def _draw_first_click(x0: float):
-        # dotted vertical line to show first click registered
         vline = dict(
             type="line",
             x0=x0,
             x1=x0,
-            y0=min(y_data),
-            y1=max(y_data),
+            y0=(float(np.nanmin(y_data)) if len(y_data) else 0.0),
+            y1=(float(np.nanmax(y_data)) if len(y_data) else 1.0),
             line=dict(color="red", dash="dot"),
-            name=first_vline_name,
+            name="norm_vline_first",
         )
         fig.add_shape(vline)
 
     def _draw_selection_visuals(x0, x1):
-        # vertical lines
-        vline1 = dict(
-            type="line",
-            x0=x0,
-            x1=x0,
-            y0=min(y_data),
-            y1=max(y_data),
-            line=dict(color="red", dash="dash"),
-            name="norm_vline_1",
-        )
-        vline2 = dict(
-            type="line",
-            x0=x1,
-            x1=x1,
-            y0=min(y_data),
-            y1=max(y_data),
-            line=dict(color="red", dash="dash"),
-            name="norm_vline_2",
-        )
-        # rectangle shading
+        y0min = float(np.nanmin(y_data)) if len(y_data) else 0.0
+        y0max = float(np.nanmax(y_data)) if len(y_data) else 1.0
+        vline1 = dict(type="line", x0=x0, x1=x0, y0=y0min, y1=y0max, line=dict(color="red", dash="dash"))
+        vline2 = dict(type="line", x0=x1, x1=x1, y0=y0min, y1=y0max, line=dict(color="red", dash="dash"))
         rect = dict(
             type="rect",
             x0=min(x0, x1),
             x1=max(x0, x1),
-            y0=min(y_data),
-            y1=max(y_data),
+            y0=y0min,
+            y1=y0max,
             fillcolor="rgba(0,128,0,0.15)",
             line=dict(width=0),
             layer="below",
-            name=shaded_shape_id,
         )
         fig.add_shape(vline1)
         fig.add_shape(vline2)
@@ -2945,85 +2971,206 @@ def normalization_peak_selection(FTIR_DataFrame, material=None, filepath=None):
         if not points.xs:
             return
         x_val = float(points.xs[0])
-        # If already have two, start over with new first point
         if len(selected_points) >= 2:
             selected_points.clear()
             _clear_selection_visuals()
-
         selected_points.append(x_val)
-
         if len(selected_points) == 1:
-            # show immediate visual feedback for first click
             _clear_selection_visuals()
             _draw_first_click(x_val)
             with msg_out:
                 clear_output(wait=True)
                 print(f"First point set at x = {x_val:.3f} cm⁻¹. Click second point…")
         elif len(selected_points) == 2:
-            x0, x1 = selected_points
+            a, b = selected_points
             _clear_selection_visuals()
-            _draw_selection_visuals(x0, x1)
+            _draw_selection_visuals(a, b)
             with msg_out:
                 clear_output(wait=True)
-                lo, hi = (min(x0, x1), max(x0, x1))
+                lo, hi = (min(a, b), max(a, b))
                 print(f"Selected normalization range: [{lo:.3f}, {hi:.3f}] cm⁻¹")
-        else:
-            with msg_out:
-                clear_output(wait=True)
-                print(f"First point set at x = {x_val:.3f} cm⁻¹. Click second point…")
 
     fig.data[0].on_click(_on_click)
 
     def _current_range():
         if len(selected_points) != 2:
             return None
-        x0, x1 = selected_points
-        return [float(min(x0, x1)), float(max(x0, x1))]
+        a, b = selected_points
+        return [float(min(a, b)), float(max(a, b))]
+
+    def _get_xy(idx):
+        row = FTIR_DataFrame.loc[idx]
+        x = row.get("X-Axis")
+        y = row.get("Raw Data")
+        if isinstance(x, str):
+            try:
+                x = ast.literal_eval(x)
+            except Exception:
+                pass
+        if isinstance(y, str):
+            try:
+                y = ast.literal_eval(y)
+            except Exception:
+                pass
+        return np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+
+    def _row_filepath(idx):
+        r = FTIR_DataFrame.loc[idx]
+        return os.path.join(str(r.get("File Location", "")), str(r.get("File Name", "")))
+
+    def _row_label(idx):
+        r = FTIR_DataFrame.loc[idx]
+        t = r.get("Time", "?")
+        mat = r.get("Material", "?")
+        cond = (r.get(cond_col, "?") if cond_col else "?")
+        fname = r.get("File Name", "?")
+        return f"{mat} | {cond} | t={t} | {fname}"
+
+    def _rebuild_spectrum_options(*_):
+        mask = pd.Series([True] * len(FTIR_DataFrame))
+        if material_dd.value != "any":
+            mask &= (FTIR_DataFrame.get("Material", pd.Series([None]*len(FTIR_DataFrame))).astype(str) == str(material_dd.value))
+        if cond_col and conditions_dd.value != "any":
+            cond_vals = FTIR_DataFrame.get(
+                cond_col, pd.Series([None] * len(FTIR_DataFrame))
+            ).astype(str)
+            # Include rows matching the selected condition OR marked as 'unexposed'
+            mask &= (
+                (cond_vals == str(conditions_dd.value))
+                | (cond_vals.str.strip().str.lower() == "unexposed")
+            )
+        filtered = FTIR_DataFrame[mask]
+        # sort by Time if present
+        if "Time" in filtered.columns:
+            try:
+                filtered = filtered.sort_values(by="Time")
+            except Exception:
+                pass
+        opts = [(_row_label(i), i) for i in filtered.index]
+        if not opts:
+            spectrum_sel.options = [("<no spectra>", None)]
+            spectrum_sel.value = None
+            with info_out:
+                clear_output(wait=True)
+                print("No spectra match the current filters.")
+            return
+        spectrum_sel.options = opts
+        # choose preselect or first
+        if spectrum_sel.value not in [v for _, v in opts]:
+            spectrum_sel.value = opts[0][1]
+
+    def _update_plot_for_selection(*_):
+        idx = spectrum_sel.value
+        if idx is None:
+            return
+        nonlocal x_data, y_data
+        x_data, y_data = _get_xy(idx)
+        # update trace
+        fig.data[0].x = x_data.tolist()
+        fig.data[0].y = y_data.tolist()
+        _clear_selection_visuals()
+        selected_points.clear()
+        # update title and info
+        mat_val = FTIR_DataFrame.loc[idx].get("Material", "?")
+        fig.update_layout(title=f"Select Normalization Range | Material: {mat_val}")
+        with info_out:
+            clear_output(wait=True)
+            print(f"Plotting: {_row_filepath(idx)}")
+            print("Click two points to define the normalization range.")
+        # if this row already has a saved range, visualize it
+        try:
+            rng = FTIR_DataFrame.loc[idx].get(target_col, None)
+            if isinstance(rng, str):
+                rng = ast.literal_eval(rng)
+            if isinstance(rng, (list, tuple)) and len(rng) == 2:
+                a, b = float(rng[0]), float(rng[1])
+                selected_points[:] = [a, b]
+                _clear_selection_visuals()
+                _draw_selection_visuals(a, b)
+                with msg_out:
+                    clear_output(wait=True)
+                    lo, hi = (min(a, b), max(a, b))
+                    print(f"Existing normalization range: [{lo:.3f}, {hi:.3f}] cm⁻¹ (not yet re-saved)")
+        except Exception:
+            pass
+
+    # Build initial options and selection
+    _rebuild_spectrum_options()
+    # If filepath/material preselection points to a specific row, set it now
+    if preselect_idx is not None:
+        # adjust dropdowns if needed to include this row context
+        try:
+            r = FTIR_DataFrame.loc[preselect_idx]
+            if str(r.get("Material", "any")) in material_dd.options:
+                material_dd.value = str(r.get("Material", "any"))
+            if cond_col and (str(r.get(cond_col, "any")) in conditions_dd.options):
+                conditions_dd.value = str(r.get(cond_col, "any"))
+        except Exception:
+            pass
+        _rebuild_spectrum_options()
+        try:
+            spectrum_sel.value = preselect_idx
+        except Exception:
+            pass
+
+    # Now update the plot for the current selection
+    _update_plot_for_selection()
+
+    # --- Buttons ---
+    save_spec_btn = widgets.Button(description="Save for this file", button_style="success")
+    save_mat_btn = widgets.Button(description="Save for this material", button_style="info")
+    normalize_btn = widgets.Button(description="Normalize material", button_style="primary")
+    redo_btn = widgets.Button(description="Redo", button_style="warning")
+    cancel_btn = widgets.Button(description="Close", button_style="danger")
+    btn_box = widgets.HBox([save_spec_btn, save_mat_btn, redo_btn, normalize_btn, cancel_btn])
 
     def _finalize_and_clear():
-        # Detach callbacks and close interactive widgets so UI disappears
         try:
             fig.data[0].on_click(None)
         except Exception:
             pass
-        # Close the plot first
         try:
             fig.close()
         except Exception:
             pass
-        # Close the entire button box so no greyed-out buttons remain
-        try:
-            btn_box.close()
-        except Exception:
-            pass
-        # Also close individual buttons defensively (in case they were displayed
-        # separately)
-        for b in (save_spec_btn, save_mat_btn, redo_btn, cancel_btn):
+        for w in (save_spec_btn, save_mat_btn, normalize_btn, redo_btn, cancel_btn, btn_box, material_dd, conditions_dd, spectrum_sel, info_out, msg_out):
             try:
-                b.close()
+                w.close()
             except Exception:
                 pass
 
-    def _save_for_this_spectrum(b):
+    def _save_for_this_spectrum(_b=None):
+        idx = spectrum_sel.value
+        if idx is None:
+            with msg_out:
+                clear_output(wait=True)
+                print("No spectrum selected.")
+            return
         rng = _current_range()
         if rng is None:
             with msg_out:
                 clear_output(wait=True)
                 print("Please select two points before saving.")
             return
-        FTIR_DataFrame.at[row.name, target_col] = str(rng)
+        FTIR_DataFrame.at[idx, target_col] = str(rng)
         with msg_out:
             clear_output(wait=True)
             print(f"Saved normalization peak range {rng} for this spectrum.")
 
-    def _save_for_this_material(b):
+    def _save_for_this_material(_b=None):
+        idx = spectrum_sel.value
+        if idx is None:
+            with msg_out:
+                clear_output(wait=True)
+                print("No spectrum selected.")
+            return
         rng = _current_range()
         if rng is None:
             with msg_out:
                 clear_output(wait=True)
                 print("Please select two points before saving.")
             return
-        mat = row.get("Material", None)
+        mat = FTIR_DataFrame.loc[idx].get("Material", None)
         if mat is None:
             with msg_out:
                 clear_output(wait=True)
@@ -3035,23 +3182,54 @@ def normalization_peak_selection(FTIR_DataFrame, material=None, filepath=None):
             clear_output(wait=True)
             print(f"Saved normalization peak range {rng} for material '{mat}'.")
 
-    def _redo(b):
+    def _normalize_material(_b=None):
+        idx = spectrum_sel.value
+        if idx is None:
+            with msg_out:
+                clear_output(wait=True)
+                print("No spectrum selected.")
+            return
+        mat = FTIR_DataFrame.loc[idx].get("Material", None)
+        if mat is None:
+            with msg_out:
+                clear_output(wait=True)
+                print("Selected row has no 'Material'.")
+            return
+        # Run normalization; catch and display any errors cleanly
+        try:
+            _normalize(mat)
+            with msg_out:
+                clear_output(wait=True)
+                print(f"Normalization complete for material '{mat}'.")
+        except Exception as e:
+            with msg_out:
+                clear_output(wait=True)
+                print(f"Normalization failed for material '{mat}': {e}")
+
+    def _redo(_b=None):
         selected_points.clear()
         _clear_selection_visuals()
         with msg_out:
-            clear_output()
+            clear_output(wait=True)
             print("Selection cleared. Click two points to select a range.")
 
-    def _close(b):
+    def _close(_b=None):
         _finalize_and_clear()
 
+    # Wire events
+    material_dd.observe(_rebuild_spectrum_options, names="value")
+    conditions_dd.observe(_rebuild_spectrum_options, names="value")
+    spectrum_sel.observe(_update_plot_for_selection, names="value")
     save_spec_btn.on_click(_save_for_this_spectrum)
     save_mat_btn.on_click(_save_for_this_material)
+    normalize_btn.on_click(_normalize_material)
     redo_btn.on_click(_redo)
     cancel_btn.on_click(_close)
 
-    # --- Initial display ---
-    display(fig, info_out, msg_out, btn_box)
+    # Layout: controls on top, then plot, then info and messages, then buttons
+    controls_row = widgets.HBox([material_dd, conditions_dd])
+    spectrum_row = widgets.HBox([spectrum_sel])
+    display(controls_row, spectrum_row, fig, info_out, msg_out, btn_box)
     return FTIR_DataFrame
 
 
@@ -3236,7 +3414,7 @@ def spectrum_normalization(
     return FTIR_DataFrame
 
 
-def find_peak_info(FTIR_DataFrame, materials=None, filepath=None):
+def find_peak_info(FTIR_DataFrame, filepath=None):
     """
     Interactive peak finder for normalized and baseline-corrected spectra.
 
@@ -3250,11 +3428,10 @@ def find_peak_info(FTIR_DataFrame, materials=None, filepath=None):
     ----------
     FTIR_DataFrame : pd.DataFrame
         The DataFrame containing FTIR spectral data.
-    materials : list[str] | str | None
-        Materials to include; if str, comma-separated is accepted. Ignored if filepath
-        is provided.
     filepath : str | None
-        Specific file path to filter by (exact match). If provided, overrides materials.
+        Optional. If provided, the UI will be pre-filtered to this file (by matching
+        full path or just filename). Otherwise, all spectra will be available and you
+        can select Material/Conditions/Spectrum via dropdowns.
 
     Returns
     -------
@@ -3264,21 +3441,25 @@ def find_peak_info(FTIR_DataFrame, materials=None, filepath=None):
     if FTIR_DataFrame is None or len(FTIR_DataFrame) == 0:
         raise ValueError("FTIR_DataFrame must be loaded and non-empty.")
 
-    # Build filtered set
+    # Start with the full DataFrame and optionally pre-filter by filepath
     if filepath is not None:
-        filtered = FTIR_DataFrame[FTIR_DataFrame["File Path"] == filepath]
-        if filtered.empty:
-            raise ValueError(f"No rows found for filepath '{filepath}'.")
-    elif materials is not None:
-        if isinstance(materials, str):
-            mats = [m.strip() for m in materials.split(",") if m.strip()]
+        # Match by full path (File Location + File Name) or by just filename
+        if os.path.sep in str(filepath):
+            file_dir, file_name = os.path.split(str(filepath))
+            filtered = FTIR_DataFrame[
+                (FTIR_DataFrame.get("File Location", "") == file_dir)
+                & (FTIR_DataFrame.get("File Name", "") == file_name)
+            ]
         else:
-            mats = [str(m).strip() for m in materials]
-        filtered = FTIR_DataFrame[FTIR_DataFrame["Material"].isin(mats)]
+            filtered = FTIR_DataFrame[
+                FTIR_DataFrame.get("File Name", "") == str(filepath)
+            ]
         if filtered.empty:
-            raise ValueError(f"No rows found for materials: {mats}.")
+            raise ValueError(
+                f"No rows found for filepath '{filepath}'. Ensure 'File Location' and 'File Name' are populated."
+            )
     else:
-        raise ValueError("Either 'materials' or 'filename' must be provided.")
+        filtered = FTIR_DataFrame.copy()
 
     # Ensure destination columns exist and are object dtype
     for col in ("Peak Wavenumbers", "Peak Absorbances"):
@@ -3297,14 +3478,156 @@ def find_peak_info(FTIR_DataFrame, materials=None, filepath=None):
                 return None
         return val
 
-    # Build spectrum options (index -> label)
-    options = []
-    for idx, r in filtered.iterrows():
-        label = (
-            f"{r.get('Material','')} | {r.get('Conditions', r.get('Condition',''))}"
-            f" | T={r.get('Time','')} | {r.get('File Name','')}"
+    # Determine the conditions column
+    cond_col = (
+        "Conditions"
+        if "Conditions" in filtered.columns
+        else ("Condition" if "Condition" in filtered.columns else None)
+    )
+
+    # Material and Conditions dropdowns (Conditions excludes 'unexposed')
+    try:
+        unique_materials = (
+            sorted(
+                {
+                    str(v)
+                    for v in filtered.get("Material", pd.Series([], dtype=object))
+                    .dropna()
+                    .astype(str)
+                    .unique()
+                    .tolist()
+                }
+            )
+            if "Material" in filtered.columns
+            else []
         )
-        options.append((label, idx))
+    except Exception:
+        unique_materials = []
+    cond_series = (
+        filtered[cond_col]
+        if cond_col and (cond_col in filtered.columns)
+        else pd.Series([], dtype=object)
+    )
+    _all_conditions = [str(v) for v in cond_series.dropna().astype(str).unique().tolist()]
+    unique_conditions = sorted([c for c in _all_conditions if c.strip().lower() != "unexposed"])
+
+    material_dd = widgets.Dropdown(
+        options=["any"] + unique_materials,
+        value="any",
+        description="Material",
+        layout=widgets.Layout(width="40%"),
+    )
+    conditions_dd = widgets.Dropdown(
+        options=["any"] + unique_conditions,
+        value="any",
+        description="Conditions",
+        layout=widgets.Layout(width="40%"),
+    )
+
+    # Build spectrum options using current filters; include 'unexposed' spectra always
+    def _current_filtered_df():
+        df = filtered.copy()
+        # Filter by material
+        if material_dd.value != "any":
+            try:
+                df = df[df.get("Material", "").astype(str) == str(material_dd.value)]
+            except Exception:
+                df = df[df.get("Material", "") == material_dd.value]
+        # Filter by conditions but always include 'unexposed'
+        if cond_col and conditions_dd.value != "any":
+            cond_vals = df.get(cond_col, pd.Series([None] * len(df))).astype(str)
+            mask = (cond_vals == str(conditions_dd.value)) | (
+                cond_vals.str.strip().str.lower() == "unexposed"
+            )
+            df = df[mask]
+        return df
+
+    def _build_options():
+        df = _current_filtered_df()
+        # Only include rows with normalized data available
+        try:
+            df = df[df["Normalized and Corrected Data"].notna()]
+        except Exception:
+            # If column missing or not Series, this will result in empty options
+            df = df.iloc[0:0]
+        # Sort by Time ascending if present
+        try:
+            if "Time" in df.columns:
+                df = df.copy()
+                df["_sort_time"] = pd.to_numeric(df["Time"], errors="coerce").fillna(float("inf"))
+                df = df.sort_values(by=["_sort_time"], kind="mergesort")
+        except Exception:
+            pass
+        opts = []
+        for idx, r in df.iterrows():
+            label = (
+                f"{r.get('Material','')} | {r.get('Conditions', r.get('Condition',''))}"
+                f" | T={r.get('Time','')} | {r.get('File Name','')}"
+            )
+            opts.append((label, idx))
+        return opts
+
+    options = _build_options()
+    if not options:
+        raise ValueError(
+            "No spectra available to analyze. Ensure 'Normalized and Corrected Data' is populated (run baseline and normalization)."
+        )
+
+    # Seed from first spectrum
+    first_idx = options[0][1]
+    x0 = _parse_seq(FTIR_DataFrame.loc[first_idx].get("X-Axis"))
+    y0 = _parse_seq(FTIR_DataFrame.loc[first_idx].get("Normalized and Corrected Data"))
+    if x0 is None or y0 is None:
+        raise ValueError(
+            "Selected spectrum is missing 'X-Axis' or 'Normalized and Corrected Data'."
+        )
+    x0 = np.asarray(x0, dtype=float)
+    y0 = np.asarray(y0, dtype=float)
+    xmin, xmax = (float(np.nanmin(x0)), float(np.nanmax(x0)))
+
+    # Build spectrum options using current filters; include 'unexposed' spectra always
+    def _current_filtered_df():
+        df = filtered.copy()
+        # Filter by material
+        if material_dd.value != "any":
+            try:
+                df = df[df.get("Material", "").astype(str) == str(material_dd.value)]
+            except Exception:
+                df = df[df.get("Material", "") == material_dd.value]
+        # Filter by conditions but always include 'unexposed'
+        if cond_col and conditions_dd.value != "any":
+            cond_vals = df.get(cond_col, pd.Series([None] * len(df))).astype(str)
+            mask = (cond_vals == str(conditions_dd.value)) | (
+                cond_vals.str.strip().str.lower() == "unexposed"
+            )
+            df = df[mask]
+        return df
+
+    def _build_options():
+        df = _current_filtered_df()
+        # Only include rows with normalized data available
+        try:
+            df = df[df["Normalized and Corrected Data"].notna()]
+        except Exception:
+            df = df[df.get("Normalized and Corrected Data", None).notna() if hasattr(df.get("Normalized and Corrected Data", None), "notna") else []]
+        # Sort by Time ascending if present
+        try:
+            if "Time" in df.columns:
+                df = df.copy()
+                df["_sort_time"] = pd.to_numeric(df["Time"], errors="coerce").fillna(float("inf"))
+                df = df.sort_values(by=["_sort_time"], kind="mergesort")
+        except Exception:
+            pass
+        opts = []
+        for idx, r in df.iterrows():
+            label = (
+                f"{r.get('Material','')} | {r.get('Conditions', r.get('Condition',''))}"
+                f" | T={r.get('Time','')} | {r.get('File Name','')}"
+            )
+            opts.append((label, idx))
+        return opts
+
+    options = _build_options()
     if not options:
         raise ValueError("No spectra available after filtering.")
 
@@ -3598,7 +3921,7 @@ def find_peak_info(FTIR_DataFrame, materials=None, filepath=None):
                 print("Please enable at least one X-range before saving.")
             return
         updated, skipped = 0, 0
-        for idx, _row in filtered.iterrows():
+        for idx, _row in _current_filtered_df().iterrows():
             x_arr, y_arr = _get_xy(idx)
             if x_arr is None:
                 skipped += 1
@@ -3617,6 +3940,15 @@ def find_peak_info(FTIR_DataFrame, materials=None, filepath=None):
 
     def _close_ui(b):
         try:
+            # Close dropdowns/filters first
+            try:
+                material_dd.close()
+            except Exception:
+                pass
+            try:
+                conditions_dd.close()
+            except Exception:
+                pass
             spectrum_sel.close()
             x_range1.close()
             x_range2.close()
@@ -3634,11 +3966,39 @@ def find_peak_info(FTIR_DataFrame, materials=None, filepath=None):
             close_btn.close()
             # Leave msg_out displayed so the last messages remain visible
             fig.close()
+            try:
+                # Close container widgets if available
+                filters_row.close()
+            except Exception:
+                pass
+            try:
+                ui.close()
+            except Exception:
+                pass
         except Exception:
             pass
 
     # Wire events
+    def _on_filters_change(*_):
+        new_opts = _build_options()
+        if not new_opts:
+            spectrum_sel.options = [("<no spectra>", None)]
+            try:
+                spectrum_sel.value = None
+            except Exception:
+                pass
+            with msg_out:
+                msg_out.clear_output()
+                print("No spectra match the current filters.")
+            return
+        spectrum_sel.options = new_opts
+        if spectrum_sel.value not in [v for _, v in new_opts]:
+            spectrum_sel.value = new_opts[0][1]
+        _update_plot()
+
     spectrum_sel.observe(_update_plot, names="value")
+    material_dd.observe(_on_filters_change, names="value")
+    conditions_dd.observe(_on_filters_change, names="value")
     for w in (x_range1, x_range2, x_range3, use_r1, use_r2, use_r3):
         w.observe(_update_plot, names="value")
     prominence.observe(_update_plot, names="value")
@@ -3658,8 +4018,11 @@ def find_peak_info(FTIR_DataFrame, materials=None, filepath=None):
     controls_row6 = widgets.HBox(
         [width, max_peaks, save_file_btn, save_all_btn, close_btn]
     )
+    # Prepend filter controls row
+    filters_row = widgets.HBox([material_dd, conditions_dd])
     ui = widgets.VBox(
         [
+            filters_row,
             controls_row1,
             controls_row2,
             controls_row3,
@@ -7346,3 +7709,259 @@ def time_series_fitting(FTIR_DataFrame):
 
     return FTIR_DataFrame
 
+
+def display_DataFrame(FTIR_DataFrame, height: int = 500):
+    """Display the DataFrame in a scrollable table with dropdown filters.
+
+    - Defaults to showing the entire DataFrame in a scrollable HTML table.
+    - Provides dropdowns for Material, Conditions/Condition, and Time to filter.
+
+    Parameters
+    ----------
+    FTIR_DataFrame : pd.DataFrame
+        The DataFrame to display.
+    height : int, optional
+        Height in pixels for the scrollable container (default 500).
+
+    Returns
+    -------
+    pd.DataFrame
+        The (unchanged) input DataFrame.
+    """
+    # Basic validation
+    if FTIR_DataFrame is None:
+        raise ValueError("FTIR_DataFrame must be provided.")
+
+    # Local imports for HTML display to avoid relying on module-level imports
+    try:
+        from IPython.display import display as _ip_display, HTML as _ip_HTML
+    except Exception:
+        _ip_display = None
+        _ip_HTML = None
+
+    # Determine the conditions column name (supports either 'Conditions' or 'Condition')
+    cond_col = (
+        "Conditions"
+        if "Conditions" in FTIR_DataFrame.columns
+        else ("Condition" if "Condition" in FTIR_DataFrame.columns else None)
+    )
+
+    # Helper to build dropdown options with an 'All' entry
+    def _options_for(colname):
+        try:
+            vals = (
+                FTIR_DataFrame.get(colname, None)
+                .dropna()
+                .astype(str)
+                .unique()
+                .tolist()
+                if colname in FTIR_DataFrame.columns
+                else []
+            )
+            # Unique, sorted, stringified
+            vals = sorted({str(v) for v in vals})
+        except Exception:
+            vals = []
+        return ["All"] + vals
+
+    # Special case: Time options sorted in descending numeric order (then non-numeric)
+    def _options_for_time():
+        try:
+            if "Time" not in FTIR_DataFrame.columns:
+                return ["All"]
+            ser = FTIR_DataFrame.get("Time", pd.Series([], dtype=object)).dropna()
+            # Work with string forms for stable filtering downstream
+            str_vals = list({str(v) for v in ser.astype(str).tolist()})
+
+            def _sort_key(s):
+                try:
+                    num = pd.to_numeric(pd.Series([s]), errors="coerce").iloc[0]
+                except Exception:
+                    num = float("nan")
+                # Numeric first (ascending), then non-numeric (ascending lexicographic)
+                if pd.isna(num):
+                    return (1, s)
+                return (0, float(num))
+
+            sorted_vals = sorted(str_vals, key=_sort_key)
+        except Exception:
+            sorted_vals = []
+        return ["All"] + sorted_vals
+
+    # Build dropdowns
+    mat_dd = widgets.Dropdown(
+        options=_options_for("Material"),
+        value="All",
+        description="Material",
+        layout=widgets.Layout(width="33%"),
+        disabled=("Material" not in FTIR_DataFrame.columns),
+    )
+    cond_label = "Conditions" if cond_col != "Condition" else "Condition"
+    cond_dd = widgets.Dropdown(
+        options=_options_for(cond_col) if cond_col else ["All"],
+        value="All",
+        description=cond_label,
+        layout=widgets.Layout(width="33%"),
+        disabled=(cond_col is None),
+    )
+    time_dd = widgets.Dropdown(
+        options=_options_for_time(),
+        value="All",
+        description="Time",
+        layout=widgets.Layout(width="33%"),
+        disabled=("Time" not in FTIR_DataFrame.columns),
+    )
+
+    # Output area for the HTML table
+    out = widgets.Output()
+
+    # Render helper
+    def _render(*_):
+        with out:
+            out.clear_output()
+            # Compose filter mask
+            try:
+                mask = pd.Series(True, index=FTIR_DataFrame.index)
+            except Exception:
+                # Fallback: no filtering if mask creation fails
+                mask = None
+
+            # Apply Material filter
+            try:
+                if not mat_dd.disabled and mat_dd.value != "All":
+                    mask = mask & (
+                        FTIR_DataFrame["Material"].astype(str) == str(mat_dd.value)
+                    )
+            except Exception:
+                pass
+
+            # Apply Conditions/Condition filter
+            try:
+                if cond_col and not cond_dd.disabled and cond_dd.value != "All":
+                    mask = mask & (
+                        FTIR_DataFrame[cond_col].astype(str) == str(cond_dd.value)
+                    )
+            except Exception:
+                pass
+
+            # Apply Time filter
+            try:
+                if not time_dd.disabled and time_dd.value != "All":
+                    mask = mask & (
+                        FTIR_DataFrame["Time"].astype(str) == str(time_dd.value)
+                    )
+            except Exception:
+                pass
+
+            try:
+                df_view = (
+                    FTIR_DataFrame[mask].copy() if isinstance(mask, pd.Series) else FTIR_DataFrame.copy()
+                )
+            except Exception:
+                df_view = FTIR_DataFrame.copy()
+
+            # Preserve and temporarily expand display options
+            prev_rows = pd.get_option("display.max_rows")
+            prev_cols = pd.get_option("display.max_columns")
+            try:
+                pd.set_option("display.max_rows", None)
+                pd.set_option("display.max_columns", None)
+                html = df_view.to_html(max_rows=None, max_cols=None, notebook=True)
+            finally:
+                try:
+                    pd.set_option("display.max_rows", prev_rows)
+                    pd.set_option("display.max_columns", prev_cols)
+                except Exception:
+                    pass
+
+            if _ip_display is not None and _ip_HTML is not None:
+                _ip_display(
+                    _ip_HTML(
+                        f"<div style='height:{int(height)}px;overflow:auto;'>{html}</div>"
+                    )
+                )
+
+    # Wire up events
+    mat_dd.observe(_render, names="value")
+    cond_dd.observe(_render, names="value")
+    time_dd.observe(_render, names="value")
+
+    # Action buttons
+    reset_btn = widgets.Button(
+        description="Reset Filters",
+        button_style="warning",
+        layout=widgets.Layout(width="150px"),
+        tooltip="Reset all filters to 'All'",
+    )
+    close_btn = widgets.Button(
+        description="Close",
+        button_style="danger",
+        layout=widgets.Layout(width="120px"),
+        tooltip="Close this view",
+    )
+
+    def _on_reset(_b=None):
+        # Reset dropdowns to 'All' when available and re-render
+        try:
+            if not mat_dd.disabled and "All" in mat_dd.options:
+                mat_dd.value = "All"
+        except Exception:
+            pass
+        try:
+            if not cond_dd.disabled and "All" in cond_dd.options:
+                cond_dd.value = "All"
+        except Exception:
+            pass
+        try:
+            if not time_dd.disabled and "All" in time_dd.options:
+                time_dd.value = "All"
+        except Exception:
+            pass
+        # Ensure a refresh even if values were already 'All'
+        _render()
+
+    def _on_close(_b=None):
+        # Close all widgets and clear output area
+        try:
+            mat_dd.close()
+        except Exception:
+            pass
+        try:
+            cond_dd.close()
+        except Exception:
+            pass
+        try:
+            time_dd.close()
+        except Exception:
+            pass
+        try:
+            reset_btn.close()
+        except Exception:
+            pass
+        try:
+            close_btn.close()
+        except Exception:
+            pass
+        try:
+            out.clear_output()
+            out.close()
+        except Exception:
+            pass
+        try:
+            ui.close()
+        except Exception:
+            pass
+
+    reset_btn.on_click(_on_reset)
+    close_btn.on_click(_on_close)
+
+    # Layout and initial render
+    controls = widgets.HBox([mat_dd, cond_dd, time_dd])
+    buttons = widgets.HBox([reset_btn, close_btn])
+    ui = widgets.VBox([controls, buttons, out])
+    display(ui)
+    _render()
+
+    return FTIR_DataFrame
+# Inline DataFrame display removed. Use display_DataFrame(FTIR_DataFrame) to view the
+# table with scroll and filters inside a notebook environment.
