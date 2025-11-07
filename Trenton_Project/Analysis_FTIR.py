@@ -23,6 +23,17 @@ import importlib
 from plotly.subplots import make_subplots
 import threading
 from lmfit.models import PseudoVoigtModel
+
+# ----------------------- Colab environment detection ----------------------- #
+# Detect if running inside Google Colab so click-based interactions that rely
+# on Plotly FigureWidget callbacks can be replaced with slider/text-input
+# fallbacks (Colab does not support the .on_click events reliably).
+try:  # noqa: SIM105
+    import google.colab  # type: ignore  # noqa: F401
+    _IN_COLAB = True
+except Exception:  # pragma: no cover
+    _IN_COLAB = False
+
 import time
 import html
 import json
@@ -749,20 +760,38 @@ def file_info_extractor(
             subset=["File Location", "File Name"], inplace=True
         )
         FTIR_DataFrame.reset_index(drop=True, inplace=True)
-        # Reorder columns to place 'Quality' between 'Date' and 'Conditions' if possible
-        try:
-            cols = list(FTIR_DataFrame.columns)
-            if (
-                "Date" in cols
-                and "Quality" in cols
-                and ("Conditions" in cols or "Condition" in cols)
-            ):
-                cols.remove("Quality")
-                insert_pos = cols.index("Date") + 1
-                cols.insert(insert_pos, "Quality")
-                FTIR_DataFrame = FTIR_DataFrame[cols]
-        except Exception:
-            pass
+
+    # --- Enforce canonical column ordering (always run, even if no new data) ---
+    try:
+        existing_cols = list(FTIR_DataFrame.columns)
+        desired_order = [
+            "File Location",
+            "File Name",
+            "Date",
+            "Conditions",
+            "Material",
+            "Time",
+            "Quality",
+            "X-Axis",
+            "Raw Data",
+            "Baseline Function",
+            "Baseline Parameters",
+            "Baseline",
+            "Baseline-Corrected Data",
+            "Normalization Peak Wavenumber",
+            "Normalized and Corrected Data",
+            "Peak Wavenumbers",
+            "Peak Absorbances",
+            "Deconvolution Results",
+            "Time-Series Fit Results",
+        ]
+        ordered = [c for c in desired_order if c in existing_cols]
+        others = [c for c in existing_cols if c not in ordered]
+        # Apply strict ordering: desired columns first, then any remaining
+        if ordered:
+            FTIR_DataFrame = FTIR_DataFrame[ordered + others]
+    except Exception:
+        pass
 
     return FTIR_DataFrame
 
@@ -825,6 +854,7 @@ def _quality_column_name(df):
 
 
 def _quality_series(df):
+    """Return a normalized, lowercase quality Series; defaults to 'good' when missing."""
     try:
         col = _quality_column_name(df)
         if col in df.columns:
@@ -839,6 +869,10 @@ def _quality_series(df):
 
 
 def _quality_good_mask(df):
+    """Boolean mask where True indicates rows not marked as 'bad'.
+
+    Falls back to all True if the Quality column is missing or parsing fails.
+    """
     try:
         qs = _quality_series(df)
         return qs != "bad"
@@ -846,12 +880,337 @@ def _quality_good_mask(df):
         return pd.Series([True] * len(df), index=getattr(df, "index", None))
 
 
+# ------------------------ Session summary helpers ------------------------- #
+def _session_summary_lines(changes: dict, *, context: str = ""):
+    """Build concise summary lines from a per-session changes dict.
+
+    The changes dict may contain keys like:
+      - range_file: list[(idx, range_str)]
+      - range_material: list[(material, count_rows, range_str)]
+      - normalized_materials: list[(material, updated_count, skipped_count_or_None)]
+      - saved_file: list[(idx, count)]
+      - saved_filtered: int
+      - quality: list[(idx, new_quality)]
+      - saved: list[(idx, count_components)] (deconvolution)
+      - iter: list[(idx, start_rc, final_rc, changes)] (deconvolution)
+
+    Returns a list of human-friendly strings.
+    """
+    lines = []
+    try:
+        rf = changes.get("range_file") or []
+        if rf:
+            lines.append(f"Saved normalization range for {len(rf)} individual spectra.")
+    except Exception:
+        pass
+    try:
+        rm = changes.get("range_material") or []
+        if rm:
+            lines.append(
+                "Saved normalization range for {} materials: {}".format(
+                    len(rm), ", ".join([f"{m} ({c} rows)" for m, c, _ in rm])
+                )
+            )
+    except Exception:
+        pass
+    try:
+        nm = changes.get("normalized_materials") or []
+        if nm:
+            mats = [m for m, _u, _s in nm]
+            lines.append("Normalized materials: " + ", ".join(mats))
+    except Exception:
+        pass
+    # Baseline-correction summaries (added)
+    try:
+        bcf = changes.get("baseline_corrected_file") or []
+        if bcf:
+            head = ", ".join([f"{i}:{fn}" for i, fn in bcf[:5]])
+            tail = " ..." if len(bcf) > 5 else ""
+            lines.append(
+                f"Baseline-corrected {len(bcf)} file(s) (first 5: {head}{tail})"
+            )
+    except Exception:
+        pass
+    try:
+        bcm = changes.get("baseline_corrected_material") or []
+        if bcm:
+            parts = [f"{m} ({fn}, {c})" for m, fn, c in bcm]
+            lines.append("Baseline-corrected materials: " + ", ".join(parts))
+    except Exception:
+        pass
+    try:
+        sf = changes.get("saved_file") or []
+        if sf:
+            head = ", ".join([f"{i}:{n}" for i, n in sf[:5]])
+            tail = " ..." if len(sf) > 5 else ""
+            lines.append(f"Saved results for {len(sf)} spectra (first 5: {head}{tail})")
+    except Exception:
+        pass
+    try:
+        sfilt = int(changes.get("saved_filtered") or 0)
+        if sfilt:
+            lines.append(f"Bulk-saved results for {sfilt} filtered spectra.")
+    except Exception:
+        pass
+    try:
+        sv = changes.get("saved") or []
+        if sv:
+            head = ", ".join([f"{i}:{c}" for i, c in sv[:5]])
+            tail = " ..." if len(sv) > 5 else ""
+            lines.append(
+                f"Saved deconvolution for {len(sv)} spectra (first 5: {head}{tail})"
+            )
+    except Exception:
+        pass
+    try:
+        iters = changes.get("iter") or []
+        if iters:
+            lines.append(f"Ran iterative correction {len(iters)} time(s).")
+    except Exception:
+        pass
+    try:
+        qev = changes.get("quality") or []
+        if qev:
+            bad = [i for i, v in qev if str(v).lower() == "bad"]
+            good = [i for i, v in qev if str(v).lower() == "good"]
+            if bad:
+                head = bad[:10]
+                tail = " ..." if len(bad) > 10 else ""
+                lines.append(f"Marked {len(bad)} spectra bad: {head}{tail}")
+            if good:
+                head = good[:10]
+                tail = " ..." if len(good) > 10 else ""
+                lines.append(f"Marked {len(good)} spectra good: {head}{tail}")
+    except Exception:
+        pass
+    if not lines:
+        lines.append("No DataFrame modifications were made in this session.")
+    return lines
+
+
+def _emit_session_summary(target, lines, *, title: str = "Session summary"):
+    """Emit summary lines into either an Output widget (msg_out) or an HTML widget.
+
+    - target: ipywidgets.Output | ipywidgets.HTML
+    - lines: list[str]
+    - For Output: prints plain text lines.
+    - For HTML: sets monospaced text with escaping.
+    """
+    try:
+        from ipywidgets import Output, HTML
+    except Exception:
+        Output, HTML = None, None
+    # Output
+    try:
+        if Output is not None and isinstance(target, Output):
+            with target:
+                clear_output(wait=True)
+                print(f"{title}:")
+                for line in lines:
+                    print(" - " + str(line))
+            return
+    except Exception:
+        pass
+    # HTML
+    try:
+        if HTML is not None and isinstance(target, HTML):
+            safe = "\n".join([html.escape(str(l)) for l in lines])
+            target.value = (
+                "<div style='font-family:monospace; white-space:pre-wrap;'><strong>"
+                + html.escape(title)
+                + ":</strong>\n"
+                + safe
+                + "</div>"
+            )
+            return
+    except Exception:
+        pass
+    # Fallback to print
+    try:
+        print(title + ":")
+        for line in lines:
+            print(" - " + str(line))
+    except Exception:
+        pass
+
+
 # ----------------------- Session selection persistence ----------------------- #
 # Persist last-used selections across interactive tools within this module.
 _SESSION_SELECTIONS = {"material": "any", "conditions": "any", "time": "any"}
+# ^ Persist last-used filter selections across interactive tools so a user's context
+#   (material / conditions / time) carries between normalization, peak finding, etc.
 
 # Track active widgets/figures created by try_baseline to ensure clean re-entry
 _TB_WIDGETS = []
+# ^ Bookkeeping list of active ipywidgets objects created by try_baseline so they can
+#   be cleanly closed before rebuilding the UI (prevents stale comm warnings).
+
+# Persist the "Parameter Details" toggle state across try_baseline rebuilds
+_TB_PARAM_DETAILS_OPEN = False
+# ^ Remembers whether the "Parameter Details" toggle was open in try_baseline to keep
+#   user preference when the parameter UI is dynamically rebuilt.
+
+# Session change trackers for interactive tools
+# Used by plot_grouped_spectra to collect per-session quality marks across separate plot UIs
+_PLOT_GROUPED_SPECTRA_SESSION_CHANGES = None  # type: ignore[var-annotated]
+# ^ Per-session change log (dict) for plot_grouped_spectra interactive mode. Collects
+#   quality mark events so a summary can be rendered on Close.
+
+
+# ----------------------- Reusable Quality Button Helper ----------------------- #
+def _make_quality_controls(df, row_getter, *, margin="10px 10px 0 0"):
+    """Return mutually exclusive quality buttons (Mark as bad / Mark as good).
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame containing a quality column (auto-detected or created).
+    row_getter : Callable[[], pd.Series | None]
+        Function returning the currently selected DataFrame row or None.
+    margin : str, optional
+        CSS margin applied to each button for consistent spacing.
+
+    Returns
+    -------
+    (mark_bad_btn, mark_good_btn, refresh_fn)
+        Widgets and a refresh function to sync visibility with current row state.
+
+    Notes
+    -----
+    - If no row selected, only "Mark as bad" is shown (default assumption is good).
+    - Quality column name resolved via _quality_column_name; created if missing.
+    - Exceptions are swallowed (UI resilience in notebook contexts).
+    """
+    mark_bad_btn = widgets.Button(
+        description="Mark as bad",
+        button_style="danger",
+        layout=widgets.Layout(margin=margin),
+    )
+    mark_good_btn = widgets.Button(
+        description="Mark as good",
+        button_style="success",
+        layout=widgets.Layout(margin=margin),
+    )
+
+    def _quality_col():
+        try:
+            qcol = _quality_column_name(df)
+            if qcol not in df.columns:
+                df[qcol] = ["good"] * len(df)
+            return qcol
+        except Exception:
+            if "Quality" not in df.columns:
+                try:
+                    df["Quality"] = ["good"] * len(df)
+                except Exception:
+                    pass
+            return "Quality"
+
+    def refresh():
+        try:
+            row = row_getter()
+            if row is None:
+                mark_bad_btn.layout.display = ""
+                mark_good_btn.layout.display = "none"
+                return
+            qcol = _quality_col()
+            val = str(row.get(qcol, "good")).strip().lower()
+            is_bad = val == "bad"
+            mark_bad_btn.layout.display = "none" if is_bad else ""
+            mark_good_btn.layout.display = "" if is_bad else "none"
+        except Exception:
+            try:
+                mark_bad_btn.layout.display = ""
+                mark_good_btn.layout.display = "none"
+            except Exception:
+                pass
+
+    def _set_quality(status):
+        if status not in ("good", "bad"):
+            return
+        try:
+            row = row_getter()
+            if row is None:
+                return
+            qcol = _quality_col()
+            df.at[row.name, qcol] = status
+        except Exception:
+            pass
+        refresh()
+
+    try:
+        mark_bad_btn.on_click(lambda _b=None: _set_quality("bad"))
+        mark_good_btn.on_click(lambda _b=None: _set_quality("good"))
+    except Exception:
+        pass
+
+    refresh()
+    return mark_bad_btn, mark_good_btn, refresh
+
+
+# ----------------------- Common Dataset/Parsing Helpers ----------------------- #
+def _conditions_column_name(df):
+    """Return the conditions column name if present: 'Conditions' | 'Condition' | None."""
+    try:
+        if df is None or not hasattr(df, "columns"):
+            return None
+        if "Conditions" in df.columns:
+            return "Conditions"
+        if "Condition" in df.columns:
+            return "Condition"
+    except Exception:
+        pass
+    return None
+
+
+def _extract_material_condition_lists(df, *, exclude_unexposed=True):
+    """Return (materials, conditions) lists from df with optional 'unexposed' filtering.
+
+    - materials: sorted unique string values of 'Material' if present, else []
+    - conditions: sorted unique string values of Conditions/Condition column if present, else []
+    - exclude_unexposed: drop any condition equal to 'unexposed' (case-insensitive)
+    """
+    materials = []
+    conditions = []
+    if df is None or len(df) == 0:
+        return materials, conditions
+    try:
+        if "Material" in df.columns:
+            materials = sorted(
+                {str(v) for v in df["Material"].dropna().astype(str).unique().tolist()}
+            )
+    except Exception:
+        pass
+    try:
+        ccol = _conditions_column_name(df)
+        if ccol and ccol in df.columns:
+            vals = [str(v) for v in df[ccol].dropna().astype(str).unique().tolist()]
+            if exclude_unexposed:
+                vals = [v for v in vals if v.strip().lower() != "unexposed"]
+            conditions = sorted(vals)
+    except Exception:
+        pass
+    return materials, conditions
+
+
+def _parse_seq(val):
+    """Parse a value into a 1D list/array of floats, or return None if invalid.
+
+    Accepts python-literal strings (e.g., "[1,2,3]") via _safe_literal_eval.
+    """
+    try:
+        v = _safe_literal_eval(val, value_name="sequence")
+    except Exception:
+        v = val
+    try:
+        if isinstance(v, (list, tuple, np.ndarray, pd.Series)):
+            arr = np.asarray(v, dtype=float).ravel()
+            if arr.size == 0:
+                return None
+            return arr
+        return None
+    except Exception:
+        return None
 
 
 def _get_session_defaults():
@@ -885,6 +1244,7 @@ def _set_session_selection(material=None, conditions=None, time=None):
     except Exception:
         # Best-effort; do not raise in UX path
         pass
+
 
 def _ensure_1d_numeric_array(name, seq):
     """Coerce a sequence into a 1D float numpy array; raise clear error if invalid."""
@@ -1357,9 +1717,21 @@ def plot_grouped_spectra(
         When True, include spectra marked as bad in the plots; when False (default),
         bad spectra are excluded.
     """
-    # Interactive widget UI: if interactive=True (default) or no primary filters provided, show controls
+    # Interactive widget UI
+    # - When interactive=True (default) or no filters are provided, build an ipywidgets
+    #   control panel for filtering (Material/Conditions/Time), toggling which traces
+    #   to show, and choosing separate vs grouped plots.
+    # - This branch also tracks per-session quality changes and shows a Close summary.
     if interactive or (materials is None and conditions is None and times is None):
         try:
+            # Initialize per-session change log (quality marks only for this UI)
+            global _PLOT_GROUPED_SPECTRA_SESSION_CHANGES
+            # Initialize or reuse per-session quality change log for interactive plotting
+            if _PLOT_GROUPED_SPECTRA_SESSION_CHANGES is None:
+                _PLOT_GROUPED_SPECTRA_SESSION_CHANGES = {"quality": []}
+            else:
+                # Reuse existing dict but don't wipe previous events until summary emitted on Close
+                _PLOT_GROUPED_SPECTRA_SESSION_CHANGES.setdefault("quality", [])
             # Build options from DataFrame
             try:
                 materials_opts = sorted(
@@ -1426,9 +1798,7 @@ def plot_grouped_spectra(
 
             # For Time, allow 'any' or a single specific time
             # Keep underlying values numeric when possible
-            time_options = [("any", "any")] + [
-                (str(v), v) for v in times_opts
-            ]
+            time_options = [("any", "any")] + [(str(v), v) for v in times_opts]
             times_dd = widgets.Dropdown(
                 options=time_options,
                 value="any",
@@ -1493,10 +1863,10 @@ def plot_grouped_spectra(
                 description="Include bad spectra",
             )
 
-
+            # Actions & summary area
             plot_button = widgets.Button(description="Plot", button_style="primary")
             close_button = widgets.Button(description="Close", button_style="danger")
-            out = widgets.Output()
+            out = widgets.Output()  # persists session summary on Close
 
             def _parse_mark(text):
                 s = (text or "").strip()
@@ -1548,6 +1918,13 @@ def plot_grouped_spectra(
                             show_bad=show_bad_chk.value,
                             interactive=False,
                         )
+                        # After plotting separate plots, info: individual mark buttons
+                        # append to the global session dict in the non-interactive branch below.
+                        try:
+                            if separate_plots_chk.value:
+                                pass
+                        except Exception:
+                            pass
                     except Exception as e:
                         print(f"Error while plotting: {e}")
 
@@ -1571,6 +1948,27 @@ def plot_grouped_spectra(
 
             def _on_close(_b):
                 """Close the interactive UI and clear outputs, similar to other modules."""
+                try:
+                    # Emit session summary before closing if any quality changes occurred
+                    global _PLOT_GROUPED_SPECTRA_SESSION_CHANGES
+                    if isinstance(_PLOT_GROUPED_SPECTRA_SESSION_CHANGES, dict):
+                        lines = _session_summary_lines(
+                            _PLOT_GROUPED_SPECTRA_SESSION_CHANGES,
+                            context="plot_grouped_spectra",
+                        )
+                        # Use the existing output widget if still present; else fallback to print.
+                        try:
+                            _emit_session_summary(
+                                out, lines, title="plot_grouped_spectra session summary"
+                            )
+                        except Exception:
+                            print("plot_grouped_spectra session summary:")
+                            for l in lines:
+                                print(" - " + str(l))
+                        # Reset tracker for next session
+                        _PLOT_GROUPED_SPECTRA_SESSION_CHANGES = {"quality": []}
+                except Exception:
+                    pass
                 try:
                     # Clear the visible area first
                     clear_output(wait=True)
@@ -1600,40 +1998,50 @@ def plot_grouped_spectra(
                     out,
                 ] + [
                     # Higher-level composite containers (selectors/toggles/controls)
-                    'selectors_placeholder',  # will be swapped below if defined
-                    'toggles_placeholder',
-                    'controls_placeholder',
+                    "selectors_placeholder",  # will be swapped below if defined
+                    "toggles_placeholder",
+                    "controls_placeholder",
                 ]:
                     # Replace placeholder strings with actual widget objects if they exist
-                    if w == 'selectors_placeholder':
+                    if w == "selectors_placeholder":
                         w = selectors
-                    elif w == 'toggles_placeholder':
+                    elif w == "toggles_placeholder":
                         w = toggles
-                    elif w == 'controls_placeholder':
+                    elif w == "controls_placeholder":
                         w = controls
                     if w is None:
                         continue
                     try:
+                        # Keep 'out' visible to preserve the session summary
+                        if w is out:
+                            continue
                         w.close()
                     except Exception:
                         pass
 
             close_button.on_click(_on_close)
 
-            # Layout and display
-            selectors = widgets.HBox(
-                [materials_dd, conditions_dd, times_dd]
-            )
+            # Layout and display the controls and the summary output area (out)
+            selectors = widgets.HBox([materials_dd, conditions_dd, times_dd])
             toggles = widgets.HBox(
-                [traces_row, widgets.VBox([separate_plots_chk, include_replicates_chk, show_bad_chk])]
+                [
+                    traces_row,
+                    widgets.VBox(
+                        [separate_plots_chk, include_replicates_chk, show_bad_chk]
+                    ),
+                ]
             )
-            controls = widgets.VBox([selectors, toggles, widgets.HBox([plot_button, close_button])])
+            controls = widgets.VBox(
+                [selectors, toggles, widgets.HBox([plot_button, close_button])]
+            )
             display(controls, out)
             return
         except Exception as e:
             # If widgets are unavailable or something fails, fall back to non-interactive path with a note
             try:
-                print(f"Interactive controls unavailable, falling back to static plot: {e}")
+                print(
+                    f"Interactive controls unavailable, falling back to static plot: {e}"
+                )
             except Exception:
                 pass
 
@@ -1796,13 +2204,48 @@ def plot_grouped_spectra(
     )
     display(fig_group)
 
+    # Display plotted file locations in the exact order they were plotted
+    try:
+        file_paths = []
+        for _i, _row in filtered_data_sorted.iterrows():
+            folder = str(_row.get("File Location", "") or "")
+            fname = str(_row.get("File Name", "") or "")
+            full_path = os.path.join(folder, fname) if folder and fname else (folder or fname)
+            if full_path:
+                file_paths.append(full_path)
+        if file_paths:
+            header = f"Plotted file order ({len(file_paths)}):"
+            html = "<b>{}</b><br><pre style='margin:0'>{}</pre>".format(
+                header, "\n".join(f"{i+1}. {p}" for i, p in enumerate(file_paths))
+            )
+            display(widgets.HTML(value=html))
+    except Exception as e:
+        try:
+            print(f"Note: could not display file list: {e}")
+        except Exception:
+            pass
+
     # Optional: mark selected rows as good/bad after plotting
     try:
         qcol = _quality_column_name(FTIR_DataFrame)
+
+        # Local function to append quality change to session log
+        def _log_quality(idx_val, status_val):
+            try:
+                global _PLOT_GROUPED_SPECTRA_SESSION_CHANGES
+                if isinstance(_PLOT_GROUPED_SPECTRA_SESSION_CHANGES, dict):
+                    _PLOT_GROUPED_SPECTRA_SESSION_CHANGES.setdefault(
+                        "quality", []
+                    ).append((idx_val, status_val))
+            except Exception:
+                pass
+
         # Mark good first
         if mark_good is not None and not filtered_data.empty:
             if isinstance(mark_good, str) and mark_good.strip().lower() == "all":
                 FTIR_DataFrame.loc[filtered_data.index, qcol] = "good"
+                for _i in filtered_data.index.tolist():
+                    _log_quality(_i, "good")
             elif isinstance(mark_good, (list, tuple, set)):
                 to_mark_idx = []
                 for item in mark_good:
@@ -1819,10 +2262,14 @@ def plot_grouped_spectra(
                         pass
                 if to_mark_idx:
                     FTIR_DataFrame.loc[list(set(to_mark_idx)), qcol] = "good"
+                    for _i in set(to_mark_idx):
+                        _log_quality(_i, "good")
         # Then mark bad
         if mark_bad is not None and not filtered_data.empty:
             if isinstance(mark_bad, str) and mark_bad.strip().lower() == "all":
                 FTIR_DataFrame.loc[filtered_data.index, qcol] = "bad"
+                for _i in filtered_data.index.tolist():
+                    _log_quality(_i, "bad")
             elif isinstance(mark_bad, (list, tuple, set)):
                 to_mark_idx = []
                 for item in mark_bad:
@@ -1839,6 +2286,8 @@ def plot_grouped_spectra(
                         pass
                 if to_mark_idx:
                     FTIR_DataFrame.loc[list(set(to_mark_idx)), qcol] = "bad"
+                    for _i in set(to_mark_idx):
+                        _log_quality(_i, "bad")
     except Exception:
         pass
 
@@ -1904,6 +2353,7 @@ def plot_grouped_spectra(
                 try:
                     qcol = _quality_column_name(FTIR_DataFrame)
                     FTIR_DataFrame.at[i, qcol] = "bad"
+                    _log_quality(i, "bad")
                 except Exception:
                     pass
                 # Toggle button visibility for this row's buttons only
@@ -1919,6 +2369,7 @@ def plot_grouped_spectra(
                 try:
                     qcol = _quality_column_name(FTIR_DataFrame)
                     FTIR_DataFrame.at[i, qcol] = "good"
+                    _log_quality(i, "good")
                 except Exception:
                     pass
                 # Toggle button visibility for this row's buttons only
@@ -1988,6 +2439,17 @@ def try_baseline(
     except Exception:
         pass
 
+    # Per-session change log for this try_baseline session
+    # Added baseline_corrected_* keys so the summary can explicitly report
+    # which files/materials had baseline-corrected data generated inline.
+    _tb_changes = {
+        "quality": [],
+        "saved_file": [],
+        "saved_filtered": 0,
+        "baseline_corrected_file": [],  # list[(idx, function_name)]
+        "baseline_corrected_material": [],  # list[(material, function_name, count_updated)]
+    }
+
     if baseline_function is None:
         # Default to ARPLS when not specified; user can change via dropdown below
         baseline_function = "ARPLS"
@@ -2036,10 +2498,14 @@ def try_baseline(
     # If a specific file is selected, compute x/y; otherwise wait for user selection
     if row is not None:
         x = (
-            ast.literal_eval(row["X-Axis"]) if isinstance(row["X-Axis"], str) else row["X-Axis"]
+            ast.literal_eval(row["X-Axis"])
+            if isinstance(row["X-Axis"], str)
+            else row["X-Axis"]
         )
         y = (
-            ast.literal_eval(row["Raw Data"]) if isinstance(row["Raw Data"], str) else row["Raw Data"]
+            ast.literal_eval(row["Raw Data"])
+            if isinstance(row["Raw Data"], str)
+            else row["Raw Data"]
         )
         y = np.array(y, dtype=float)
 
@@ -2162,7 +2628,9 @@ def try_baseline(
         # If no spectrum is selected yet, use a generic default for scale; recomputed on selection
         if row is not None:
             _raw_data = (
-                ast.literal_eval(row["Raw Data"]) if isinstance(row["Raw Data"], str) else row["Raw Data"]
+                ast.literal_eval(row["Raw Data"])
+                if isinstance(row["Raw Data"], str)
+                else row["Raw Data"]
             )
             scale_default = ceil(optimize_window(_raw_data) / 2)
         else:
@@ -2220,7 +2688,16 @@ def try_baseline(
     # Unique materials
     try:
         unique_materials = (
-            sorted({str(v) for v in base_df.get("Material", pd.Series([], dtype=object)).dropna().astype(str).unique().tolist()})
+            sorted(
+                {
+                    str(v)
+                    for v in base_df.get("Material", pd.Series([], dtype=object))
+                    .dropna()
+                    .astype(str)
+                    .unique()
+                    .tolist()
+                }
+            )
             if "Material" in base_df.columns
             else []
         )
@@ -2232,15 +2709,23 @@ def try_baseline(
         description="Material",
         layout=widgets.Layout(width="40%"),
     )
-    # Conditions list, exclude 'unexposed'
+    # Conditions list (exclude 'unexposed' from selector values)
     try:
         cond_series = (
             base_df["Conditions"]
             if "Conditions" in base_df.columns
-            else (base_df["Condition"] if "Condition" in base_df.columns else pd.Series([], dtype=object))
+            else (
+                base_df["Condition"]
+                if "Condition" in base_df.columns
+                else pd.Series([], dtype=object)
+            )
         )
-        _all_conditions = [str(v) for v in cond_series.dropna().astype(str).unique().tolist()]
-        unique_conditions = sorted([c for c in _all_conditions if c.strip().lower() != "unexposed"])
+        _all_conditions = [
+            str(v) for v in cond_series.dropna().astype(str).unique().tolist()
+        ]
+        unique_conditions = sorted(
+            [c for c in _all_conditions if c.strip().lower() != "unexposed"]
+        )
     except Exception:
         unique_conditions = []
     conditions_dd = widgets.Dropdown(
@@ -2263,27 +2748,56 @@ def try_baseline(
     # Baseline function dropdown (user can switch between methods)
     baseline_dd = widgets.Dropdown(
         options=["ARPLS", "IRSQR", "FABC", "MANUAL"],
-        value=str(baseline_function).upper() if str(baseline_function).upper() in ["ARPLS", "IRSQR", "FABC", "MANUAL"] else "ARPLS",
+        value=(
+            str(baseline_function).upper()
+            if str(baseline_function).upper() in ["ARPLS", "IRSQR", "FABC", "MANUAL"]
+            else "ARPLS"
+        ),
         description="Baseline",
         layout=widgets.Layout(width="30%"),
     )
+    # Normalize baseline_function to a valid string and sync with dropdown to avoid None-related crashes on first selection
+    try:
+        if not isinstance(baseline_function, str) or str(
+            baseline_function
+        ).upper() not in ("ARPLS", "IRSQR", "FABC", "MANUAL"):
+            baseline_function = str(baseline_dd.value).upper()
+        else:
+            baseline_function = str(baseline_function).upper()
+    except Exception:
+        baseline_function = "ARPLS"
     # Spectrum dropdown (built via helper)
-    spectrum_sel = widgets.Dropdown(options=[("Select a spectrum…", None)], value=None, description="Spectrum", layout=widgets.Layout(width="70%"))
+    spectrum_sel = widgets.Dropdown(
+        options=[("Select a spectrum…", None)],
+        value=None,
+        description="Spectrum",
+        layout=widgets.Layout(width="70%"),
+    )
 
     def _rebuild_conditions_options():
         try:
             if material_dd.value == "any":
                 dfm = base_df
             else:
-                dfm = base_df[base_df.get("Material", "").astype(str) == str(material_dd.value)]
+                dfm = base_df[
+                    base_df.get("Material", "").astype(str) == str(material_dd.value)
+                ]
             cs = (
                 dfm["Conditions"]
                 if "Conditions" in dfm.columns
-                else (dfm["Condition"] if "Condition" in dfm.columns else pd.Series([], dtype=object))
+                else (
+                    dfm["Condition"]
+                    if "Condition" in dfm.columns
+                    else pd.Series([], dtype=object)
+                )
             )
             cvals = [str(v) for v in cs.dropna().astype(str).unique().tolist()]
             cvals = sorted([c for c in cvals if c.strip().lower() != "unexposed"])
-            curr = conditions_dd.value if conditions_dd.value in (["any"] + cvals) else "any"
+            curr = (
+                conditions_dd.value
+                if conditions_dd.value in (["any"] + cvals)
+                else "any"
+            )
             conditions_dd.options = ["any"] + cvals
             conditions_dd.value = curr
         except Exception:
@@ -2303,17 +2817,25 @@ def try_baseline(
                 df = df[df.get("Material", "").astype(str) == str(material_dd.value)]
             # Filter by conditions if chosen
             if conditions_dd.value != "any":
-                cond_col = "Conditions" if "Conditions" in df.columns else ("Condition" if "Condition" in df.columns else None)
+                cond_col = (
+                    "Conditions"
+                    if "Conditions" in df.columns
+                    else ("Condition" if "Condition" in df.columns else None)
+                )
                 if cond_col is not None:
                     # Always include 'unexposed' spectra in addition to the selected condition
                     sel_val = str(conditions_dd.value)
-                    cond_series = df.get(cond_col, pd.Series([], dtype=object)).astype(str)
+                    cond_series = df.get(cond_col, pd.Series([], dtype=object)).astype(
+                        str
+                    )
                     unexp_mask = cond_series.str.strip().str.lower() == "unexposed"
                     cond_mask = cond_series == sel_val
                     df = df[cond_mask | unexp_mask]
             # Sort by time if present
             if "Time" in df.columns:
-                df["_sort_time"] = pd.to_numeric(df["Time"], errors="coerce").fillna(float("inf"))
+                df["_sort_time"] = pd.to_numeric(df["Time"], errors="coerce").fillna(
+                    float("inf")
+                )
                 df = df.sort_values(by=["_sort_time"], kind="mergesort")
             options = []
             for idx2, r2 in df.iterrows():
@@ -2340,7 +2862,7 @@ def try_baseline(
                 except Exception:
                     stime = None
                 if stime is not None:
-                    for (_l, v) in options:
+                    for _l, v in options:
                         try:
                             if float(FTIR_DataFrame.loc[v].get("Time")) == float(stime):
                                 chosen = v
@@ -2355,12 +2877,24 @@ def try_baseline(
                 rsel = FTIR_DataFrame.loc[chosen]
                 row = rsel
                 material = rsel.get("Material", material)
-                x = (ast.literal_eval(rsel["X-Axis"]) if isinstance(rsel["X-Axis"], str) else rsel["X-Axis"]) 
-                y = (ast.literal_eval(rsel["Raw Data"]) if isinstance(rsel["Raw Data"], str) else rsel["Raw Data"]) 
+                x = (
+                    ast.literal_eval(rsel["X-Axis"])
+                    if isinstance(rsel["X-Axis"], str)
+                    else rsel["X-Axis"]
+                )
+                y = (
+                    ast.literal_eval(rsel["Raw Data"])
+                    if isinstance(rsel["Raw Data"], str)
+                    else rsel["Raw Data"]
+                )
                 y = np.array(y, dtype=float)
                 # Persist session
                 try:
-                    _set_session_selection(material=row.get("Material"), conditions=row.get("Conditions"), time=row.get("Time"))
+                    _set_session_selection(
+                        material=row.get("Material"),
+                        conditions=row.get("Conditions"),
+                        time=row.get("Time"),
+                    )
                 except Exception:
                     pass
         except Exception:
@@ -2392,11 +2926,19 @@ def try_baseline(
         with output:
             # If no spectrum has been selected yet, prompt once
             if row is None or spectrum_sel.value is None:
-                try:
-                    clear_output(wait=True)
-                except Exception:
-                    pass
-                print("Select a spectrum to preview the baseline.")
+                # Do not clear an existing plot; only show prompt if nothing rendered yet.
+                if fig_widget is None:
+                    try:
+                        clear_output(wait=True)
+                    except Exception:
+                        pass
+                    print("Select a spectrum to preview the baseline.")
+                else:
+                    # Leave existing figure visible; optionally could append a note.
+                    try:
+                        print("(Select a spectrum to update the preview.)")
+                    except Exception:
+                        pass
                 return
 
             # Compute baseline safely
@@ -2447,10 +2989,7 @@ def try_baseline(
                 # Build or update Plotly FigureWidget
                 title_top = "Raw Data and Baseline"
                 if fig_widget is None or len(getattr(fig_widget, "data", [])) < 3:
-                    try:
-                        clear_output(wait=True)
-                    except Exception:
-                        pass
+                    # Do not clear the whole cell output; this figure renders outside the Output widget.
                     # Create subplots: top (raw + baseline), bottom (baseline-corrected)
                     base_fig = make_subplots(
                         rows=2,
@@ -2461,16 +3000,44 @@ def try_baseline(
                     )
                     fig_widget = go.FigureWidget(base_fig)
                     # Raw spectrum
-                    fig_widget.add_scatter(x=x_arr, y=y_arr, mode="lines", name="Spectrum", line=dict(color="black"), row=1, col=1)
+                    fig_widget.add_scatter(
+                        x=x_arr,
+                        y=y_arr,
+                        mode="lines",
+                        name="Spectrum",
+                        line=dict(color="black"),
+                        row=1,
+                        col=1,
+                    )
                     # Baseline
-                    fig_widget.add_scatter(x=x_arr, y=baseline_arr, mode="lines", name="Baseline", line=dict(color="red", width=1.5, dash="dash"), row=1, col=1)
+                    fig_widget.add_scatter(
+                        x=x_arr,
+                        y=baseline_arr,
+                        mode="lines",
+                        name="Baseline",
+                        line=dict(color="red", width=1.5, dash="dash"),
+                        row=1,
+                        col=1,
+                    )
                     # Baseline-corrected (spectrum - baseline)
-                    fig_widget.add_scatter(x=x_arr, y=residual, mode="lines", name="Baseline-Corrected", line=dict(color="blue"), row=2, col=1)
+                    fig_widget.add_scatter(
+                        x=x_arr,
+                        y=residual,
+                        mode="lines",
+                        name="Baseline-Corrected",
+                        line=dict(color="blue"),
+                        row=2,
+                        col=1,
+                    )
                     # Axes labels and layout
                     fig_widget.update_yaxes(title_text="Absorbance (AU)", row=1, col=1)
                     fig_widget.update_yaxes(title_text="", row=2, col=1)
-                    fig_widget.update_xaxes(title_text="Wavenumber (cm⁻¹)", row=2, col=1)
-                    fig_widget.update_layout(legend=dict(orientation="h", y=-0.2), height=800)
+                    fig_widget.update_xaxes(
+                        title_text="Wavenumber (cm⁻¹)", row=2, col=1
+                    )
+                    fig_widget.update_layout(
+                        legend=dict(orientation="h", y=-0.2), height=800
+                    )
                     display(fig_widget)
                 else:
                     # Update data traces in-place (no redraw flicker)
@@ -2488,17 +3055,21 @@ def try_baseline(
                         return
                     # Update subplot titles
                     try:
-                        if hasattr(fig_widget.layout, "annotations") and len(fig_widget.layout.annotations) >= 2:
+                        if (
+                            hasattr(fig_widget.layout, "annotations")
+                            and len(fig_widget.layout.annotations) >= 2
+                        ):
                             fig_widget.layout.annotations[0].text = title_top
                             fig_widget.layout.annotations[1].text = "Baseline-Corrected"
                     except Exception:
                         pass
             except Exception as e:
+                # Keep any existing figure; report error in the Output widget only.
                 try:
                     clear_output(wait=True)
+                    print(f"Plot error: {e}")
                 except Exception:
                     pass
-                print(f"Plot error: {e}")
 
     # Minimal UI when no spectrum is selected: show only filters, spectrum dropdown, and Close button
     try:
@@ -2521,7 +3092,9 @@ def try_baseline(
         )
 
         # Filters and spectrum rows (no sliders or other buttons)
-        filters_row = widgets.HBox([material_dd, conditions_dd, include_bad_cb, baseline_dd])
+        filters_row = widgets.HBox(
+            [material_dd, conditions_dd, include_bad_cb, baseline_dd]
+        )
         spectrum_row = widgets.HBox([spectrum_sel])
         ui = widgets.VBox([filters_row, spectrum_row, close_btn])
 
@@ -2537,12 +3110,15 @@ def try_baseline(
             if change.get("name") == "value":
                 _rebuild_conditions_options()
                 _build_spectrum_options()
+
         def _on_cond_min(change):
             if change.get("name") == "value":
                 _build_spectrum_options()
+
         def _on_inc_min(change):
             if change.get("name") == "value":
                 _build_spectrum_options()
+
         def _on_base_min(change):
             if change.get("name") == "value":
                 nonlocal baseline_function
@@ -2551,6 +3127,7 @@ def try_baseline(
                 except Exception:
                     baseline_function = "ARPLS"
                 # For MANUAL, defer anchor point UI until a spectrum is chosen.
+
         def _on_spec_min(change):
             if change.get("name") == "value" and change.get("new") is not None:
                 # A spectrum has been chosen; build full UI in-place without recursive re-entry
@@ -2559,87 +3136,197 @@ def try_baseline(
                     nonlocal row, x, y, material
                     row = FTIR_DataFrame.loc[sel_idx]
                     material = row.get("Material", material)
-                    x = (ast.literal_eval(row["X-Axis"]) if isinstance(row["X-Axis"], str) else row["X-Axis"])
-                    y = (ast.literal_eval(row["Raw Data"]) if isinstance(row["Raw Data"], str) else row["Raw Data"])
+                    x = (
+                        ast.literal_eval(row["X-Axis"])
+                        if isinstance(row["X-Axis"], str)
+                        else row["X-Axis"]
+                    )
+                    y = (
+                        ast.literal_eval(row["Raw Data"])
+                        if isinstance(row["Raw Data"], str)
+                        else row["Raw Data"]
+                    )
                     y = np.array(y, dtype=float)
                     try:
-                        _set_session_selection(material=row.get("Material"), conditions=row.get("Conditions"), time=row.get("Time"))
+                        _set_session_selection(
+                            material=row.get("Material"),
+                            conditions=row.get("Conditions"),
+                            time=row.get("Time"),
+                        )
                     except Exception:
                         pass
                 except Exception:
                     return
-                # Close minimal container
+                # Build integrated MANUAL mode or parameter UI depending on selection
+                # Ensure baseline_function is a valid string in sync with dropdown (fresh-kernel safety)
                 try:
-                    container.close()
+                    nonlocal baseline_function
                 except Exception:
                     pass
-                # Build integrated MANUAL mode or parameter UI depending on selection
+                try:
+                    baseline_function = (
+                        str(baseline_function).upper()
+                        if isinstance(baseline_function, str)
+                        else str(baseline_dd.value).upper()
+                    )
+                    if baseline_function not in ("ARPLS", "IRSQR", "FABC", "MANUAL"):
+                        baseline_function = str(baseline_dd.value).upper()
+                except Exception:
+                    baseline_function = "ARPLS"
+
                 def _build_manual_ui():
-                    # Close any prior full UI/figure
+                    """Build or rebuild the inline manual baseline UI, reusing the existing container.
+
+                    Replaces prior parameter UI without closing the shared parent container to allow
+                    switching between MANUAL and automated baselines without UI disappearance.
+                    """
+                    nonlocal param_widgets, baseline_function
+                    # Clear param widgets (manual mode uses anchor workflow instead)
+                    param_widgets = {}
+                    baseline_function = "MANUAL"
+                    # Detach any automated baseline observer while in manual mode to avoid double firing
                     try:
-                        plt.close("all")
+                        baseline_dd.unobserve(_on_base_full, names="value")
                     except Exception:
                         pass
-                    # Manual state
                     manual_out = widgets.Output()
                     anchor_points = []
-                    # Flag controlling whether baseline preview is active (after Continue clicked)
-                    baseline_active = False
+                    baseline_active = (
+                        False  # Flag: baseline preview active after Continue
+                    )
                     # Buttons
-                    continue_btn = widgets.Button(description="Continue", button_style="success")
-                    redo_btn = widgets.Button(description="Redo All", button_style="warning")
-                    undo_btn = widgets.Button(description="Undo", button_style="")
-                    save_file_btn_m = widgets.Button(description="Save for file", button_style="success")
-                    save_mat_btn_m = widgets.Button(description="Save for material", button_style="info")
-                    close_btn_m = widgets.Button(description="Close", button_style="danger")
-                    mark_bad_btn_m = widgets.Button(description="Mark as bad", button_style="danger")
-                    mark_good_btn_m = widgets.Button(description="Mark as good", button_style="success")
-                    # Figures:
-                    #  - fig_m: raw + anchor markers + baseline (preview)
-                    #  - fig_corr: baseline-corrected in a separate plot
+                    continue_btn = widgets.Button(
+                        description="Continue", button_style="success"
+                    )
+                    redo_btn = widgets.Button(
+                        description="Redo All", button_style="warning"
+                    )
+                    undo_btn = widgets.Button(description="Undo")
+                    save_file_btn_m = widgets.Button(
+                        description="Save for file", button_style="success"
+                    )
+                    save_mat_btn_m = widgets.Button(
+                        description="Save for material", button_style="info"
+                    )
+                    close_btn_m = widgets.Button(
+                        description="Close", button_style="danger"
+                    )
+                    # Reusable quality controls
+                    mark_bad_btn_m, mark_good_btn_m, _refresh_mark_btns_m = (
+                        _make_quality_controls(FTIR_DataFrame, lambda: row)
+                    )
+
+                    # Track quality changes for session summary
+                    def _log_mark_bad_m(_b=None):
+                        try:
+                            if row is not None:
+                                _tb_changes.setdefault("quality", []).append(
+                                    (row.name, "bad")
+                                )
+                        except Exception:
+                            pass
+
+                    def _log_mark_good_m(_b=None):
+                        try:
+                            if row is not None:
+                                _tb_changes.setdefault("quality", []).append(
+                                    (row.name, "good")
+                                )
+                        except Exception:
+                            pass
+
+                    try:
+                        mark_bad_btn_m.on_click(_log_mark_bad_m)
+                        mark_good_btn_m.on_click(_log_mark_good_m)
+                    except Exception:
+                        pass
+                    # Figures
                     fig_m = go.FigureWidget()
-                    fig_m.add_scatter(x=np.asarray(x, dtype=float), y=np.asarray(y, dtype=float), mode="lines", name="Spectrum", line=dict(color="black"))
-                    fig_m.add_scatter(x=[], y=[], mode="markers", name="Anchor Points", marker=dict(color="red", size=10))
-                    fig_m.update_layout(title="Manual Baseline: click to add anchor points", xaxis_title="Wavenumber (cm⁻¹)", yaxis_title="Absorbance (AU)", height=450)
-
+                    fig_m.add_scatter(
+                        x=np.asarray(x, dtype=float),
+                        y=np.asarray(y, dtype=float),
+                        mode="lines",
+                        name="Spectrum",
+                        line=dict(color="black"),
+                    )
+                    fig_m.add_scatter(
+                        x=[],
+                        y=[],
+                        mode="markers",
+                        name="Anchor Points",
+                        marker=dict(color="red", size=10),
+                    )
+                    fig_m.update_layout(
+                        title="Manual Baseline: click to add anchor points",
+                        xaxis_title="Wavenumber (cm⁻¹)",
+                        yaxis_title="Absorbance (AU)",
+                        height=450,
+                    )
                     fig_corr = go.FigureWidget()
-                    fig_corr.add_scatter(x=[], y=[], mode="lines", name="Baseline-Corrected", line=dict(color="blue"))
-                    fig_corr.update_layout(title="Baseline-Corrected", xaxis_title="Wavenumber (cm⁻¹)", yaxis_title="Absorbance (AU)", height=350)
+                    fig_corr.add_scatter(
+                        x=[],
+                        y=[],
+                        mode="lines",
+                        name="Baseline-Corrected",
+                        line=dict(color="blue"),
+                    )
+                    fig_corr.update_layout(
+                        title="Baseline-Corrected",
+                        xaxis_title="Wavenumber (cm⁻¹)",
+                        yaxis_title="Absorbance (AU)",
+                        height=350,
+                    )
 
-                    # Mark buttons visibility sync
-                    def _refresh_mark_btns_m():
-                        # Default assume 'good' (show Mark as bad, hide Mark as good)
-                        is_bad = False
+                    # (Handlers wired within helper)
+
+                    # --- Colab-safe manual anchor input ---
+                    # In Colab, Plotly click callbacks are unreliable; provide a
+                    # Text input for anchor x-values and an Add button instead.
+                    anchor_input = widgets.Text(
+                        placeholder="e.g., 400, 750, 1080",
+                        description="Anchors",
+                        layout=widgets.Layout(width="50%"),
+                    )
+                    add_anchor_btn = widgets.Button(
+                        description="Add",
+                        button_style="info",
+                        tooltip="Add anchor points from the text box",
+                    )
+
+                    def _add_anchors_from_text(_b=None):
+                        raw = str(anchor_input.value or "").strip()
+                        if not raw:
+                            return
                         try:
-                            qcol = _quality_column_name(FTIR_DataFrame)
-                            st = FTIR_DataFrame.at[row.name, qcol]
-                            is_bad = str(st).strip().lower() == "bad"
+                            vals = [float(v) for v in raw.split(",") if v.strip()]
+                        except Exception:
+                            with manual_out:
+                                print("Invalid anchor list. Use comma-separated numbers.")
+                            return
+                        # Merge into anchor_points, keep unique, sorted
+                        for v in vals:
+                            try:
+                                if v not in anchor_points:
+                                    anchor_points.append(float(v))
+                            except Exception:
+                                continue
+                        ap_sorted = sorted(anchor_points)
+                        # Update anchor markers on raw figure
+                        try:
+                            xs = np.asarray(x, dtype=float)
+                            ys = np.asarray(y, dtype=float)
+                            fig_m.data[1].x = ap_sorted
+                            fig_m.data[1].y = [
+                                float(ys[int(np.nanargmin(np.abs(xs - ax)))])
+                                for ax in ap_sorted
+                            ]
                         except Exception:
                             pass
-                        try:
-                            mark_bad_btn_m.layout.display = "none" if is_bad else ""
-                            mark_good_btn_m.layout.display = "" if is_bad else "none"
-                        except Exception:
-                            pass
+                        # If preview active, recompute
+                        if baseline_active and len(anchor_points) >= 2:
+                            _preview_baseline()
 
-                    def _mark_bad_m(_b=None):
-                        try:
-                            qcol = _quality_column_name(FTIR_DataFrame)
-                            FTIR_DataFrame.at[row.name, qcol] = "bad"
-                        except Exception:
-                            pass
-                        _refresh_mark_btns_m()
-
-                    def _mark_good_m(_b=None):
-                        try:
-                            qcol = _quality_column_name(FTIR_DataFrame)
-                            FTIR_DataFrame.at[row.name, qcol] = "good"
-                        except Exception:
-                            pass
-                        _refresh_mark_btns_m()
-
-                    mark_bad_btn_m.on_click(_mark_bad_m)
-                    mark_good_btn_m.on_click(_mark_good_m)
+                    add_anchor_btn.on_click(_add_anchors_from_text)
 
                     # Click handler to add anchor point at nearest x
                     def _on_click(trace, points, selector):
@@ -2656,16 +3343,20 @@ def try_baseline(
                                 anchor_points.append(apx)
                                 ap_sorted = sorted(anchor_points)
                                 fig_m.data[1].x = ap_sorted
-                                fig_m.data[1].y = [float(ys[int(np.nanargmin(np.abs(xs - ax)))]) for ax in ap_sorted]
+                                fig_m.data[1].y = [
+                                    float(ys[int(np.nanargmin(np.abs(xs - ax)))])
+                                    for ax in ap_sorted
+                                ]
                                 # If baseline already active, recompute immediately for live update
                                 if baseline_active and len(anchor_points) >= 2:
                                     _preview_baseline()
                         except Exception:
                             pass
 
-                    # Attach click to raw trace
+                    # Attach click to raw trace only outside Colab
                     try:
-                        fig_m.data[0].on_click(_on_click)
+                        if not _IN_COLAB:
+                            fig_m.data[0].on_click(_on_click)
                     except Exception:
                         pass
 
@@ -2679,16 +3370,28 @@ def try_baseline(
                         # Capture current axis ranges to preserve user zoom
                         x_range_main = y_range_main = x_range_corr = y_range_corr = None
                         try:
-                            if fig_m.layout.xaxis.autorange is not True and fig_m.layout.xaxis.range:
+                            if (
+                                fig_m.layout.xaxis.autorange is not True
+                                and fig_m.layout.xaxis.range
+                            ):
                                 x_range_main = list(fig_m.layout.xaxis.range)
-                            if fig_m.layout.yaxis.autorange is not True and fig_m.layout.yaxis.range:
+                            if (
+                                fig_m.layout.yaxis.autorange is not True
+                                and fig_m.layout.yaxis.range
+                            ):
                                 y_range_main = list(fig_m.layout.yaxis.range)
                         except Exception:
                             pass
                         try:
-                            if fig_corr.layout.xaxis.autorange is not True and fig_corr.layout.xaxis.range:
+                            if (
+                                fig_corr.layout.xaxis.autorange is not True
+                                and fig_corr.layout.xaxis.range
+                            ):
                                 x_range_corr = list(fig_corr.layout.xaxis.range)
-                            if fig_corr.layout.yaxis.autorange is not True and fig_corr.layout.yaxis.range:
+                            if (
+                                fig_corr.layout.yaxis.autorange is not True
+                                and fig_corr.layout.yaxis.range
+                            ):
                                 y_range_corr = list(fig_corr.layout.yaxis.range)
                         except Exception:
                             pass
@@ -2699,9 +3402,17 @@ def try_baseline(
                                 print("Select at least two anchor points to preview.")
                             return
                         ap_sorted = np.array(sorted(anchor_points), dtype=float)
-                        y_anchor = np.array([ys[int(np.nanargmin(np.abs(xs - ap)))] for ap in ap_sorted], dtype=float)
+                        y_anchor = np.array(
+                            [
+                                ys[int(np.nanargmin(np.abs(xs - ap)))]
+                                for ap in ap_sorted
+                            ],
+                            dtype=float,
+                        )
                         try:
-                            spline = CubicSpline(ap_sorted, y_anchor, bc_type=((1, 0.0), (1, 0.0)))
+                            spline = CubicSpline(
+                                ap_sorted, y_anchor, bc_type=((1, 0.0), (1, 0.0))
+                            )
                         except Exception:
                             spline = CubicSpline(ap_sorted, y_anchor)
                         baseline_vals = spline(xs)
@@ -2709,7 +3420,13 @@ def try_baseline(
                         # Update raw/baseline figure (keep 0: raw, 1: anchors)
                         while len(fig_m.data) > 2:
                             fig_m.data = tuple(fig_m.data[:2])
-                        fig_m.add_scatter(x=xs, y=baseline_vals, mode="lines", name="Baseline", line=dict(color="red", width=1.5, dash="dash"))
+                        fig_m.add_scatter(
+                            x=xs,
+                            y=baseline_vals,
+                            mode="lines",
+                            name="Baseline",
+                            line=dict(color="red", width=1.5, dash="dash"),
+                        )
                         # Update corrected figure (single trace)
                         try:
                             fig_corr.data[0].x = xs
@@ -2726,9 +3443,13 @@ def try_baseline(
                             pass
                         try:
                             if x_range_corr:
-                                fig_corr.update_xaxes(range=x_range_corr, autorange=False)
+                                fig_corr.update_xaxes(
+                                    range=x_range_corr, autorange=False
+                                )
                             if y_range_corr:
-                                fig_corr.update_yaxes(range=y_range_corr, autorange=False)
+                                fig_corr.update_yaxes(
+                                    range=y_range_corr, autorange=False
+                                )
                         except Exception:
                             pass
 
@@ -2743,17 +3464,13 @@ def try_baseline(
                         _preview_baseline()
 
                     def _redo(_b=None):
-                        # Close current manual UI and rebuild fresh to ensure clean handlers and controls
+                        # Rebuild manual UI inline without closing shared container
                         try:
                             fig_m.close()
                         except Exception:
                             pass
                         try:
                             fig_corr.close()
-                        except Exception:
-                            pass
-                        try:
-                            manual_container.close()
                         except Exception:
                             pass
                         _build_manual_ui()
@@ -2764,18 +3481,32 @@ def try_baseline(
                             if not anchor_points:
                                 return
                             # Capture axis ranges to preserve user zoom
-                            x_range_main = y_range_main = x_range_corr = y_range_corr = None
+                            x_range_main = y_range_main = x_range_corr = (
+                                y_range_corr
+                            ) = None
                             try:
-                                if fig_m.layout.xaxis.autorange is not True and fig_m.layout.xaxis.range:
+                                if (
+                                    fig_m.layout.xaxis.autorange is not True
+                                    and fig_m.layout.xaxis.range
+                                ):
                                     x_range_main = list(fig_m.layout.xaxis.range)
-                                if fig_m.layout.yaxis.autorange is not True and fig_m.layout.yaxis.range:
+                                if (
+                                    fig_m.layout.yaxis.autorange is not True
+                                    and fig_m.layout.yaxis.range
+                                ):
                                     y_range_main = list(fig_m.layout.yaxis.range)
                             except Exception:
                                 pass
                             try:
-                                if fig_corr.layout.xaxis.autorange is not True and fig_corr.layout.xaxis.range:
+                                if (
+                                    fig_corr.layout.xaxis.autorange is not True
+                                    and fig_corr.layout.xaxis.range
+                                ):
                                     x_range_corr = list(fig_corr.layout.xaxis.range)
-                                if fig_corr.layout.yaxis.autorange is not True and fig_corr.layout.yaxis.range:
+                                if (
+                                    fig_corr.layout.yaxis.autorange is not True
+                                    and fig_corr.layout.yaxis.range
+                                ):
                                     y_range_corr = list(fig_corr.layout.yaxis.range)
                             except Exception:
                                 pass
@@ -2787,7 +3518,10 @@ def try_baseline(
                             # Update anchor markers
                             try:
                                 fig_m.data[1].x = ap_sorted
-                                fig_m.data[1].y = [float(ys[int(np.nanargmin(np.abs(xs - ax)))]) for ax in ap_sorted]
+                                fig_m.data[1].y = [
+                                    float(ys[int(np.nanargmin(np.abs(xs - ax)))])
+                                    for ax in ap_sorted
+                                ]
                             except Exception:
                                 pass
                             # Recompute or clear baseline/corrected
@@ -2814,9 +3548,13 @@ def try_baseline(
                             pass
                         try:
                             if x_range_corr:
-                                fig_corr.update_xaxes(range=x_range_corr, autorange=False)
+                                fig_corr.update_xaxes(
+                                    range=x_range_corr, autorange=False
+                                )
                             if y_range_corr:
-                                fig_corr.update_yaxes(range=y_range_corr, autorange=False)
+                                fig_corr.update_yaxes(
+                                    range=y_range_corr, autorange=False
+                                )
                         except Exception:
                             pass
 
@@ -2828,9 +3566,17 @@ def try_baseline(
                         xs = np.asarray(x, dtype=float)
                         ys = np.asarray(y, dtype=float)
                         ap_sorted = np.array(sorted(anchor_points), dtype=float)
-                        y_anchor = np.array([ys[int(np.nanargmin(np.abs(xs - ap)))] for ap in ap_sorted], dtype=float)
+                        y_anchor = np.array(
+                            [
+                                ys[int(np.nanargmin(np.abs(xs - ap)))]
+                                for ap in ap_sorted
+                            ],
+                            dtype=float,
+                        )
                         try:
-                            spline = CubicSpline(ap_sorted, y_anchor, bc_type=((1, 0.0), (1, 0.0)))
+                            spline = CubicSpline(
+                                ap_sorted, y_anchor, bc_type=((1, 0.0), (1, 0.0))
+                            )
                         except Exception:
                             spline = CubicSpline(ap_sorted, y_anchor)
                         baseline_vals = spline(xs).astype(float)
@@ -2838,13 +3584,30 @@ def try_baseline(
                         # Persist to DataFrame for this file
                         try:
                             FTIR_DataFrame.at[row.name, "Baseline Function"] = "Manual"
-                            FTIR_DataFrame.at[row.name, "Baseline Parameters"] = str({"anchor_points": [float(v) for v in ap_sorted.tolist()]})
-                            FTIR_DataFrame.at[row.name, "Baseline"] = baseline_vals.tolist()
-                            FTIR_DataFrame.at[row.name, "Baseline-Corrected Data"] = corrected.tolist()
+                            FTIR_DataFrame.at[row.name, "Baseline Parameters"] = str(
+                                {
+                                    "anchor_points": [
+                                        float(v) for v in ap_sorted.tolist()
+                                    ]
+                                }
+                            )
+                            FTIR_DataFrame.at[row.name, "Baseline"] = (
+                                baseline_vals.tolist()
+                            )
+                            FTIR_DataFrame.at[row.name, "Baseline-Corrected Data"] = (
+                                corrected.tolist()
+                            )
                         except Exception:
                             pass
                         with manual_out:
                             print("Saved manual baseline for this file.")
+                        try:
+                            if row is not None:
+                                _tb_changes.setdefault("saved_file", []).append(
+                                    (row.name, None)
+                                )
+                        except Exception:
+                            pass
 
                     def _save_material(_b=None):
                         if row is None or len(anchor_points) < 2:
@@ -2856,31 +3619,43 @@ def try_baseline(
                         try:
                             msk = FTIR_DataFrame["Material"] == mat_val
                             FTIR_DataFrame.loc[msk, "Baseline Function"] = "Manual"
-                            FTIR_DataFrame.loc[msk, "Baseline Parameters"] = str({"anchor_points": [float(v) for v in ap_sorted]})
+                            FTIR_DataFrame.loc[msk, "Baseline Parameters"] = str(
+                                {"anchor_points": [float(v) for v in ap_sorted]}
+                            )
                         except Exception:
                             pass
                         with manual_out:
-                            print(f"Saved manual anchor points for material '{mat_val}'.")
+                            print(
+                                f"Saved manual anchor points for material '{mat_val}'."
+                            )
+                        try:
+                            _tb_changes["saved_filtered"] = int(
+                                _tb_changes.get("saved_filtered", 0)
+                            ) + int(msk.sum())
+                        except Exception:
+                            pass
 
                     def _close_m(_b=None):
+                        # Show session summary and collapse UI to summary only
                         try:
-                            fig_m.close()
+                            lines = _session_summary_lines(
+                                _tb_changes, context="try_baseline"
+                            )
+                            _emit_session_summary(
+                                manual_out, lines, title="Baseline session summary"
+                            )
                         except Exception:
                             pass
                         try:
-                            fig_corr.close()
+                            # Replace UI with summary output
+                            container.children = (widgets.VBox([manual_out]),)
                         except Exception:
-                            pass
-                        try:
-                            manual_container.close()
-                        except Exception:
-                            pass
-                        try:
-                            for _w in (manual_container, fig_m, fig_corr):
-                                if _w in _TB_WIDGETS:
-                                    _TB_WIDGETS.remove(_w)
-                        except Exception:
-                            pass
+                            # Fallback: close figures
+                            try:
+                                fig_m.close()
+                                fig_corr.close()
+                            except Exception:
+                                pass
 
                     continue_btn.on_click(_continue)
                     redo_btn.on_click(_redo)
@@ -2892,7 +3667,8 @@ def try_baseline(
                     # Filter/spectrum observers for manual mode
                     def _on_mat_m(change):
                         if change.get("name") == "value":
-                            _rebuild_conditions_options(); _build_spectrum_options()
+                            _rebuild_conditions_options()
+                            _build_spectrum_options()
                             # Reset selection on filter change
                             try:
                                 anchor_points.clear()
@@ -2913,6 +3689,7 @@ def try_baseline(
                                 _refresh_mark_btns_m()
                             except Exception:
                                 pass
+
                     def _on_cond_m(change):
                         if change.get("name") == "value":
                             _build_spectrum_options()
@@ -2933,24 +3710,40 @@ def try_baseline(
                                 _refresh_mark_btns_m()
                             except Exception:
                                 pass
+
                     def _on_inc_m(change):
                         if change.get("name") == "value":
                             _build_spectrum_options()
+
                     def _on_spec_m(change):
-                        if change.get("name") == "value" and change.get("new") is not None:
+                        if (
+                            change.get("name") == "value"
+                            and change.get("new") is not None
+                        ):
                             try:
                                 sel_idx3 = change.get("new")
                                 r3 = FTIR_DataFrame.loc[sel_idx3]
                                 nonlocal row, x, y, material
                                 row = r3
                                 material = r3.get("Material", material)
-                                x = (ast.literal_eval(r3["X-Axis"]) if isinstance(r3["X-Axis"], str) else r3["X-Axis"])
-                                y = (ast.literal_eval(r3["Raw Data"]) if isinstance(r3["Raw Data"], str) else r3["Raw Data"])
+                                x = (
+                                    ast.literal_eval(r3["X-Axis"])
+                                    if isinstance(r3["X-Axis"], str)
+                                    else r3["X-Axis"]
+                                )
+                                y = (
+                                    ast.literal_eval(r3["Raw Data"])
+                                    if isinstance(r3["Raw Data"], str)
+                                    else r3["Raw Data"]
+                                )
                                 y_arr = np.asarray(y, dtype=float)
                                 x_arr = np.asarray(x, dtype=float)
-                                fig_m.data[0].x = x_arr; fig_m.data[0].y = y_arr
+                                fig_m.data[0].x = x_arr
+                                fig_m.data[0].y = y_arr
                                 # reset anchors and preview
-                                anchor_points.clear(); fig_m.data[1].x = []; fig_m.data[1].y = []
+                                anchor_points.clear()
+                                fig_m.data[1].x = []
+                                fig_m.data[1].y = []
                                 while len(fig_m.data) > 2:
                                     fig_m.data = tuple(fig_m.data[:2])
                                 fig_corr.data[0].x = []
@@ -2962,20 +3755,45 @@ def try_baseline(
                                 except Exception:
                                     pass
                                 _refresh_mark_btns_m()
-                                _set_session_selection(material=row.get("Material"), conditions=row.get("Conditions"), time=row.get("Time"))
+                                _set_session_selection(
+                                    material=row.get("Material"),
+                                    conditions=row.get("Conditions"),
+                                    time=row.get("Time"),
+                                )
                             except Exception:
                                 pass
+
                     def _on_base_m(change):
                         if change.get("name") == "value":
                             new_b = str(change.get("new")).upper()
-                            if new_b != "MANUAL":
-                                # Switch away: close manual UI and rebuild param UI for new baseline
+                            if new_b == "MANUAL":
+                                return  # already in manual mode
+                            # Switch to automated baseline inline: detach manual observer, attach full observer
+                            try:
+                                baseline_dd.unobserve(_on_base_m, names="value")
+                            except Exception:
+                                pass
+                            # Close manual figures
+                            try:
+                                fig_m.close()
+                                fig_corr.close()
+                            except Exception:
+                                pass
+                            # Reattach automated observer if not present
+                            try:
+                                baseline_dd.observe(_on_base_full, names="value")
+                            except Exception:
+                                pass
+                            # Invoke automated baseline rebuild logic
+                            try:
+                                _on_base_full({"name": "value", "new": new_b})
+                            except Exception:
+                                # Fallback: set dropdown value triggers original observer
                                 try:
-                                    fig_m.close(); fig_corr.close(); manual_container.close()
+                                    baseline_dd.value = new_b
                                 except Exception:
                                     pass
-                                try_baseline(FTIR_DataFrame, material=material, baseline_function=new_b, filepath=filepath)
-                                return
+                            return
 
                     material_dd.observe(_on_mat_m, names="value")
                     conditions_dd.observe(_on_cond_m, names="value")
@@ -2984,196 +3802,824 @@ def try_baseline(
                     baseline_dd.observe(_on_base_m, names="value")
 
                     # Compose UI
-                    controls_row_top = widgets.HBox([material_dd, conditions_dd, include_bad_cb, baseline_dd])
+                    controls_row_top = widgets.HBox(
+                        [material_dd, conditions_dd, include_bad_cb, baseline_dd]
+                    )
                     spec_row = widgets.HBox([spectrum_sel])
                     mark_row_m = widgets.HBox([mark_bad_btn_m, mark_good_btn_m])
-                    btn_row_m = widgets.HBox([continue_btn, redo_btn, undo_btn, save_file_btn_m, save_mat_btn_m, close_btn_m])
-                    manual_container = widgets.VBox([controls_row_top, spec_row, fig_m, fig_corr, manual_out, mark_row_m, btn_row_m])
-                    display(manual_container)
+                    btn_row_m = widgets.HBox(
+                        [
+                            continue_btn,
+                            redo_btn,
+                            undo_btn,
+                            save_file_btn_m,
+                            save_mat_btn_m,
+                            close_btn_m,
+                        ]
+                    )
+                    manual_ui = widgets.VBox(
+                        [
+                            controls_row_top,
+                            spec_row,
+                            # Colab-safe anchor input row (always shown; users in Jupyter can use either clicks or text)
+                            widgets.HBox([anchor_input, add_anchor_btn]),
+                            fig_m,
+                            fig_corr,
+                            manual_out,
+                            mark_row_m,
+                            btn_row_m,
+                        ]
+                    )
+                    # Swap into existing container inline
                     try:
-                        _TB_WIDGETS.extend([manual_container, fig_m, fig_corr])
+                        container.children = (manual_ui, output)
+                    except Exception:
+                        display(widgets.VBox([manual_ui, output]))
+                    try:
+                        _TB_WIDGETS.extend([fig_m, fig_corr])
                     except Exception:
                         pass
                     _refresh_mark_btns_m()
 
                 # If MANUAL, build manual UI and return
                 if baseline_function.upper() == "MANUAL":
-                    _build_manual_ui()
+                    try:
+                        _build_manual_ui()
+                    except Exception as e:
+                        with output:
+                            try:
+                                clear_output(wait=True)
+                                print(f"Error building manual UI: {e}")
+                            except Exception:
+                                pass
                     return
 
                 # Otherwise, proceed to rebuild parameter widgets (refresh defaults for selected baseline)
                 nonlocal param_widgets
                 param_widgets = {}
                 parameters_local = _get_default_parameters(baseline_function)
-                parameters_local = _cast_parameter_types(baseline_function, parameters_local)
+                parameters_local = _cast_parameter_types(
+                    baseline_function, parameters_local
+                )
                 if baseline_function.upper() == "ARPLS":
-                    param_widgets["lam"] = widgets.FloatSlider(value=parameters_local.get("lam", 1e5), min=1e4, max=1e6, step=1e4, description="Smoothness (lam)", readout_format=".1e", continuous_update=False, style={"description_width": "auto"})
-                    param_widgets["max_iter"] = widgets.IntSlider(value=parameters_local.get("max_iter", 50), min=1, max=200, step=1, description="Max Iterations", continuous_update=False, style={"description_width": "auto"})
-                    param_widgets["tol"] = widgets.FloatSlider(value=parameters_local.get("tol", 1e-3), min=1e-6, max=1e-1, step=1e-4, description="Tolerance", readout_format=".1e", continuous_update=False, style={"description_width": "auto"})
+                    param_widgets["lam"] = widgets.FloatSlider(
+                        value=parameters_local.get("lam", 1e5),
+                        min=1e4,
+                        max=1e6,
+                        step=1e4,
+                        description="Smoothness (lam)",
+                        readout_format=".1e",
+                        continuous_update=False,
+                        style={"description_width": "auto"},
+                    )
+                    param_widgets["max_iter"] = widgets.IntSlider(
+                        value=parameters_local.get("max_iter", 50),
+                        min=1,
+                        max=200,
+                        step=1,
+                        description="Max Iterations",
+                        continuous_update=False,
+                        style={"description_width": "auto"},
+                    )
+                    param_widgets["tol"] = widgets.FloatSlider(
+                        value=parameters_local.get("tol", 1e-3),
+                        min=1e-6,
+                        max=1e-1,
+                        step=1e-4,
+                        description="Tolerance",
+                        readout_format=".1e",
+                        continuous_update=False,
+                        style={"description_width": "auto"},
+                    )
                 elif baseline_function.upper() == "IRSQR":
-                    param_widgets["lam"] = widgets.FloatSlider(value=parameters_local.get("lam", 1e6), min=1e5, max=1e7, step=1e5, description="Smoothness (lam)", readout_format=".1e", continuous_update=False, style={"description_width": "auto"})
-                    param_widgets["quantile"] = widgets.FloatSlider(value=parameters_local.get("quantile", 0.05), min=0.001, max=0.5, step=0.001, description="Quantile", readout_format=".3f", continuous_update=False, style={"description_width": "auto"})
-                    param_widgets["num_knots"] = widgets.IntSlider(value=parameters_local.get("num_knots", 100), min=5, max=500, step=5, description="Knots", continuous_update=False, style={"description_width": "auto"})
-                    param_widgets["spline_degree"] = widgets.IntSlider(value=parameters_local.get("spline_degree", 3), min=1, max=5, step=1, description="Spline Degree", continuous_update=False, style={"description_width": "auto"})
-                    param_widgets["diff_order"] = widgets.IntSlider(value=parameters_local.get("diff_order", 3), min=1, max=3, step=1, description="Differential Order", continuous_update=False, style={"description_width": "auto"})
-                    param_widgets["max_iter"] = widgets.IntSlider(value=parameters_local.get("max_iter", 100), min=1, max=1000, step=1, description="Max Iterations", continuous_update=False, style={"description_width": "auto"})
-                    param_widgets["tol"] = widgets.FloatSlider(value=parameters_local.get("tol", 1e-6), min=1e-10, max=1e-2, step=1e-7, description="Tolerance", readout_format=".1e", continuous_update=False, style={"description_width": "auto"})
+                    param_widgets["lam"] = widgets.FloatSlider(
+                        value=parameters_local.get("lam", 1e6),
+                        min=1e5,
+                        max=1e7,
+                        step=1e5,
+                        description="Smoothness (lam)",
+                        readout_format=".1e",
+                        continuous_update=False,
+                        style={"description_width": "auto"},
+                    )
+                    param_widgets["quantile"] = widgets.FloatSlider(
+                        value=parameters_local.get("quantile", 0.05),
+                        min=0.001,
+                        max=0.5,
+                        step=0.001,
+                        description="Quantile",
+                        readout_format=".3f",
+                        continuous_update=False,
+                        style={"description_width": "auto"},
+                    )
+                    param_widgets["num_knots"] = widgets.IntSlider(
+                        value=parameters_local.get("num_knots", 100),
+                        min=5,
+                        max=500,
+                        step=5,
+                        description="Knots",
+                        continuous_update=False,
+                        style={"description_width": "auto"},
+                    )
+                    param_widgets["spline_degree"] = widgets.IntSlider(
+                        value=parameters_local.get("spline_degree", 3),
+                        min=1,
+                        max=5,
+                        step=1,
+                        description="Spline Degree",
+                        continuous_update=False,
+                        style={"description_width": "auto"},
+                    )
+                    param_widgets["diff_order"] = widgets.IntSlider(
+                        value=parameters_local.get("diff_order", 3),
+                        min=1,
+                        max=3,
+                        step=1,
+                        description="Differential Order",
+                        continuous_update=False,
+                        style={"description_width": "auto"},
+                    )
+                    param_widgets["max_iter"] = widgets.IntSlider(
+                        value=parameters_local.get("max_iter", 100),
+                        min=1,
+                        max=1000,
+                        step=1,
+                        description="Max Iterations",
+                        continuous_update=False,
+                        style={"description_width": "auto"},
+                    )
+                    param_widgets["tol"] = widgets.FloatSlider(
+                        value=parameters_local.get("tol", 1e-6),
+                        min=1e-10,
+                        max=1e-2,
+                        step=1e-7,
+                        description="Tolerance",
+                        readout_format=".1e",
+                        continuous_update=False,
+                        style={"description_width": "auto"},
+                    )
                 elif baseline_function.upper() == "FABC":
-                    param_widgets["lam"] = widgets.FloatSlider(value=parameters_local.get("lam", 1e6), min=1e4, max=1e7, step=1e5, description="Smoothness (lam)", readout_format=".1e", continuous_update=False, style={"description_width": "auto"})
+                    param_widgets["lam"] = widgets.FloatSlider(
+                        value=parameters_local.get("lam", 1e6),
+                        min=1e4,
+                        max=1e7,
+                        step=1e5,
+                        description="Smoothness (lam)",
+                        readout_format=".1e",
+                        continuous_update=False,
+                        style={"description_width": "auto"},
+                    )
                     # scale recompute from selected spectrum
                     try:
-                        scale_default2 = int(np.clip(ceil(optimize_window(y) / 2), 2, 500))
+                        scale_default2 = int(
+                            np.clip(ceil(optimize_window(y) / 2), 2, 500)
+                        )
                     except Exception:
                         scale_default2 = 50
                     scale_val2 = parameters_local.get("scale") or scale_default2
-                    param_widgets["scale"] = widgets.IntSlider(value=int(scale_val2), min=2, max=500, step=1, description="Scale", continuous_update=False, style={"description_width": "auto"})
-                    param_widgets["num_std"] = widgets.FloatSlider(value=parameters_local.get("num_std", 3.0), min=1.5, max=4.5, step=0.1, description="Standard Deviations", readout_format=".2f", continuous_update=False, style={"description_width": "auto"})
-                    param_widgets["diff_order"] = widgets.IntSlider(value=parameters_local.get("diff_order", 2), min=1, max=3, step=1, description="Differential Order", continuous_update=False, style={"description_width": "auto"})
-                    param_widgets["min_length"] = widgets.IntSlider(value=parameters_local.get("min_length", 2), min=1, max=6, step=1, description="Min Baseline Span Length", continuous_update=False, style={"description_width": "auto"})
+                    param_widgets["scale"] = widgets.IntSlider(
+                        value=int(scale_val2),
+                        min=2,
+                        max=500,
+                        step=1,
+                        description="Scale",
+                        continuous_update=False,
+                        style={"description_width": "auto"},
+                    )
+                    param_widgets["num_std"] = widgets.FloatSlider(
+                        value=parameters_local.get("num_std", 3.0),
+                        min=1.5,
+                        max=4.5,
+                        step=0.1,
+                        description="Standard Deviations",
+                        readout_format=".2f",
+                        continuous_update=False,
+                        style={"description_width": "auto"},
+                    )
+                    param_widgets["diff_order"] = widgets.IntSlider(
+                        value=parameters_local.get("diff_order", 2),
+                        min=1,
+                        max=3,
+                        step=1,
+                        description="Differential Order",
+                        continuous_update=False,
+                        style={"description_width": "auto"},
+                    )
+                    param_widgets["min_length"] = widgets.IntSlider(
+                        value=parameters_local.get("min_length", 2),
+                        min=1,
+                        max=6,
+                        step=1,
+                        description="Min Baseline Span Length",
+                        continuous_update=False,
+                        style={"description_width": "auto"},
+                    )
                 # Build full UI identical to main branch
                 defaults_full = _get_default_parameters(baseline_function)
                 widget_rows_full = []
                 for k, w in param_widgets.items():
-                    rb = widgets.Button(description="Reset", button_style="info", layout=widgets.Layout(width="70px", margin="0 0 6px 8px"))
+                    rb = widgets.Button(
+                        description="Reset",
+                        button_style="info",
+                        layout=widgets.Layout(width="70px", margin="0 0 6px 8px"),
+                    )
                     if k == "scale":
+
                         def _reset_scale2(_b=None, w=w):
                             try:
-                                new_def = int(np.clip(ceil(optimize_window(y) / 2), 2, 500))
+                                new_def = int(
+                                    np.clip(ceil(optimize_window(y) / 2), 2, 500)
+                                )
                                 w.value = new_def
                             except Exception:
                                 pass
+
                         rb.on_click(_reset_scale2)
                     else:
                         rv = defaults_full.get(k, w.value)
+
                         def make_reset_f(w2, val2):
                             return lambda _b=None: setattr(w2, "value", val2)
+
                         rb.on_click(make_reset_f(w, rv))
                     widget_rows_full.append(widgets.HBox([w, rb]))
-                reset_all_btn2 = widgets.Button(description="Reset All", button_style="warning", layout=widgets.Layout(width="90px", margin="10px 10px 0 0"))
+
+                # Add a collapsible 'Parameter Details' toggle below the parameter widgets.
+                # Clicking toggles visibility of the explanatory text; button persists for hide/show.
+                def _make_param_details_row(name: str):
+                    name = str(name).upper().strip()
+                    if name == "ARPLS":
+                        txt = (
+                            "lam (float): Smoothness parameter (higher = smoother baseline).\n\n"
+                            "max_iter (integer): Max number of fit iterations.\n\n"
+                            "tol (float): Exit criteria (accuracy goal)."
+                        )
+                    elif name == "IRSQR":
+                        txt = (
+                            "lam (float): The smoothing parameter (higher = smoother baseline).\n\n"
+                            "quantile (float): The quantile at which to fit the baseline (0 < quantile < 1).\n\n"
+                            "num_knots (integer): The number of knots for the spline.\n\n"
+                            "spline_degree (integer): The degree of the spline.\n\n"
+                            "diff_order (integer): The order of the differential matrix. Typical values are 3, 2, or 1.\n\n"
+                            "max_iter (integer): The max number of fit iterations.\n\n"
+                            "tol (float): Exit criteria (accuracy goal)."
+                        )
+                    elif name == "FABC":
+                        txt = (
+                            "lam (float): The smoothing parameter (higher = smoother baseline).\n\n"
+                            "scale (integer): The scale at which to calculate the continuous wavelet transform. Should be approximately equal to the index-based full-width-at-half-maximum of the peaks or features in the data. Default is None, which will use half of the value from :func:`.optimize_window`, which is not always a good value, but at least scales with the number of data points and gives a starting point for tuning the parameter.\n\n"
+                            "num_std (float): The number of standard deviations to include when thresholding. Higher values\n"
+                            "will assign more points as baseline.\n\n"
+                            "diff_order (integer): The order of the differential matrix. Must be greater than 0. Typical values are 2 or 1.\n\n"
+                            "min_length (integer): Any region of consecutive baseline points less than `min_length` is considered to be a false positive and all points in the region are converted to peak points. A higher `min_length` ensures less points are falsely assigned as baseline points. Default is 2, which only removes lone baseline points."
+                        )
+                    else:
+                        txt = ""
+
+                    toggle = widgets.ToggleButton(
+                        value=_TB_PARAM_DETAILS_OPEN,
+                        description="Parameter Details",
+                        button_style="info",
+                        icon="chevron-down",
+                    )
+                    details = widgets.HTML(
+                        value=f"<pre style='white-space:pre-wrap;margin:0'>{txt}</pre>"
+                    )
+                    # Hide details by default
+                    try:
+                        details.layout.display = (
+                            "" if _TB_PARAM_DETAILS_OPEN else "none"
+                        )
+                    except Exception:
+                        pass
+
+                    def _on_toggle(change):
+                        if change.get("name") == "value":
+                            show = bool(change.get("new"))
+                            global _TB_PARAM_DETAILS_OPEN
+                            _TB_PARAM_DETAILS_OPEN = show
+                            try:
+                                details.layout.display = "" if show else "none"
+                            except Exception:
+                                pass
+                            try:
+                                toggle.icon = "chevron-up" if show else "chevron-down"
+                            except Exception:
+                                pass
+
+                    try:
+                        toggle.observe(_on_toggle, names="value")
+                    except Exception:
+                        pass
+                    return widgets.VBox([toggle, details])
+
+                # Append the details row as its own row in the UI
+                try:
+                    widget_rows_full.append(_make_param_details_row(baseline_function))
+                except Exception:
+                    pass
+                reset_all_btn2 = widgets.Button(
+                    description="Reset All",
+                    button_style="warning",
+                    layout=widgets.Layout(width="90px", margin="10px 10px 0 0"),
+                )
+
                 def _reset_all2(_b=None):
                     for kk, ww in param_widgets.items():
                         if kk == "scale":
                             try:
-                                ww.value = int(np.clip(ceil(optimize_window(y) / 2), 2, 500))
+                                ww.value = int(
+                                    np.clip(ceil(optimize_window(y) / 2), 2, 500)
+                                )
                             except Exception:
                                 pass
                         elif kk in defaults_full:
                             ww.value = defaults_full[kk]
+
                 reset_all_btn2.on_click(_reset_all2)
-                save_file_btn2 = widgets.Button(description="Save for file", button_style="success", layout=widgets.Layout(margin="10px 10px 0 0"))
-                save_material_btn2 = widgets.Button(description="Save for material", button_style="info", layout=widgets.Layout(margin="10px 10px 0 0"))
-                mark_bad_btn2 = widgets.Button(description="Mark as bad", button_style="danger", layout=widgets.Layout(margin="10px 10px 0 0"))
-                mark_good_btn2 = widgets.Button(description="Mark as good", button_style="success", layout=widgets.Layout(margin="10px 10px 0 0"))
-                close_btn2 = widgets.Button(description="Close", button_style="danger", layout=widgets.Layout(margin="10px 0 0 0"))
-                def _refresh_mark_btns2():
+                save_file_btn2 = widgets.Button(
+                    description="Save for file",
+                    button_style="success",
+                    layout=widgets.Layout(margin="10px 10px 0 0"),
+                )
+                save_material_btn2 = widgets.Button(
+                    description="Save for material",
+                    button_style="info",
+                    layout=widgets.Layout(margin="10px 10px 0 0"),
+                )
+                mark_bad_btn2, mark_good_btn2, _refresh_mark_btns2 = (
+                    _make_quality_controls(
+                        FTIR_DataFrame, lambda: row, margin="10px 10px 0 0"
+                    )
+                )
+                close_btn2 = widgets.Button(
+                    description="Close",
+                    button_style="danger",
+                    layout=widgets.Layout(margin="10px 0 0 0"),
+                )
+
+                # Track quality changes
+                def _log_mark_bad2(_b=None):
                     try:
-                        qcol = _quality_column_name(FTIR_DataFrame)
-                        st = FTIR_DataFrame.at[row.name, qcol]
-                        is_bad = str(st).strip().lower() == "bad"
-                        mark_bad_btn2.layout.display = "none" if is_bad else ""
-                        mark_good_btn2.layout.display = "" if is_bad else "none"
-                    except Exception:
-                        pass
-                # Click handlers to mirror plot_grouped_spectra behavior: update Quality and toggle visibility
-                def _mark_bad2(_b=None):
-                    try:
-                        qcol = _quality_column_name(FTIR_DataFrame)
-                        FTIR_DataFrame.at[row.name, qcol] = "bad"
-                    except Exception:
-                        pass
-                    try:
-                        mark_bad_btn2.layout.display = "none"
-                        mark_good_btn2.layout.display = ""
+                        if row is not None:
+                            _tb_changes.setdefault("quality", []).append(
+                                (row.name, "bad")
+                            )
                     except Exception:
                         pass
 
-                def _mark_good2(_b=None):
+                def _log_mark_good2(_b=None):
                     try:
-                        qcol = _quality_column_name(FTIR_DataFrame)
-                        FTIR_DataFrame.at[row.name, qcol] = "good"
+                        if row is not None:
+                            _tb_changes.setdefault("quality", []).append(
+                                (row.name, "good")
+                            )
                     except Exception:
                         pass
-                    try:
-                        mark_bad_btn2.layout.display = ""
-                        mark_good_btn2.layout.display = "none"
-                    except Exception:
-                        pass
-                mark_bad_btn2.on_click(_mark_bad2)
-                mark_good_btn2.on_click(_mark_good2)
+
+                try:
+                    mark_bad_btn2.on_click(_log_mark_bad2)
+                    mark_good_btn2.on_click(_log_mark_good2)
+                except Exception:
+                    pass
+
                 def _current_params2():
                     cur = parameters_local.copy()
                     for kk, ww in param_widgets.items():
                         cur[kk] = ww.value
                     return _cast_parameter_types(baseline_function, cur)
+
                 def _serialize2(d):
                     def to_plain(v):
                         try:
-                            if isinstance(v, (np.integer,)): return int(v)
-                            if isinstance(v, (np.floating,)): return float(v)
-                            if isinstance(v, np.ndarray): return v.tolist()
-                        except Exception: pass
+                            if isinstance(v, (np.integer,)):
+                                return int(v)
+                            if isinstance(v, (np.floating,)):
+                                return float(v)
+                            if isinstance(v, np.ndarray):
+                                return v.tolist()
+                        except Exception:
+                            pass
                         return v
+
                     return {kk: to_plain(vv) for kk, vv in d.items()}
+
                 def _save_file2(_b=None):
-                    if row is None: return
+                    if row is None:
+                        return
                     pv = _serialize2(_current_params2())
-                    FTIR_DataFrame.at[row.name, "Baseline Function"] = baseline_function.upper()
+                    FTIR_DataFrame.at[row.name, "Baseline Function"] = (
+                        baseline_function.upper()
+                    )
                     FTIR_DataFrame.at[row.name, "Baseline Parameters"] = str(pv)
-                    note = widgets.Output(); display(note)
+                    note = widgets.Output()
+                    display(note)
                     with note:
                         print("Saved baseline settings for this file.")
+                    try:
+                        _tb_changes.setdefault("saved_file", []).append(
+                            (row.name, None)
+                        )
+                    except Exception:
+                        pass
+
                 def _save_material2(_b=None):
-                    if row is None: return
+                    if row is None:
+                        return
                     pv = _serialize2(_current_params2())
                     mat_val = row.get("Material", material)
                     msk = FTIR_DataFrame["Material"] == mat_val
-                    FTIR_DataFrame.loc[msk, "Baseline Function"] = baseline_function.upper()
+                    FTIR_DataFrame.loc[msk, "Baseline Function"] = (
+                        baseline_function.upper()
+                    )
                     FTIR_DataFrame.loc[msk, "Baseline Parameters"] = str(pv)
-                    note = widgets.Output(); display(note)
+                    note = widgets.Output()
+                    display(note)
                     with note:
                         print(f"Saved baseline settings for material '{mat_val}'.")
-                save_file_btn2.on_click(_save_file2)
-                save_material_btn2.on_click(_save_material2)
-                def _close_full2(_b=None):
-                    try: plt.close("all")
-                    except Exception: pass
-                    try: full_container.close()
-                    except Exception: pass
                     try:
-                        if full_container in _TB_WIDGETS:
-                            _TB_WIDGETS.remove(full_container)
+                        _tb_changes["saved_filtered"] = int(
+                            _tb_changes.get("saved_filtered", 0)
+                        ) + int(msk.sum())
                     except Exception:
                         pass
+
+                save_file_btn2.on_click(_save_file2)
+                save_material_btn2.on_click(_save_material2)
+
+                def _close_full2(_b=None):
+                    # Emit summary and collapse UI to summary output
+                    try:
+                        lines = _session_summary_lines(
+                            _tb_changes, context="try_baseline"
+                        )
+                        _emit_session_summary(
+                            output, lines, title="Baseline session summary"
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        container.children = (output,)
+                    except Exception:
+                        try:
+                            plt.close("all")
+                        except Exception:
+                            pass
+
                 close_btn2.on_click(_close_full2)
+
                 # Observers for filters in full mode
                 def _on_mat_full(change):
                     if change.get("name") == "value":
-                        _rebuild_conditions_options(); _build_spectrum_options(); _plot_baseline(**{kk: ww.value for kk, ww in param_widgets.items()}); _refresh_mark_btns2()
+                        _rebuild_conditions_options()
+                        _build_spectrum_options()
+                        _plot_baseline(
+                            **{kk: ww.value for kk, ww in param_widgets.items()}
+                        )
+                        _refresh_mark_btns2()
+
                 def _on_cond_full(change):
                     if change.get("name") == "value":
-                        _build_spectrum_options(); _plot_baseline(**{kk: ww.value for kk, ww in param_widgets.items()}); _refresh_mark_btns2()
+                        _build_spectrum_options()
+                        _plot_baseline(
+                            **{kk: ww.value for kk, ww in param_widgets.items()}
+                        )
+                        _refresh_mark_btns2()
+
                 def _on_inc_full(change):
                     if change.get("name") == "value":
-                        _build_spectrum_options(); _plot_baseline(**{kk: ww.value for kk, ww in param_widgets.items()}); _refresh_mark_btns2()
+                        _build_spectrum_options()
+                        _plot_baseline(
+                            **{kk: ww.value for kk, ww in param_widgets.items()}
+                        )
+                        _refresh_mark_btns2()
+
                 def _on_base_full(change):
-                    if change.get("name") == "value":
-                        new_val = str(change.get("new")).upper()
-                        if new_val == "MANUAL":
-                            # Switch to manual mode inline
-                            try:
-                                full_container.close()
-                            except Exception:
-                                pass
-                            nonlocal baseline_function
-                            baseline_function = new_val
-                            _build_manual_ui()
-                            return
-                        # Switch to non-manual: rebuild by re-entering function
-                        try_baseline(FTIR_DataFrame, material=material, baseline_function=new_val, filepath=filepath)
+                    if change.get("name") != "value":
+                        return
+                    new_val = str(change.get("new")).upper()
+                    nonlocal baseline_function, param_widgets
+                    if new_val == "MANUAL":
+                        baseline_function = new_val
+                        _build_manual_ui()
+                        return
+                    # Rebuild the parameter UI inline for the selected baseline without re-entering the function
+                    baseline_function = new_val
+                    # Recreate parameter widgets for the new method
+                    param_widgets = {}
+                    params_local = _get_default_parameters(baseline_function)
+                    params_local = _cast_parameter_types(
+                        baseline_function, params_local
+                    )
+                    if baseline_function == "ARPLS":
+                        param_widgets["lam"] = widgets.FloatSlider(
+                            value=params_local.get("lam", 1e5),
+                            min=1e4,
+                            max=1e6,
+                            step=1e4,
+                            description="Smoothness (lam)",
+                            readout_format=".1e",
+                            continuous_update=False,
+                            style={"description_width": "auto"},
+                        )
+                        param_widgets["max_iter"] = widgets.IntSlider(
+                            value=params_local.get("max_iter", 50),
+                            min=1,
+                            max=200,
+                            step=1,
+                            description="Max Iterations",
+                            continuous_update=False,
+                            style={"description_width": "auto"},
+                        )
+                        param_widgets["tol"] = widgets.FloatSlider(
+                            value=params_local.get("tol", 1e-3),
+                            min=1e-6,
+                            max=1e-1,
+                            step=1e-4,
+                            description="Tolerance",
+                            readout_format=".1e",
+                            continuous_update=False,
+                            style={"description_width": "auto"},
+                        )
+                    elif baseline_function == "IRSQR":
+                        param_widgets["lam"] = widgets.FloatSlider(
+                            value=params_local.get("lam", 1e6),
+                            min=1e5,
+                            max=1e7,
+                            step=1e5,
+                            description="Smoothness (lam)",
+                            readout_format=".1e",
+                            continuous_update=False,
+                            style={"description_width": "auto"},
+                        )
+                        param_widgets["quantile"] = widgets.FloatSlider(
+                            value=params_local.get("quantile", 0.05),
+                            min=0.001,
+                            max=0.5,
+                            step=0.001,
+                            description="Quantile",
+                            readout_format=".3f",
+                            continuous_update=False,
+                            style={"description_width": "auto"},
+                        )
+                        param_widgets["num_knots"] = widgets.IntSlider(
+                            value=params_local.get("num_knots", 100),
+                            min=5,
+                            max=500,
+                            step=5,
+                            description="Knots",
+                            continuous_update=False,
+                            style={"description_width": "auto"},
+                        )
+                        param_widgets["spline_degree"] = widgets.IntSlider(
+                            value=params_local.get("spline_degree", 3),
+                            min=1,
+                            max=5,
+                            step=1,
+                            description="Spline Degree",
+                            continuous_update=False,
+                            style={"description_width": "auto"},
+                        )
+                        param_widgets["diff_order"] = widgets.IntSlider(
+                            value=params_local.get("diff_order", 3),
+                            min=1,
+                            max=3,
+                            step=1,
+                            description="Differential Order",
+                            continuous_update=False,
+                            style={"description_width": "auto"},
+                        )
+                        param_widgets["max_iter"] = widgets.IntSlider(
+                            value=params_local.get("max_iter", 100),
+                            min=1,
+                            max=1000,
+                            step=1,
+                            description="Max Iterations",
+                            continuous_update=False,
+                            style={"description_width": "auto"},
+                        )
+                        param_widgets["tol"] = widgets.FloatSlider(
+                            value=params_local.get("tol", 1e-6),
+                            min=1e-10,
+                            max=1e-2,
+                            step=1e-7,
+                            description="Tolerance",
+                            readout_format=".1e",
+                            continuous_update=False,
+                            style={"description_width": "auto"},
+                        )
+                    elif baseline_function == "FABC":
+                        param_widgets["lam"] = widgets.FloatSlider(
+                            value=params_local.get("lam", 1e6),
+                            min=1e4,
+                            max=1e7,
+                            step=1e5,
+                            description="Smoothness (lam)",
+                            readout_format=".1e",
+                            continuous_update=False,
+                            style={"description_width": "auto"},
+                        )
+                        try:
+                            scale_default3 = int(
+                                np.clip(ceil(optimize_window(y) / 2), 2, 500)
+                            )
+                        except Exception:
+                            scale_default3 = 50
+                        scale_val3 = params_local.get("scale") or scale_default3
+                        param_widgets["scale"] = widgets.IntSlider(
+                            value=int(scale_val3),
+                            min=2,
+                            max=500,
+                            step=1,
+                            description="Scale",
+                            continuous_update=False,
+                            style={"description_width": "auto"},
+                        )
+                        param_widgets["num_std"] = widgets.FloatSlider(
+                            value=params_local.get("num_std", 3.0),
+                            min=1.5,
+                            max=4.5,
+                            step=0.1,
+                            description="Standard Deviations",
+                            readout_format=".2f",
+                            continuous_update=False,
+                            style={"description_width": "auto"},
+                        )
+                        param_widgets["diff_order"] = widgets.IntSlider(
+                            value=params_local.get("diff_order", 2),
+                            min=1,
+                            max=3,
+                            step=1,
+                            description="Differential Order",
+                            continuous_update=False,
+                            style={"description_width": "auto"},
+                        )
+                        param_widgets["min_length"] = widgets.IntSlider(
+                            value=params_local.get("min_length", 2),
+                            min=1,
+                            max=6,
+                            step=1,
+                            description="Min Baseline Span Length",
+                            continuous_update=False,
+                            style={"description_width": "auto"},
+                        )
+
+                    defaults_new = _get_default_parameters(baseline_function)
+                    rows = []
+                    for k, w in param_widgets.items():
+                        rb = widgets.Button(
+                            description="Reset",
+                            button_style="info",
+                            layout=widgets.Layout(width="70px", margin="0 0 6px 8px"),
+                        )
+                        if k == "scale":
+
+                            def _reset_scale3(_b=None, w=w):
+                                try:
+                                    w.value = int(
+                                        np.clip(ceil(optimize_window(y) / 2), 2, 500)
+                                    )
+                                except Exception:
+                                    pass
+
+                            rb.on_click(_reset_scale3)
+                        else:
+                            rv = defaults_new.get(k, w.value)
+
+                            def make_reset_f2(w2, val2):
+                                return lambda _b=None: setattr(w2, "value", val2)
+
+                            rb.on_click(make_reset_f2(w, rv))
+                        rows.append(widgets.HBox([w, rb]))
+
+                    # Parameter details toggle
+                    try:
+                        rows.append(_make_param_details_row(baseline_function))
+                    except Exception:
+                        pass
+
+                    reset_all_btn3 = widgets.Button(
+                        description="Reset All",
+                        button_style="warning",
+                        layout=widgets.Layout(width="90px", margin="10px 10px 0 0"),
+                    )
+
+                    def _reset_all3(_b=None):
+                        for kk, ww in param_widgets.items():
+                            if kk == "scale":
+                                try:
+                                    ww.value = int(
+                                        np.clip(ceil(optimize_window(y) / 2), 2, 500)
+                                    )
+                                except Exception:
+                                    pass
+                            elif kk in defaults_new:
+                                ww.value = defaults_new[kk]
+
+                    reset_all_btn3.on_click(_reset_all3)
+
+                    save_file_btn3 = widgets.Button(
+                        description="Save for file",
+                        button_style="success",
+                        layout=widgets.Layout(margin="10px 10px 0 0"),
+                    )
+                    save_material_btn3 = widgets.Button(
+                        description="Save for material",
+                        button_style="info",
+                        layout=widgets.Layout(margin="10px 10px 0 0"),
+                    )
+                    mark_bad_btn3, mark_good_btn3, _refresh_mark_btns3 = (
+                        _make_quality_controls(
+                            FTIR_DataFrame, lambda: row, margin="10px 10px 0 0"
+                        )
+                    )
+                    close_btn3 = widgets.Button(
+                        description="Close",
+                        button_style="danger",
+                        layout=widgets.Layout(margin="10px 0 0 0"),
+                    )
+
+                    # Track quality changes for session summary
+                    def _log_mark_bad3(_b=None):
+                        try:
+                            if row is not None:
+                                _tb_changes.setdefault("quality", []).append(
+                                    (row.name, "bad")
+                                )
+                        except Exception:
+                            pass
+
+                    def _log_mark_good3(_b=None):
+                        try:
+                            if row is not None:
+                                _tb_changes.setdefault("quality", []).append(
+                                    (row.name, "good")
+                                )
+                        except Exception:
+                            pass
+
+                    try:
+                        mark_bad_btn3.on_click(_log_mark_bad3)
+                        mark_good_btn3.on_click(_log_mark_good3)
+                    except Exception:
+                        pass
+
+                    # Wire save/close handlers (quality handled by helper)
+                    save_file_btn3.on_click(_save_file2)
+                    save_material_btn3.on_click(_save_material2)
+                    close_btn3.on_click(_close_full2)
+
+                    mark_row3 = widgets.HBox([mark_bad_btn3, mark_good_btn3])
+                    footer3 = widgets.HBox(
+                        [save_file_btn3, save_material_btn3, reset_all_btn3, close_btn3]
+                    )
+                    ui_full_new = widgets.VBox(
+                        [
+                            widgets.HBox(
+                                [
+                                    material_dd,
+                                    conditions_dd,
+                                    include_bad_cb,
+                                    baseline_dd,
+                                ]
+                            ),
+                            widgets.HBox([spectrum_sel]),
+                        ]
+                        + rows
+                        + [mark_row3, footer3]
+                    )
+
+                    # Swap UI inline
+                    try:
+                        container.children = (ui_full_new, output)
+                    except Exception:
+                        display(widgets.VBox([ui_full_new, output]))
+
+                    # Observe parameter changes for live updates
+                    def _on_param_change3(change):
+                        if change.get("name") == "value":
+                            _plot_baseline(
+                                **{kk: ww.value for kk, ww in param_widgets.items()}
+                            )
+
+                    for _pw in param_widgets.values():
+                        try:
+                            _pw.observe(_on_param_change3, names="value")
+                        except Exception:
+                            pass
+
+                    # Refresh mark buttons and plot with new method
+                    try:
+                        _refresh_mark_btns3()
+                    except Exception:
+                        pass
+                    _plot_baseline(**{kk: ww.value for kk, ww in param_widgets.items()})
+
                 material_dd.observe(_on_mat_full, names="value")
                 conditions_dd.observe(_on_cond_full, names="value")
                 include_bad_cb.observe(_on_inc_full, names="value")
                 baseline_dd.observe(_on_base_full, names="value")
+
                 def _on_spec_full(change):
                     if change.get("name") == "value" and change.get("new") is not None:
                         try:
@@ -3182,44 +4628,80 @@ def try_baseline(
                             nonlocal row, x, y, material
                             row = rsel2
                             material = rsel2.get("Material", material)
-                            x = (ast.literal_eval(rsel2["X-Axis"]) if isinstance(rsel2["X-Axis"], str) else rsel2["X-Axis"])
-                            y = (ast.literal_eval(rsel2["Raw Data"]) if isinstance(rsel2["Raw Data"], str) else rsel2["Raw Data"])
+                            x = (
+                                ast.literal_eval(rsel2["X-Axis"])
+                                if isinstance(rsel2["X-Axis"], str)
+                                else rsel2["X-Axis"]
+                            )
+                            y = (
+                                ast.literal_eval(rsel2["Raw Data"])
+                                if isinstance(rsel2["Raw Data"], str)
+                                else rsel2["Raw Data"]
+                            )
                             y = np.array(y, dtype=float)
                             # If currently using MANUAL baseline, switch into the integrated inline manual UI
                             if baseline_function.upper() == "MANUAL":
-                                try:
-                                    full_container.close()
-                                except Exception:
-                                    pass
                                 _build_manual_ui()
                                 return
-                            if baseline_function.upper() == "FABC" and "scale" in param_widgets:
+                            if (
+                                baseline_function.upper() == "FABC"
+                                and "scale" in param_widgets
+                            ):
                                 try:
-                                    new_scale3 = int(np.clip(ceil(optimize_window(y) / 2), 2, 500))
+                                    new_scale3 = int(
+                                        np.clip(ceil(optimize_window(y) / 2), 2, 500)
+                                    )
                                     param_widgets["scale"].value = new_scale3
-                                except Exception: pass
-                            _plot_baseline(**{kk: ww.value for kk, ww in param_widgets.items()})
+                                except Exception:
+                                    pass
+                            _plot_baseline(
+                                **{kk: ww.value for kk, ww in param_widgets.items()}
+                            )
                             _refresh_mark_btns2()
-                            _set_session_selection(material=row.get("Material"), conditions=row.get("Conditions"), time=row.get("Time"))
+                            _set_session_selection(
+                                material=row.get("Material"),
+                                conditions=row.get("Conditions"),
+                                time=row.get("Time"),
+                            )
                         except Exception:
                             pass
+
                 spectrum_sel.observe(_on_spec_full, names="value")
-                # Build final UI
+                # Build final UI inside existing container (replace children to avoid flicker/disappearance)
                 if baseline_function.upper() != "MANUAL":
                     mark_row2 = widgets.HBox([mark_bad_btn2, mark_good_btn2])
-                    controls_footer2 = widgets.HBox([save_file_btn2, save_material_btn2, reset_all_btn2, close_btn2])
-                    ui_full = widgets.VBox([widgets.HBox([material_dd, conditions_dd, include_bad_cb, baseline_dd]), widgets.HBox([spectrum_sel])] + widget_rows_full + [mark_row2, controls_footer2])
-                    full_container = widgets.VBox([ui_full, output])
-                    display(full_container)
+                    controls_footer2 = widgets.HBox(
+                        [save_file_btn2, save_material_btn2, reset_all_btn2, close_btn2]
+                    )
+                    ui_full = widgets.VBox(
+                        [
+                            widgets.HBox(
+                                [
+                                    material_dd,
+                                    conditions_dd,
+                                    include_bad_cb,
+                                    baseline_dd,
+                                ]
+                            ),
+                            widgets.HBox([spectrum_sel]),
+                        ]
+                        + widget_rows_full
+                        + [mark_row2, controls_footer2]
+                    )
                     try:
-                        _TB_WIDGETS.extend([full_container])
+                        container.children = (ui_full, output)
                     except Exception:
-                        pass
+                        # Fallback to display if direct replacement fails
+                        display(widgets.VBox([ui_full, output]))
                     _refresh_mark_btns2()
+
                     # Parameter slider -> live plot updates
                     def _on_param_change(change):
                         if change.get("name") == "value":
-                            _plot_baseline(**{kk: ww.value for kk, ww in param_widgets.items()})
+                            _plot_baseline(
+                                **{kk: ww.value for kk, ww in param_widgets.items()}
+                            )
+
                     for _pw in param_widgets.values():
                         try:
                             _pw.observe(_on_param_change, names="value")
@@ -3232,19 +4714,19 @@ def try_baseline(
                     _build_manual_ui()
 
         def _on_close_min(_b=None):
+            # Emit summary (likely "No changes" if user didn't select anything) and collapse UI to summary output
             try:
-                plt.close("all")
+                lines = _session_summary_lines(_tb_changes, context="try_baseline")
+                _emit_session_summary(output, lines, title="Baseline session summary")
             except Exception:
                 pass
             try:
-                container.close()
+                container.children = (output,)
             except Exception:
-                pass
-            try:
-                if container in _TB_WIDGETS:
-                    _TB_WIDGETS.remove(container)
-            except Exception:
-                pass
+                try:
+                    plt.close("all")
+                except Exception:
+                    pass
 
         material_dd.observe(_on_mat_min, names="value")
         conditions_dd.observe(_on_cond_min, names="value")
@@ -3485,148 +4967,6 @@ def JSON_population(
     print(f"materials.json updated at: {materials_json_path}")
 
 
-def test_baseline_choices(FTIR_DataFrame, material=None):
-    """
-    Plot three random spectra for a given material, showing baseline results.
-
-    Plots raw data, baseline, and baseline-corrected data. The baseline function and
-    parameters are taken from the DataFrame columns. Assumes user has already filled
-    those columns earlier in the workflow.
-
-    Parameters
-    ----------
-    FTIR_DataFrame : pd.DataFrame
-        The DataFrame containing the spectral data.
-    material : str
-        The material to filter and plot.
-
-    Returns
-    -------
-    None
-    """
-    if material is None:
-        material = input(
-            "Enter the material to test baseline and parameter choices for: "
-        ).strip()
-    # Filter for the specified material
-    filtered = FTIR_DataFrame[FTIR_DataFrame["Material"] == material]
-    if len(filtered) < 1:
-        print(f"No rows found for material '{material}'.")
-        return
-    # Pick up to 3 random rows
-    n = min(3, len(filtered))
-    random_rows = filtered.sample(n=n, random_state=None)
-
-    fig, axes = plt.subplots(n, 2, figsize=(12, 4 * n), sharex=False)
-    if n == 1:
-        axes = [axes]  # Make iterable for single row
-
-    for i, (idx, row) in enumerate(random_rows.iterrows()):
-        # Parse x and y data
-        x = (
-            ast.literal_eval(row["X-Axis"])
-            if isinstance(row["X-Axis"], str)
-            else row["X-Axis"]
-        )
-        y = (
-            ast.literal_eval(row["Raw Data"])
-            if isinstance(row["Raw Data"], str)
-            else row["Raw Data"]
-        )
-        y = np.array(y, dtype=float)
-        baseline_func = row.get("Baseline Function", None)
-        # Robustly coerce parameters
-        raw_params = row.get("Baseline Parameters", {})
-        if isinstance(raw_params, dict):
-            params = raw_params.copy()
-        elif isinstance(raw_params, str) and raw_params.strip():
-            try:
-                maybe = ast.literal_eval(raw_params)
-                params = (
-                    maybe if isinstance(maybe, dict) else _parse_parameters(raw_params)
-                )
-            except Exception:
-                params = _parse_parameters(raw_params)
-        else:
-            params = {}
-
-        # Compute baseline
-        baseline = None
-        baseline_corrected = None
-        try:
-            if baseline_func is None:
-                raise ValueError("No baseline function specified.")
-            func = baseline_func.strip().upper()
-            # Merge with defaults and cast types
-            defaults = _get_default_parameters(func)
-            params = {**defaults, **params}
-            params = _cast_parameter_types(func, params)
-            if func == "ARPLS":
-                result = arpls(y, **params)
-            elif func == "IRSQR":
-                if "x_data" in params:
-                    result = irsqr(y, **params)
-                else:
-                    result = irsqr(y, **params, x_data=x)
-            elif func == "FABC":
-                result = fabc(y, **params)
-            elif func == "MANUAL":
-                anchor_points = params.get("anchor_points", [])
-                if not anchor_points:
-                    raise ValueError("No anchor_points for MANUAL baseline.")
-                anchor_indices = [
-                    min(range(len(x)), key=lambda i: abs(x[i] - ap))
-                    for ap in anchor_points
-                ]
-                y_anchor = [y[i] for i in anchor_indices]
-                result = CubicSpline(x=anchor_points, y=y_anchor, extrapolate=True)(x)
-            else:
-                raise ValueError(f"Unknown baseline function: {baseline_func}")
-            # Normalize return type to baseline array
-            if isinstance(result, tuple):
-                baseline = result[0]
-            elif isinstance(result, dict):
-                baseline = result.get("baseline", None)
-                if baseline is None:
-                    raise ValueError(
-                        "Baseline function did not return a baseline array."
-                    )
-            else:
-                baseline = result
-            baseline = np.asarray(baseline, dtype=float)
-            baseline_corrected = y - baseline
-        except Exception as e:
-            print(f"Error computing baseline for row {idx}: {e}")
-            print(f" - Baseline Function: {baseline_func}")
-            print(f" - Baseline Parameters: {params}")
-            print(f" - X-Axis shape: {np.shape(x)}, Raw Data shape: {np.shape(y)}")
-            baseline = np.full_like(y, np.nan)
-            baseline_corrected = np.full_like(y, np.nan)
-
-        # Plot raw and baseline
-        ax0 = axes[i][0] if n > 1 else axes[0]
-        ax0.plot(x, y, label="Raw Data")
-        if baseline is not None:
-            ax0.plot(x, baseline, "--", label="Baseline")
-        ax0.set_title(f"{material} | File: {row['File Name']}")
-        ax0.set_ylabel("Absorbance (AU)")
-        ax0.legend()
-
-        # Plot baseline-corrected
-        ax1 = axes[i][1] if n > 1 else axes[1]
-        if baseline_corrected is not None:
-            ax1.plot(
-                x, baseline_corrected, color="tab:green", label="Baseline-Corrected"
-            )
-        ax1.set_title("Baseline-Corrected")
-        ax1.set_xlabel("Wavenumber (cm¯¹)")
-        ax1.set_ylabel("Absorbance (AU)")
-        ax1.legend()
-
-    plt.tight_layout()
-    plt.show()
-
-
 def bring_in_DataFrame(DataFrame_path=None):
     """
     Load the CSV file into a pandas DataFrame.
@@ -3689,11 +5029,7 @@ def spectral_normalization(FTIR_DataFrame, filepath=None):
         FTIR_DataFrame[target_col] = None
 
     # Identify condition column name
-    cond_col = (
-        "Conditions"
-        if "Conditions" in FTIR_DataFrame.columns
-        else ("Condition" if "Condition" in FTIR_DataFrame.columns else None)
-    )
+    cond_col = _conditions_column_name(FTIR_DataFrame)
 
     # Build dropdown options
     try:
@@ -3706,37 +5042,8 @@ def spectral_normalization(FTIR_DataFrame, filepath=None):
     except Exception:
         df_all = FTIR_DataFrame
 
-    materials = (
-        sorted(
-            {
-                str(v)
-                for v in df_all.get("Material", pd.Series([], dtype=object))
-                .dropna()
-                .astype(str)
-                .unique()
-                .tolist()
-            }
-        )
-        if "Material" in df_all.columns
-        else []
-    )
-    cond_series = (
-        df_all[cond_col]
-        if cond_col and (cond_col in df_all.columns)
-        else pd.Series([], dtype=object)
-    )
-    conditions = (
-        sorted(
-            [
-                s
-                for s in [
-                    str(v) for v in cond_series.dropna().astype(str).unique().tolist()
-                ]
-                if s.strip().lower() != "unexposed"
-            ]
-        )
-        if cond_col
-        else []
+    materials, conditions = _extract_material_condition_lists(
+        df_all, exclude_unexposed=True
     )
 
     # Preselect by filepath/material if provided
@@ -3969,7 +5276,119 @@ def spectral_normalization(FTIR_DataFrame, filepath=None):
                 lo, hi = (min(a, b), max(a, b))
                 print(f"Selected normalization range: [{lo:.3f}, {hi:.3f}] cm⁻¹")
 
-    fig.data[0].on_click(_on_click)
+    # Decide interaction mode (click vs slider) based on Colab detection.
+    range_slider = None
+    range_lo_text = None
+    range_hi_text = None
+    range_apply_btn = None
+    if _IN_COLAB:
+        try:
+            # Determine global xmin/xmax across all spectra for slider bounds.
+            low_vals, high_vals = [], []
+            for idx_tmp in FTIR_DataFrame.index:
+                xv_tmp = _parse_seq(FTIR_DataFrame.loc[idx_tmp].get("X-Axis"))
+                if xv_tmp:
+                    low_vals.append(np.nanmin(xv_tmp))
+                    high_vals.append(np.nanmax(xv_tmp))
+            if low_vals and high_vals:
+                global_low = float(np.nanmin(low_vals))
+                global_high = float(np.nanmax(high_vals))
+            else:
+                global_low, global_high = 0.0, 1.0
+        except Exception:
+            global_low, global_high = 0.0, 1.0
+        step = (global_high - global_low) / 1000.0 or 1.0
+        range_slider = widgets.FloatRangeSlider(
+            value=[global_low, global_high],
+            min=global_low,
+            max=global_high,
+            step=step,
+            description="Range (cm⁻¹)",
+            continuous_update=False,
+            readout_format=".1f",
+            layout=widgets.Layout(width="90%"),
+        )
+        range_lo_text = widgets.FloatText(
+            value=global_low,
+            description="Low (cm⁻¹)",
+            layout=widgets.Layout(width="160px"),
+        )
+        range_hi_text = widgets.FloatText(
+            value=global_high,
+            description="High (cm⁻¹)",
+            layout=widgets.Layout(width="160px"),
+        )
+        range_apply_btn = widgets.Button(
+            description="Apply", button_style="info", layout=widgets.Layout(width="90px")
+        )
+        range_help = widgets.HTML(
+            "<span style='color:#555;font-size:12px;'>Colab: Type Low/High and click Apply, or drag the slider. Selection is clamped to data bounds.</span>"
+        )
+
+        def _on_range_slider(change):
+            if change.get("name") != "value":
+                return
+            try:
+                lo, hi = change.get("new")
+                # Sync text boxes
+                try:
+                    range_lo_text.value = float(lo)
+                    range_hi_text.value = float(hi)
+                except Exception:
+                    pass
+                selected_points.clear()
+                selected_points.extend([float(lo), float(hi)])
+                _clear_selection_visuals()
+                _draw_selection_visuals(float(lo), float(hi))
+                with msg_out:
+                    clear_output(wait=True)
+                    lo2, hi2 = (min(lo, hi), max(lo, hi))
+                    print(f"Selected normalization range (slider): [{lo2:.3f}, {hi2:.3f}] cm⁻¹")
+            except Exception:
+                pass
+        def _apply_text_range(_b=None):
+            try:
+                lo = float(range_lo_text.value)
+                hi = float(range_hi_text.value)
+            except Exception:
+                with msg_out:
+                    clear_output(wait=True)
+                    print("Invalid numeric input for Low/High.")
+                return
+            # Clamp/order
+            if lo > hi:
+                lo, hi = hi, lo
+            try:
+                lo_clamped = max(global_low, min(global_high, lo))
+                hi_clamped = max(global_low, min(global_high, hi))
+            except Exception:
+                lo_clamped, hi_clamped = lo, hi
+            # Update slider (which triggers its observer to update visuals & messages)
+            try:
+                range_slider.value = [float(lo_clamped), float(hi_clamped)]
+            except Exception:
+                pass
+            # In case observer didn't fire (same values), manually reflect
+            if len(selected_points) != 2 or selected_points[0] != lo_clamped or selected_points[1] != hi_clamped:
+                selected_points.clear()
+                selected_points.extend([float(lo_clamped), float(hi_clamped)])
+                _clear_selection_visuals()
+                _draw_selection_visuals(float(lo_clamped), float(hi_clamped))
+                with msg_out:
+                    clear_output(wait=True)
+                    print(f"Selected normalization range (typed): [{lo_clamped:.3f}, {hi_clamped:.3f}] cm⁻¹")
+
+        try:
+            range_apply_btn.on_click(_apply_text_range)
+        except Exception:
+            pass
+
+        range_slider.observe(_on_range_slider, names="value")
+    else:
+        try:
+            fig.data[0].on_click(_on_click)
+        except Exception:
+            pass
 
     def _current_range():
         if len(selected_points) != 2:
@@ -4128,31 +5547,33 @@ def spectral_normalization(FTIR_DataFrame, filepath=None):
     )
     redo_btn = widgets.Button(description="Redo", button_style="warning")
     cancel_btn = widgets.Button(description="Close", button_style="danger")
-    mark_bad_btn = widgets.Button(description="Mark as bad", button_style="danger")
-    mark_good_btn = widgets.Button(description="Mark as good", button_style="success")
+    # --- Change tracking (session summary on close) ---
+    # Store structured events so we can summarize intelligently.
+    _norm_changes = {
+        "range_file": [],  # list[(idx, range_str)] saved per file
+        "range_material": [],  # list[(material, count_rows, range_str)] saved per material
+        "normalized_materials": [],  # list[(material, updated_count, skipped_count)]
+        "quality": [],  # list[(idx, new_quality)]
+    }
+    # Use shared quality controls (mutually exclusive buttons)
+    mark_bad_btn, mark_good_btn, _refresh_mark_buttons = _make_quality_controls(
+        FTIR_DataFrame,
+        lambda: (
+            FTIR_DataFrame.loc[spectrum_sel.value]
+            if spectrum_sel.value is not None
+            else None
+        ),
+    )
     # Main control row excludes mark buttons; they go on their own row as a pair
     btn_box = widgets.HBox(
         [save_spec_btn, save_mat_btn, redo_btn, normalize_btn, cancel_btn]
     )
     mark_row = widgets.HBox([mark_bad_btn, mark_good_btn])
 
-    def _refresh_mark_buttons():
-        try:
-            idx = spectrum_sel.value
-            qcol = _quality_column_name(FTIR_DataFrame)
-            status = None
-            try:
-                if idx is not None:
-                    status = FTIR_DataFrame.at[idx, qcol]
-            except Exception:
-                status = None
-            is_bad = str(status).strip().lower() == "bad"
-            mark_bad_btn.layout.display = "none" if is_bad else ""
-            mark_good_btn.layout.display = "" if is_bad else "none"
-        except Exception:
-            pass
+    # Refresh function provided by helper; keep name for local uses
 
     def _finalize_and_clear():
+        # Detach click handler and close figure
         try:
             fig.data[0].on_click(None)
         except Exception:
@@ -4161,50 +5582,32 @@ def spectral_normalization(FTIR_DataFrame, filepath=None):
             fig.close()
         except Exception:
             pass
-        for w in (
+        # Close widgets created in this UI
+        widget_list = [
             save_spec_btn,
             save_mat_btn,
             normalize_btn,
             redo_btn,
             cancel_btn,
-            btn_box,
-            # Controls
+            mark_bad_btn,
+            mark_good_btn,
+            spectrum_sel,
             material_dd,
             conditions_dd,
             include_bad_cb,
-            spectrum_sel,
-            # Containers
-            # These may fail to close in some front-ends; wrap in try/except
-            'controls_row',  # placeholder marker; handled below
-            'spectrum_row',   # placeholder marker; handled below
-            'mark_row',       # placeholder marker; handled below
-            # Outputs
-            info_out,
-            msg_out,
-            # Mark buttons
-            mark_bad_btn,
-            mark_good_btn,
-        ):
+        ]
+        if range_slider is not None:
+            widget_list.append(range_slider)
+        for w in widget_list:
             try:
-                # Skip placeholder strings; close real widget objects below
-                if isinstance(w, str):
-                    continue
                 w.close()
             except Exception:
                 pass
-        # Best-effort: close row containers if available in this scope
-        try:
-            controls_row.close()
-        except Exception:
-            pass
-        try:
-            spectrum_row.close()
-        except Exception:
-            pass
-        try:
-            mark_row.close()
-        except Exception:
-            pass
+        for container in (controls_row, spectrum_row, mark_row, btn_box):
+            try:
+                container.close()
+            except Exception:
+                pass
 
     def _save_for_this_spectrum(_b=None):
         idx = spectrum_sel.value
@@ -4220,6 +5623,10 @@ def spectral_normalization(FTIR_DataFrame, filepath=None):
                 print("Please select two points before saving.")
             return
         FTIR_DataFrame.at[idx, target_col] = str(rng)
+        try:
+            _norm_changes["range_file"].append((idx, str(rng)))
+        except Exception:
+            pass
         with msg_out:
             clear_output(wait=True)
             print(f"Saved normalization peak range {rng} for this spectrum.")
@@ -4245,6 +5652,10 @@ def spectral_normalization(FTIR_DataFrame, filepath=None):
             return
         mask = FTIR_DataFrame["Material"] == mat
         FTIR_DataFrame.loc[mask, target_col] = str(rng)
+        try:
+            _norm_changes["range_material"].append((mat, int(mask.sum()), str(rng)))
+        except Exception:
+            pass
         with msg_out:
             clear_output(wait=True)
             print(f"Saved normalization peak range {rng} for material '{mat}'.")
@@ -4268,6 +5679,15 @@ def spectral_normalization(FTIR_DataFrame, filepath=None):
             with msg_out:
                 clear_output(wait=True)
                 print(f"Normalization complete for material '{mat}'.")
+            try:
+                # Count how many rows for this material have normalized data now
+                updated_count = int((FTIR_DataFrame["Material"] == mat).sum())
+            except Exception:
+                updated_count = 0
+            try:
+                _norm_changes["normalized_materials"].append((mat, updated_count, None))
+            except Exception:
+                pass
         except Exception as e:
             with msg_out:
                 clear_output(wait=True)
@@ -4281,38 +5701,29 @@ def spectral_normalization(FTIR_DataFrame, filepath=None):
             print("Selection cleared. Click two points to select a range.")
 
     def _close(_b=None):
+        # Build and display session summary BEFORE clearing widgets (leave msg_out)
+        try:
+            lines = _session_summary_lines(_norm_changes, context="normalization")
+            _emit_session_summary(
+                msg_out, lines, title="Session summary (Normalization)"
+            )
+        except Exception:
+            pass
         _finalize_and_clear()
 
-    def _mark_bad(_b=None):
+    # Add extra UI effects after helper toggles quality
+    def _post_mark_update(status_label: str):
         try:
             idx = spectrum_sel.value
             if idx is None:
                 return
-            qcol = _quality_column_name(FTIR_DataFrame)
-            FTIR_DataFrame.at[idx, qcol] = "bad"
             with msg_out:
                 clear_output(wait=True)
-                print(f"Marked row {idx} as bad quality.")
-            # Rebuild options so the bad row no longer appears
-            _rebuild_spectrum_options()
-            _update_plot_for_selection()
-        except Exception:
-            pass
-        try:
-            _refresh_mark_buttons()
-        except Exception:
-            pass
-
-    def _mark_good(_b=None):
-        try:
-            idx = spectrum_sel.value
-            if idx is None:
-                return
-            qcol = _quality_column_name(FTIR_DataFrame)
-            FTIR_DataFrame.at[idx, qcol] = "good"
-            with msg_out:
-                clear_output(wait=True)
-                print(f"Marked row {idx} as good quality.")
+                print(f"Marked row {idx} as {status_label} quality.")
+            try:
+                _norm_changes["quality"].append((idx, status_label))
+            except Exception:
+                pass
             _rebuild_spectrum_options()
             _update_plot_for_selection()
         except Exception:
@@ -4331,14 +5742,23 @@ def spectral_normalization(FTIR_DataFrame, filepath=None):
     save_mat_btn.on_click(_save_for_this_material)
     normalize_btn.on_click(_normalize_material)
     redo_btn.on_click(_redo)
-    mark_bad_btn.on_click(_mark_bad)
-    mark_good_btn.on_click(_mark_good)
+    # The helper already wires core quality changes; add post-effects
+    mark_bad_btn.on_click(lambda _b=None: _post_mark_update("bad"))
+    mark_good_btn.on_click(lambda _b=None: _post_mark_update("good"))
     cancel_btn.on_click(_close)
 
     # Layout: controls on top, then plot, then info and messages, then buttons
     controls_row = widgets.HBox([material_dd, conditions_dd, include_bad_cb])
     spectrum_row = widgets.HBox([spectrum_sel])
-    display(controls_row, spectrum_row, fig, info_out, msg_out, mark_row, btn_box)
+    if range_slider is not None:
+        # Compose Colab range selection row with texts + slider + Apply button and help
+        try:
+            colab_range_row = widgets.HBox([range_lo_text, range_hi_text, range_apply_btn])
+            display(controls_row, spectrum_row, colab_range_row, range_slider, range_help, fig, info_out, msg_out, mark_row, btn_box)
+        except Exception:
+            display(controls_row, spectrum_row, range_slider, fig, info_out, msg_out, mark_row, btn_box)
+    else:
+        display(controls_row, spectrum_row, fig, info_out, msg_out, mark_row, btn_box)
     try:
         _refresh_mark_buttons()
     except Exception:
@@ -4588,20 +6008,10 @@ def find_peak_info(FTIR_DataFrame, filepath=None):
         except Exception:
             pass
 
-    def _parse_seq(val):
-        if isinstance(val, str):
-            try:
-                return ast.literal_eval(val)
-            except Exception:
-                return None
-        return val
+    # Use shared _parse_seq helper defined at module scope
 
-    # Determine the conditions column
-    cond_col = (
-        "Conditions"
-        if "Conditions" in filtered.columns
-        else ("Condition" if "Condition" in filtered.columns else None)
-    )
+    # Determine the conditions column via shared helper
+    cond_col = _conditions_column_name(filtered)
 
     # Material and Conditions dropdowns (Conditions excludes 'unexposed')
     try:
@@ -4737,6 +6147,7 @@ def find_peak_info(FTIR_DataFrame, filepath=None):
     try:
         _sess = _get_session_defaults()
         saved_time = _sess.get("time", "any")
+
         # find first option whose Time matches saved_time
         def _matches_time(idx):
             try:
@@ -4749,6 +6160,7 @@ def find_peak_info(FTIR_DataFrame, filepath=None):
                     return str(t) == str(saved_time)
             except Exception:
                 return False
+
         match = next((idx for (_lab, idx) in options if _matches_time(idx)), None)
         first_idx = match if match is not None else options[0][1]
     except Exception:
@@ -4828,6 +6240,7 @@ def find_peak_info(FTIR_DataFrame, filepath=None):
     try:
         _sess = _get_session_defaults()
         saved_time = _sess.get("time", "any")
+
         def _time_matches(idx):
             try:
                 tval = FTIR_DataFrame.loc[idx].get("Time")
@@ -4839,6 +6252,7 @@ def find_peak_info(FTIR_DataFrame, filepath=None):
                     return str(tval) == str(saved_time)
             except Exception:
                 return False
+
         _match_idx = next((idx for (_lab, idx) in options if _time_matches(idx)), None)
         first_idx = _match_idx if _match_idx is not None else options[0][1]
     except Exception:
@@ -4864,9 +6278,12 @@ def find_peak_info(FTIR_DataFrame, filepath=None):
     # Persist changes in dropdowns to session state
     def _persist_material_cond(_=None):
         try:
-            _set_session_selection(material=material_dd.value, conditions=conditions_dd.value)
+            _set_session_selection(
+                material=material_dd.value, conditions=conditions_dd.value
+            )
         except Exception:
             pass
+
     material_dd.observe(_persist_material_cond, names="value")
     conditions_dd.observe(_persist_material_cond, names="value")
     # Up to three optional X-range selectors, each gated by a checkbox
@@ -4957,27 +6374,26 @@ def find_peak_info(FTIR_DataFrame, filepath=None):
 
     save_file_btn = widgets.Button(description="Save for file", button_style="success")
     save_all_btn = widgets.Button(description="Save for filtered", button_style="info")
-    mark_bad_btn = widgets.Button(description="Mark as bad", button_style="danger")
-    mark_good_btn = widgets.Button(description="Mark as good", button_style="success")
+    # --- Change tracking for session summary on Close ---
+    _peak_changes = {
+        "saved_file": [],  # list[(idx, n_peaks)]
+        "saved_filtered": 0,  # count of spectra updated via filtered save
+        "quality": [],  # list[(idx, new_quality)]
+    }
+    # Use shared quality controls
+    mark_bad_btn, mark_good_btn, _refresh_mark_buttons = _make_quality_controls(
+        FTIR_DataFrame,
+        lambda: (
+            FTIR_DataFrame.loc[spectrum_sel.value]
+            if spectrum_sel.value is not None
+            else None
+        ),
+    )
     include_bad_cb = widgets.Checkbox(value=False, description="Include bad spectra")
     close_btn = widgets.Button(description="Close", button_style="danger")
     msg_out = widgets.Output()
 
-    def _refresh_mark_buttons():
-        try:
-            idx = spectrum_sel.value
-            qcol = _quality_column_name(FTIR_DataFrame)
-            status = None
-            try:
-                if idx is not None:
-                    status = FTIR_DataFrame.at[idx, qcol]
-            except Exception:
-                status = None
-            is_bad = str(status).strip().lower() == "bad"
-            mark_bad_btn.layout.display = "none" if is_bad else ""
-            mark_good_btn.layout.display = "" if is_bad else "none"
-        except Exception:
-            pass
+    # Refresh provided by helper
 
     # Plotly figure
     fig = go.FigureWidget()
@@ -5146,6 +6562,10 @@ def find_peak_info(FTIR_DataFrame, filepath=None):
             x_arr[peaks_idx].astype(float).tolist()
         )
         FTIR_DataFrame.at[idx, "Peak Absorbances"] = peaks_y.astype(float).tolist()
+        try:
+            _peak_changes["saved_file"].append((idx, int(peaks_idx.size)))
+        except Exception:
+            pass
         with msg_out:
             msg_out.clear_output()
             print(
@@ -5172,49 +6592,44 @@ def find_peak_info(FTIR_DataFrame, filepath=None):
             )
             FTIR_DataFrame.at[idx, "Peak Absorbances"] = peaks_y.astype(float).tolist()
             updated += 1
+        try:
+            _peak_changes["saved_filtered"] += int(updated)
+        except Exception:
+            pass
         with msg_out:
             msg_out.clear_output()
             print(
                 f"Updated {updated} spectra; skipped {skipped} (missing/invalid data)."
             )
 
-    def _mark_bad(_b=None):
-        try:
-            idx = spectrum_sel.value
-            if idx is None:
-                return
-            qcol = _quality_column_name(FTIR_DataFrame)
-            FTIR_DataFrame.at[idx, qcol] = "bad"
-        except Exception:
-            pass
+    # Additional UI updates after helper toggles quality
+    def _post_mark_update_find_peaks(_b=None):
         try:
             _refresh_mark_buttons()
         except Exception:
             pass
-        # If excluding bad spectra, refresh options to hide newly marked row
         try:
             if not include_bad_cb.value:
                 _on_filters_change()
         except Exception:
             pass
-
-    def _mark_good(_b=None):
         try:
             idx = spectrum_sel.value
-            if idx is None:
-                return
-            qcol = _quality_column_name(FTIR_DataFrame)
-            FTIR_DataFrame.at[idx, qcol] = "good"
+            if idx is not None:
+                # capture current quality value
+                qcol = _quality_column_name(FTIR_DataFrame)
+                qval = FTIR_DataFrame.loc[idx].get(qcol, None)
+                _peak_changes["quality"].append((idx, qval))
         except Exception:
             pass
-        try:
-            _refresh_mark_buttons()
-        except Exception:
-            pass
-
-        _refresh_mark_buttons()
 
     def _close_ui(b):
+        # Emit session summary before closing figure (leave msg_out visible)
+        try:
+            lines = _session_summary_lines(_peak_changes, context="peaks")
+            _emit_session_summary(msg_out, lines, title="Session summary (Peak Finder)")
+        except Exception:
+            pass
         try:
             # Close dropdowns/filters first
             try:
@@ -5299,8 +6714,9 @@ def find_peak_info(FTIR_DataFrame, filepath=None):
     max_peaks.observe(_update_plot, names="value")
     save_file_btn.on_click(_save_for_file)
     save_all_btn.on_click(_save_for_filtered)
-    mark_bad_btn.on_click(_mark_bad)
-    mark_good_btn.on_click(_mark_good)
+    # Helper wires core behavior; add post-effects
+    mark_bad_btn.on_click(_post_mark_update_find_peaks)
+    mark_good_btn.on_click(_post_mark_update_find_peaks)
     include_bad_cb.observe(_on_filters_change, names="value")
     close_btn.on_click(_close_ui)
 
@@ -5407,13 +6823,7 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
     except Exception:
         pass
 
-    def _parse_seq(val):
-        if isinstance(val, str):
-            try:
-                return ast.literal_eval(val)
-            except Exception:
-                return None
-        return val
+    # Use shared _parse_seq helper (module-level)
 
     # Build spectrum options (only include rows with normalized data available),
     # sorted by Time ascending so earliest (lowest) time appears first in dropdown.
@@ -5483,36 +6893,8 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
         filterable_df = filtered[norm_mask_init]
     except Exception:
         filterable_df = filtered
-    unique_materials = (
-        sorted(
-            {
-                str(v)
-                for v in filterable_df.get("Material", pd.Series([], dtype=object))
-                .dropna()
-                .astype(str)
-                .unique()
-                .tolist()
-            }
-        )
-        if "Material" in filterable_df.columns
-        else []
-    )
-    # conditions might be under 'Conditions' or 'Condition'
-    cond_series = (
-        filterable_df["Conditions"]
-        if "Conditions" in filterable_df.columns
-        else (
-            filterable_df["Condition"]
-            if "Condition" in filterable_df.columns
-            else pd.Series([], dtype=object)
-        )
-    )
-    # Build conditions list excluding 'unexposed' (case-insensitive)
-    _all_conditions = [
-        str(v) for v in cond_series.dropna().astype(str).unique().tolist()
-    ]
-    unique_conditions = sorted(
-        [c for c in _all_conditions if c.strip().lower() != "unexposed"]
+    unique_materials, unique_conditions = _extract_material_condition_lists(
+        filterable_df, exclude_unexposed=True
     )
     material_dd = widgets.Dropdown(
         options=["any"] + unique_materials,
@@ -5620,6 +7002,12 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
     last_msg_text = ""
     last_msg_ts = 0.0
     log_lock = threading.Lock()
+    # --- Change tracking for session summary (on Close) ---
+    _deconv_changes = {
+        "saved": [],  # list[(idx, count_components)]
+        "quality": [],  # list[(idx, new_quality)]
+        "iter": [],  # list[(idx, start_redchi, final_redchi, improvements)]
+    }
 
     def _log_once(message: str, *, wait: bool = True, clear: bool = True):
         nonlocal last_msg_text, last_msg_ts
@@ -5923,7 +7311,7 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
             except Exception:
                 pass
 
-    # Click handler for adding peaks when in adding mode
+    # Click handler for adding peaks when in adding mode (desktop / non-Colab)
     def _on_data_click(trace, points, selector):
         # Only respond when adding mode is ON and a valid click occurred
         try:
@@ -6018,9 +7406,10 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
             f"new peaks'."
         )
 
-    # Always register the click handler; it checks the toggle state internally
+    # Register click handler only outside Colab; Colab uses slider-based fallback
     try:
-        fig.data[0].on_click(_on_data_click)
+        if not _IN_COLAB:
+            fig.data[0].on_click(_on_data_click)
     except Exception:
         pass
 
@@ -6316,7 +7705,7 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
             _sess_time = _sess.get("time", "any")
             if _sess_time is not None and str(_sess_time).strip().lower() != "any":
                 # Compare numerically when possible, else fallback to string compare
-                for (_lbl, _v) in new_options:
+                for _lbl, _v in new_options:
                     try:
                         _tval = FTIR_DataFrame.loc[_v].get("Time")
                         # Numeric equality if both castable
@@ -6900,8 +8289,20 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
         _log_once(
             f"Saved deconvolution for file '{FTIR_DataFrame.loc[idx, 'File Name']}'."
         )
+        try:
+            _deconv_changes["saved"].append((idx, len(out)))
+        except Exception:
+            pass
 
     def _close_ui(b):
+        # Emit a session summary before closing widgets; keep log_html visible
+        try:
+            lines = _session_summary_lines(_deconv_changes, context="deconvolution")
+            _emit_session_summary(
+                log_html, lines, title="Session summary (Deconvolution)"
+            )
+        except Exception:
+            pass
         # Signal cancellation and close widgets promptly
         try:
             cancel_event.set()
@@ -6943,12 +8344,16 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
     spectrum_sel.observe(_on_spectrum_change, names="value")
     material_dd.observe(_rebuild_spectrum_options, names="value")
     conditions_dd.observe(_rebuild_spectrum_options, names="value")
+
     # Persist material/conditions selections
     def _persist_pd_filters(_=None):
         try:
-            _set_session_selection(material=material_dd.value, conditions=conditions_dd.value)
+            _set_session_selection(
+                material=material_dd.value, conditions=conditions_dd.value
+            )
         except Exception:
             pass
+
     material_dd.observe(_persist_pd_filters, names="value")
     conditions_dd.observe(_persist_pd_filters, names="value")
     # Global control observers: split to avoid unnecessary per-peak UI rebuilds
@@ -7537,23 +8942,31 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
         ]
     )
     reset_all_row = widgets.HBox([reset_all_btn])
-    # Mark buttons on their own row as a pair
-    mark_good_btn = widgets.Button(
-        description="Mark as good",
-        button_style="success",
-        layout=widgets.Layout(width="110px"),
-        tooltip="Mark the currently selected spectrum as good",
+    # Mark buttons (use shared helper for mutually exclusive controls)
+    mark_bad_btn, mark_good_btn, _refresh_mark_buttons = _make_quality_controls(
+        FTIR_DataFrame,
+        lambda: (
+            FTIR_DataFrame.loc[spectrum_sel.value]
+            if spectrum_sel.value is not None
+            else None
+        ),
+        margin="0 8px 0 0",
     )
 
-    def _on_mark_good_click(_b=None):
+    # Add additional status and list refresh after helper toggles quality
+    def _post_mark_update_deconv(status: str):
         try:
             idx = spectrum_sel.value
-            qcol = _quality_column_name(FTIR_DataFrame)
-            FTIR_DataFrame.at[idx, qcol] = "good"
-            try:
-                status_html.value = f"<span style='color:#0a0;'>Marked row {idx} as good quality.</span>"
-            except Exception:
-                pass
+            if status == "bad":
+                try:
+                    status_html.value = f"<span style='color:#a00;'>Marked row {idx} as bad quality.</span>"
+                except Exception:
+                    pass
+            else:
+                try:
+                    status_html.value = f"<span style='color:#0a0;'>Marked row {idx} as good quality.</span>"
+                except Exception:
+                    pass
             try:
                 _rebuild_spectrum_options()
             except Exception:
@@ -7564,60 +8977,77 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
             _refresh_mark_buttons()
         except Exception:
             pass
-
-    mark_bad_btn = widgets.Button(
-        description="Mark as bad",
-        button_style="danger",
-        layout=widgets.Layout(width="110px"),
-        tooltip="Mark the currently selected spectrum as bad and remove from lists",
-    )
-    mark_bad_btn.on_click(_on_mark_bad_click)
-    mark_good_btn.on_click(_on_mark_good_click)
-    mark_row = widgets.HBox([mark_bad_btn, mark_good_btn])
-
-    def _refresh_mark_buttons():
         try:
-            idx = spectrum_sel.value
-            qcol = _quality_column_name(FTIR_DataFrame)
-            status = None
-            try:
-                if idx is not None:
-                    status = FTIR_DataFrame.at[idx, qcol]
-            except Exception:
-                status = None
-            is_bad = str(status).strip().lower() == "bad"
-            mark_bad_btn.layout.display = "none" if is_bad else ""
-            mark_good_btn.layout.display = "" if is_bad else "none"
+            _deconv_changes["quality"].append((spectrum_sel.value, status))
         except Exception:
             pass
 
-    buttons_row = widgets.HBox(
-        [
-            fit_btn,
-            add_peaks_btn,
-            accept_new_peaks_btn,
-            redo_new_peaks_btn,
-            cancel_new_peaks_btn,
-            iter_btn,
-            cancel_fit_btn,
-            save_btn,
-            close_btn,
-        ]
-    )
+    mark_bad_btn.on_click(lambda _b=None: _post_mark_update_deconv("bad"))
+    mark_good_btn.on_click(lambda _b=None: _post_mark_update_deconv("good"))
+    mark_row = widgets.HBox([mark_bad_btn, mark_good_btn])
+
+    # Refresh function provided by helper
+
+    buttons_row = widgets.HBox([
+        fit_btn,
+        add_peaks_btn,
+        accept_new_peaks_btn,
+        redo_new_peaks_btn,
+        cancel_new_peaks_btn,
+        iter_btn,
+        cancel_fit_btn,
+        save_btn,
+        close_btn,
+    ])
     status_row = widgets.HBox([status_html])
-    ui = widgets.VBox(
-        [
-            controls_row_filters,
-            controls_row_spectrum,
-            fit_range_row,
-            peak_controls_box,
-            globals_column,
-            reset_all_row,
-            buttons_row,
-            mark_row,
-            status_row,
-        ]
+    # Colab fallback slider + typed input + Add button for peak addition
+    add_peaks_slider = widgets.FloatSlider(
+        value=float((xmin + xmax) / 2.0),
+        min=float(xmin),
+        max=float(xmax),
+        step=(float(xmax) - float(xmin)) / 1000.0 or 1.0,
+        description="Select (cm⁻¹)",
+        continuous_update=False,
+        readout_format=".1f",
+        layout=widgets.Layout(width="70%"),
     )
+    add_peaks_text = widgets.FloatText(
+        value=float((xmin + xmax) / 2.0),
+        description="Type (cm⁻¹)",
+        layout=widgets.Layout(width="160px"),
+    )
+    add_peaks_add_btn = widgets.Button(
+        description="Add", button_style="info", layout=widgets.Layout(width="80px")
+    )
+    # Keep text and slider in sync (slider drives text)
+    def _sync_text_from_slider(change):
+        if change.get("name") != "value":
+            return
+        try:
+            add_peaks_text.value = float(change.get("new"))
+        except Exception:
+            pass
+    add_peaks_slider.observe(_sync_text_from_slider, names="value")
+    colab_add_row = widgets.HBox([add_peaks_slider, add_peaks_text, add_peaks_add_btn])
+    colab_add_help = widgets.HTML(
+        "<span style='color:#555;font-size:12px;'>Colab: Use the slider or type a wavenumber, then click Add. Peaks snap to nearest data point; Accept to commit.</span>"
+    )
+    # Hide row if not in Colab or not in add-peaks mode
+    if not _IN_COLAB:
+        colab_add_row.layout.display = "none"
+    ui = widgets.VBox([
+        controls_row_filters,
+        controls_row_spectrum,
+        fit_range_row,
+        peak_controls_box,
+        globals_column,
+        reset_all_row,
+        buttons_row,
+        colab_add_row,
+        colab_add_help,
+        mark_row,
+        status_row,
+    ])
 
     # --- Add-peaks workflow callbacks ---
     def _enter_add_mode(b=None):
@@ -7646,9 +9076,32 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
             conditions_dd.disabled = True
         except Exception:
             pass
-        _log_once(
-            "Add-peaks mode: click one or more x-locations on the plot. Then accept/redo/cancel."
-        )
+        if _IN_COLAB:
+            # Show slider row/help and set bounds from current spectrum
+            try:
+                x_arr, _y_arr = _get_xy(spectrum_sel.value)
+                if x_arr is not None and x_arr.size > 0:
+                    x_min = float(np.nanmin(x_arr))
+                    x_max = float(np.nanmax(x_arr))
+                    add_peaks_slider.min = x_min
+                    add_peaks_slider.max = x_max
+                    add_peaks_slider.step = (x_max - x_min) / 1000.0 or 1.0
+                    mid = float((x_min + x_max) / 2.0)
+                    add_peaks_slider.value = mid
+                    try:
+                        add_peaks_text.value = mid
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            try:
+                colab_add_row.layout.display = ""
+                colab_add_help.layout.display = ""
+            except Exception:
+                pass
+            _log_once("Add-peaks mode (Colab): use the slider then click Add; Accept/Redo/Cancel when done.")
+        else:
+            _log_once("Add-peaks mode: click x-locations on the plot; then Accept/Redo/Cancel.")
 
     def _accept_new_peaks(b=None):
         if _recent_click("accept_new_peaks"):
@@ -7745,6 +9198,13 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
         _show(save_btn)
         _show(close_btn)
         _show(peak_controls_box)
+        # Hide Colab slider row when exiting add-peaks mode via Accept
+        if _IN_COLAB:
+            try:
+                colab_add_row.layout.display = "none"
+                colab_add_help.layout.display = "none"
+            except Exception:
+                pass
         try:
             spectrum_sel.disabled = False
             material_dd.disabled = False
@@ -7770,7 +9230,10 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
             return
         new_peak_xs.clear()
         _clear_add_peak_shapes()
-        _log_once("Selection cleared. Click on the plot to select peaks again.")
+        if _IN_COLAB:
+            _log_once("Selection cleared. Use slider to select peaks again, then Add.")
+        else:
+            _log_once("Selection cleared. Click on the plot to select peaks again.")
 
     def _cancel_new_peaks(b=None):
         if _recent_click("cancel_new_peaks"):
@@ -7791,6 +9254,12 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
         _show(save_btn)
         _show(close_btn)
         _show(peak_controls_box)
+        if _IN_COLAB:
+            try:
+                colab_add_row.layout.display = "none"
+                colab_add_help.layout.display = "none"
+            except Exception:
+                pass
         try:
             spectrum_sel.disabled = False
             material_dd.disabled = False
@@ -7800,6 +9269,66 @@ def peak_deconvolution(FTIR_DataFrame, filepath=None):
         _log_once("Peak addition cancelled. No changes were made.")
 
     add_peaks_btn.on_click(_enter_add_mode)
+    # Colab slider-driven addition
+    def _colab_add_peak(_b=None):
+        try:
+            # Prefer typed value when provided; fall back to slider
+            x_target = float(add_peaks_text.value)
+        except Exception:
+            try:
+                x_target = float(add_peaks_slider.value)
+            except Exception:
+                return
+        idx = spectrum_sel.value
+        x_arr, y_arr = _get_xy(idx)
+        if x_arr is None or y_arr is None or x_arr.size == 0:
+            _log_once("Cannot add peak: spectrum has no normalized data.")
+            return
+        # Snap to nearest existing x
+        try:
+            nearest_i = int(np.argmin(np.abs(x_arr - x_target)))
+            x_new = float(x_arr[nearest_i])
+        except Exception:
+            _log_once("Could not determine nearest x for selected location.")
+            return
+        try:
+            min_sep = float(center_window.value)
+        except Exception:
+            min_sep = 0.0
+        for existing_x in new_peak_xs:
+            if abs(existing_x - x_new) <= min_sep:
+                _log_once(
+                    f"Rejected: {x_new:.3f} cm⁻¹ within ±{min_sep:.2f} cm⁻¹ of another selected peak."
+                )
+                return
+        xs_existing, _ys_existing = _get_peaks(idx)
+        for xe in xs_existing:
+            try:
+                if abs(float(xe) - x_new) <= min_sep:
+                    _log_once(
+                        f"Rejected: {x_new:.3f} cm⁻¹ within ±{min_sep:.2f} cm⁻¹ of existing peak {float(xe):.3f}."
+                    )
+                    return
+            except Exception:
+                continue
+        # Accept
+        new_peak_xs.append(x_new)
+        try:
+            y_min = float(np.nanmin(y_arr))
+            y_max = float(np.nanmax(y_arr))
+        except Exception:
+            y_min, y_max = 0.0, 1.0
+        try:
+            fig.add_shape(dict(type="line", x0=x_new, x1=x_new, y0=y_min, y1=y_max, line=dict(color="#ff7f0e", dash="dot", width=1.5), name="add_peak_marker"))
+        except Exception:
+            pass
+        _log_once(f"Selected new peak at x = {x_new:.3f} cm⁻¹. Add more or Accept.")
+
+    try:
+        if _IN_COLAB:
+            add_peaks_add_btn.on_click(_colab_add_peak)
+    except Exception:
+        pass
     accept_new_peaks_btn.on_click(_accept_new_peaks)
     redo_new_peaks_btn.on_click(_redo_new_peaks)
     cancel_new_peaks_btn.on_click(_cancel_new_peaks)
@@ -8655,7 +10184,11 @@ def time_series_fitting(FTIR_DataFrame):
     )
     conditions_dd = widgets.Dropdown(
         options=cond_vals,
-        value=(default_condition if default_condition is not None else (cond_vals[0] if cond_vals else None)),
+        value=(
+            default_condition
+            if default_condition is not None
+            else (cond_vals[0] if cond_vals else None)
+        ),
         description="Conditions",
         layout=widgets.Layout(width="40%"),
     )
@@ -9530,12 +11063,16 @@ def time_series_fitting(FTIR_DataFrame):
 
     material_dd.observe(_on_material_change, names="value")
     conditions_dd.observe(_on_conditions_change, names="value")
+
     # Persist Material/Conditions selections to session
     def _persist_ts_filters(_=None):
         try:
-            _set_session_selection(material=material_dd.value, conditions=conditions_dd.value)
+            _set_session_selection(
+                material=material_dd.value, conditions=conditions_dd.value
+            )
         except Exception:
             pass
+
     material_dd.observe(_persist_ts_filters, names="value")
     conditions_dd.observe(_persist_ts_filters, names="value")
     fit_btn.on_click(_on_fit_click)
