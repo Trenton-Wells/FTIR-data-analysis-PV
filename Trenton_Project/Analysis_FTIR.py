@@ -41,6 +41,87 @@ import html
 import json
 import contextlib
 
+# ----------------------- Date conversion helper (ISO) ----------------------- #
+def _convert_dates_iso(directory, *, dry_run: bool = False):
+    """Rename dates in filenames and folder names under `directory` to ISO (YYYY-MM-DD).
+
+    Handles patterns:
+    - YYYY-MM-DD (already ISO, left unchanged)
+    - MM-DD-YYYY or M-D-YYYY
+    - MMDDYYYY
+    - YYYYMMDD
+    Safely renames both folders and files, preserving other name parts.
+    Set dry_run=True to only print intended changes without renaming.
+    """
+    def _convert_to_iso(date_str):
+        # Already ISO
+        if re.match(r"^\d{4}-\d{2}-\d{2}$", date_str):
+            return date_str
+        # MM-DD-YYYY or M-D-YYYY
+        m = re.match(r"^(\d{1,2})-(\d{1,2})-(\d{4})$", date_str)
+        if m:
+            mm, dd, yy = m.groups()
+            return f"{yy}-{int(mm):02d}-{int(dd):02d}"
+        # MMDDYYYY
+        m = re.match(r"^(\d{2})(\d{2})(\d{4})$", date_str)
+        if m:
+            mm, dd, yy = m.groups()
+            return f"{yy}-{mm}-{dd}"
+        # YYYYMMDD
+        m = re.match(r"^(\d{4})(\d{2})(\d{2})$", date_str)
+        if m:
+            yy, mm, dd = m.groups()
+            return f"{yy}-{mm}-{dd}"
+        return date_str
+
+    date_patterns = [
+        r"\b\d{4}-\d{2}-\d{2}\b",      # ISO
+        r"\b\d{1,2}-\d{1,2}-\d{4}\b",  # MM-DD-YYYY / M-D-YYYY
+        r"\b\d{8}\b",                   # contiguous 8 digits (MMDDYYYY or YYYYMMDD)
+    ]
+
+    print("Renaming dates in filenames/folders to ISO format...")
+    for root, dirs, files in os.walk(directory):
+        # Folders
+        for current_dir in list(dirs):
+            new_dirname = current_dir
+            for pattern in date_patterns:
+                for date_match in re.findall(pattern, current_dir):
+                    iso_date = _convert_to_iso(date_match)
+                    if iso_date != date_match:
+                        print(
+                            f"In folder '{current_dir}': changing date '{date_match}' -> '{iso_date}'"
+                        )
+                        new_dirname = new_dirname.replace(date_match, iso_date)
+            if new_dirname != current_dir:
+                old_dirpath = os.path.join(root, current_dir)
+                new_dirpath = os.path.join(root, new_dirname)
+                if dry_run:
+                    print(f"(dry-run) Would rename folder: {old_dirpath} -> {new_dirpath}")
+                else:
+                    print(f"Renaming folder: {old_dirpath} -> {new_dirpath}")
+                    os.rename(old_dirpath, new_dirpath)
+        # Files
+        for current_filename in files:
+            new_filename = current_filename
+            for pattern in date_patterns:
+                for date_match in re.findall(pattern, current_filename):
+                    iso_date = _convert_to_iso(date_match)
+                    if iso_date != date_match:
+                        print(
+                            f"In file '{current_filename}': changing date '{date_match}' -> '{iso_date}'"
+                        )
+                        new_filename = new_filename.replace(date_match, iso_date)
+            if new_filename != current_filename:
+                old_filepath = os.path.join(root, current_filename)
+                new_filepath = os.path.join(root, new_filename)
+                if dry_run:
+                    print(f"(dry-run) Would rename file: {old_filepath} -> {new_filepath}")
+                else:
+                    print(f"Renaming file: {old_filepath} -> {new_filepath}")
+                    os.rename(old_filepath, new_filepath)
+    print("Date renaming to ISO format complete." if not dry_run else "(dry-run) Date renaming simulation complete.")
+
 
 def rename_files(
     directory=None,
@@ -49,106 +130,88 @@ def rename_files(
     file_rename=None,
     character_to_use=None,
     pairs_input=None,
+    dry_run: bool = False,
 ):
+    """Rename files (and folder/file dates) within a directory.
+
+    Parameters (None prompts interactively):
+        directory: root folder to scan.
+        replace_spaces: replace spaces in filenames.
+        iso_date_rename: convert date substrings to ISO.
+        file_rename: perform old:new word replacements.
+        character_to_use: replacement for spaces (default prompted when needed).
+        pairs_input: comma-separated old:new pairs (prompted if needed).
+        dry_run: when True, only print planned changes (no filesystem writes).
+
+    Actions (each optional):
+        - Replace spaces in filenames with chosen character.
+        - Convert date substrings in folder & file names to ISO (YYYY-MM-DD).
+        - Replace specified substrings via old:new pairs.
     """
-    Change file & folder names in a directory by replacing spaces, dates, and words.
-
-    Scans a directory and its subdirectories to rename files by replacing spaces and/or
-    specified words in filenames. Folder names will not be changed for space/word
-    replacement. If ISO date renaming is enabled, dates in both filenames and folder
-    names will be updated. Recommended to use this tool if file names have inconsistent
-    naming conventions that may cause issues.
-
-    Parameters:
-    -----------
-        directory (str): Directory to scan. If None, prompts user for input.
-
-    Returns:
-    -----------
-        Renamed files in place; prints changes to console.
-    """
-
-    def _date_change_ISO(directory):
-        """
-        Rename dates in filenames and folder names in the given directory to ISO format.
-
-        ISO format is YYYY-MM-DD. This is an international standard date format and has
-        the added benefit of sorting chronologically when sorted alphabetically.
-
-        Parameters:
-        -----------
-        directory (str): Directory to scan. Must be a valid directory path.
-
-        Returns:
-        -----------
-        Renamed files and folders in place; prints changes to console.
-        """
-
+    # Directory
+    if directory is None:
+        directory = input("Enter the directory to scan: ").strip()
     if not os.path.isdir(directory):
         raise FileNotFoundError(f"Directory not found: {directory}")
     print(f"Scanning directory: {directory}")
 
-    # Option to replace spaces in filenames with different separator character
+    # Replace spaces
     if replace_spaces is None:
-        replace_spaces_input = (
-            input("Do you want to replace spaces in filenames? (y/n): ").strip().lower()
-        )
-        if replace_spaces_input == "y":
-            replace_spaces = True
+        ans = input("Replace spaces in filenames? (y/n): ").strip().lower()
+        replace_spaces = ans == "y"
     if replace_spaces:
         if character_to_use is None:
-            character_to_use = input(
-                "Enter the separator to use instead of spaces (e.g. _): "
-            ).strip()
-        print("Replacing spaces now...")
-        for root, dirs, files in os.walk(directory):
-            for current_filename in files:
-                if " " in current_filename:
-                    old_filepath = os.path.join(root, current_filename)
-                    new_filename = current_filename.replace(" ", character_to_use)
-                    new_filepath = os.path.join(root, new_filename)
-                    print(f"Renaming: {old_filepath} to {new_filepath}")
-                    os.rename(old_filepath, new_filepath)
-        print("Space replacement complete.")
+            character_to_use = input("Separator to use (e.g. _): ").strip() or "_"
+        print("Replacing spaces in filenames...")
+        for root, _dirs, files in os.walk(directory):
+            for fname in files:
+                if " " in fname:
+                    old_fp = os.path.join(root, fname)
+                    new_fname = fname.replace(" ", character_to_use)
+                    new_fp = os.path.join(root, new_fname)
+                    if dry_run:
+                        print(f"(dry-run) Would rename: {old_fp} -> {new_fp}")
+                    else:
+                        print(f"Renaming: {old_fp} -> {new_fp}")
+                        os.rename(old_fp, new_fp)
+        print("Space replacement complete." if not dry_run else "(dry-run) Space replacement simulation complete.")
     else:
-        print("No spaces will be replaced in filenames.")
+        print("Spaces will not be replaced.")
 
-    # Option to batch rename dates to ISO format (YYYY-MM-DD)
+    # Date conversion
     if iso_date_rename is None:
-        message = (
-            f"Do you want to convert all dates in filenames to ISO format"
-            f" (YYYY-MM-DD)? (y/n): "
-        )
-        iso_date_input = input(message).strip().lower()
-        if iso_date_input == "y":
-            iso_date_rename = True
+        ans = input("Convert dates in names to ISO (YYYY-MM-DD)? (y/n): ").strip().lower()
+        iso_date_rename = ans == "y"
     if iso_date_rename:
-        _date_change_ISO(directory)
+        _convert_dates_iso(directory, dry_run=dry_run)
     else:
-        print("No dates will be changed in filenames.")
+        print("Date conversion skipped.")
 
+    # Word replacement
+    if file_rename is None:
+        ans = input("Perform word replacements (old:new)? (y/n): ").strip().lower()
+        file_rename = ans == "y"
     if file_rename:
         if pairs_input is None:
-            message = (
-                f"Enter words to find and their replacements as comma-separated"
-                f" pairs (e.g. old1:new1,old2:new2): "
-            )
-            pairs_input = input(message).strip()
-        word_pairs = [pair.split(":") for pair in pairs_input.split(",") if ":" in pair]
-        print("Renaming files by replacing specified words...")
-        for root, dirs, files in os.walk(directory):
-            for current_filename in files:
-                new_filename = current_filename
-                for word_to_find, word_to_replace in word_pairs:
-                    new_filename = new_filename.replace(word_to_find, word_to_replace)
-                if new_filename != current_filename:
-                    old_filepath = os.path.join(root, current_filename)
-                    new_filepath = os.path.join(root, new_filename)
-                    print(f"Renaming: {old_filepath} to {new_filepath}")
-                    os.rename(old_filepath, new_filepath)
-        print("Batch word replacement complete.")
+            pairs_input = input("Enter old:new pairs (comma-separated): ").strip()
+        word_pairs = [p.split(":") for p in pairs_input.split(",") if ":" in p]
+        print("Replacing specified substrings in filenames...")
+        for root, _dirs, files in os.walk(directory):
+            for fname in files:
+                new_fname = fname
+                for old, new in word_pairs:
+                    new_fname = new_fname.replace(old, new)
+                if new_fname != fname:
+                    old_fp = os.path.join(root, fname)
+                    new_fp = os.path.join(root, new_fname)
+                    if dry_run:
+                        print(f"(dry-run) Would rename: {old_fp} -> {new_fp}")
+                    else:
+                        print(f"Renaming: {old_fp} -> {new_fp}")
+                        os.rename(old_fp, new_fp)
+        print("Batch word replacement complete." if not dry_run else "(dry-run) Batch word replacement simulation complete.")
     else:
-        print("No words will be replaced in filenames.")
+        print("Word replacement skipped.")
 
 
 def extract_file_info(
@@ -430,8 +493,7 @@ def extract_file_info(
         # Group files by (material, conditions, time) after all files are processed
 
         # Optionally print replicate groups to the console
-        if track_replicates is None:
-            if track_replicates:
+        if track_replicates:
                 # Build replicate groups including BOTH existing rows already present in
                 # FTIR_DataFrame and any newly discovered rows in `data`.
                 # This allows the replicate reporting to reflect the full dataset state,
@@ -992,36 +1054,88 @@ def _session_summary_lines(changes: dict, *, context: str = ""):
             lines.append("Normalized materials: " + ", ".join(mats))
     except Exception:
         pass
-    # Baseline-correction summaries (added)
+    # Baseline-correction: emit grouped summary by function with filenames/materials
     try:
-        bcf = changes.get("baseline_corrected_file") or []
-        if bcf:
-            head = ", ".join([f"{i}:{fn}" for i, fn in bcf[:5]])
-            tail = " ..." if len(bcf) > 5 else ""
-            lines.append(
-                f"Baseline-corrected {len(bcf)} file(s) (first 5: {head}{tail})"
-            )
-    except Exception:
-        pass
-    try:
-        bcm = changes.get("baseline_corrected_material") or []
-        if bcm:
-            parts = [f"{m} ({fn}, {c})" for m, fn, c in bcm]
-            lines.append("Baseline-corrected materials: " + ", ".join(parts))
-    except Exception:
-        pass
-    try:
-        sf = changes.get("saved_file") or []
-        if sf:
-            head = ", ".join([f"{i}:{n}" for i, n in sf[:5]])
-            tail = " ..." if len(sf) > 5 else ""
-            lines.append(f"Saved results for {len(sf)} spectra (first 5: {head}{tail})")
-    except Exception:
-        pass
-    try:
-        sfilt = int(changes.get("saved_filtered") or 0)
-        if sfilt:
-            lines.append(f"Bulk-saved results for {sfilt} filtered spectra.")
+        _ctx = str(context).lower().strip()
+        if _ctx.startswith("baseline"):  # only for baseline_correct_spectra context
+            bcm = changes.get("baseline_corrected_material") or []  # list[(material, function, updated_count)]
+            bcf = changes.get("baseline_corrected_file") or []      # list[(idx, function[, filename])]
+
+            # Normalize bcf tuples to (function, filename)
+            per_file = []
+            try:
+                for t in bcf:
+                    if len(t) >= 3:
+                        _idx, fnc, fname = t[0], str(t[1]), str(t[2])
+                    elif len(t) == 2:
+                        _idx, fnc = t
+                        fname = str(_idx)
+                    else:
+                        continue
+                    per_file.append((fnc.upper(), fname))
+            except Exception:
+                pass
+
+            # Group by function
+            grouped = {}
+            total = 0
+            # Material-level summaries
+            try:
+                for mat, fnc, cnt in bcm:
+                    fnc_u = str(fnc).upper()
+                    grouped.setdefault(fnc_u, {"materials": set(), "files": []})
+                    grouped[fnc_u]["materials"].add(str(mat))
+                    try:
+                        total += int(cnt)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            # File-level summaries
+            try:
+                for fnc_u, fname in per_file:
+                    grouped.setdefault(fnc_u, {"materials": set(), "files": []})
+                    grouped[fnc_u]["files"].append(str(fname))
+                    total += 1
+            except Exception:
+                pass
+
+            noun = "spectrum" if total == 1 else "spectra"
+            lines.append(f"Baseline-corrected {total} {noun}:")
+            # Emit per-function subheadings with items
+            for fnc_u in sorted(grouped.keys()):
+                lines.append(f"{fnc_u}:")
+                items = []
+                try:
+                    if grouped[fnc_u]["materials"]:
+                        for m in sorted(grouped[fnc_u]["materials"]):
+                            items.append(f"  - {m}")
+                    if grouped[fnc_u]["files"]:
+                        for fname in grouped[fnc_u]["files"]:
+                            items.append(f"  - {fname}")
+                except Exception:
+                    pass
+                if not items:
+                    items.append("  - (none)")
+                lines.extend(items)
+        else:
+            # Non-baseline tools keep their original saved summaries
+            try:
+                sf = changes.get("saved_file") or []
+                if sf:
+                    head = ", ".join([f"{i}:{n}" for i, n in sf[:5]])
+                    tail = " ..." if len(sf) > 5 else ""
+                    lines.append(
+                        f"Saved results for {len(sf)} spectra (first 5: {head}{tail})"
+                    )
+            except Exception:
+                pass
+            try:
+                sfilt = int(changes.get("saved_filtered") or 0)
+                if sfilt:
+                    lines.append(f"Bulk-saved results for {sfilt} filtered spectra.")
+            except Exception:
+                pass
     except Exception:
         pass
     try:
@@ -4298,6 +4412,17 @@ def baseline_correct_spectra(
                             baseline_session_changes.setdefault(
                                 "saved_file", []
                             ).append((selected_row.name, None))
+                            # Also record as baseline-corrected (Manual) with filename for summary output
+                            try:
+                                fn = FTIR_DataFrame.at[selected_row.name, "File Name"]
+                                if not isinstance(fn, str) or not fn.strip():
+                                    _loc = FTIR_DataFrame.at[selected_row.name, "File Location"]
+                                    fn = os.path.basename(_loc) if isinstance(_loc, str) else str(selected_row.name)
+                            except Exception:
+                                fn = str(selected_row.name)
+                            baseline_session_changes.setdefault(
+                                "baseline_corrected_file", []
+                            ).append((selected_row.name, "MANUAL", str(fn)))
                     except Exception:
                         pass
 
@@ -5047,9 +5172,20 @@ def baseline_correct_spectra(
                                 selected_row.name, "Baseline-Corrected Data"
                             ] = corrected_arr.tolist()
                             try:
+                                try:
+                                    fn = FTIR_DataFrame.at[
+                                        selected_row.name, "File Name"
+                                    ]
+                                    if not isinstance(fn, str) or not fn.strip():
+                                        _loc = FTIR_DataFrame.at[
+                                            selected_row.name, "File Location"
+                                        ]
+                                        fn = os.path.basename(_loc) if isinstance(_loc, str) else str(selected_row.name)
+                                except Exception:
+                                    fn = str(selected_row.name)
                                 baseline_session_changes.setdefault(
                                     "baseline_corrected_file", []
-                                ).append((selected_row.name, baseline_function.upper()))
+                                ).append((selected_row.name, baseline_function.upper(), str(fn)))
                             except Exception:
                                 pass
                 except Exception:
@@ -6259,6 +6395,7 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
         layout=widgets.Layout(width="40%"),
     )
     include_bad_cb = widgets.Checkbox(value=False, description="Include bad spectra")
+    plot_timeseries_cb = widgets.Checkbox(value=False, description="Plot TIme-Series")
     spectrum_sel = widgets.Dropdown(
         options=[], description="Spectrum", layout=widgets.Layout(width="70%")
     )
@@ -6295,21 +6432,43 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
     def _clear_selection_visuals():
         fig.layout.shapes = ()
 
+    def _current_y_bounds():
+        """Return (ymin, ymax) for selection visuals.
+
+        In time-series mode, compute from all plotted traces; otherwise use current y_data.
+        """
+        try:
+            if 'plot_timeseries_cb' in locals() and plot_timeseries_cb.value and len(fig.data) > 0:
+                ys = []
+                for tr in fig.data:
+                    try:
+                        ys.extend([float(v) for v in tr.y if v is not None and np.isfinite(v)])
+                    except Exception:
+                        pass
+                if ys:
+                    return float(np.nanmin(ys)), float(np.nanmax(ys))
+        except Exception:
+            pass
+        # Fallback to current single-spectrum data bounds
+        y0min = float(np.nanmin(y_data)) if len(y_data) else 0.0
+        y0max = float(np.nanmax(y_data)) if len(y_data) else 1.0
+        return y0min, y0max
+
     def _draw_first_click(x0: float):
+        y0min, y0max = _current_y_bounds()
         vline = dict(
             type="line",
             x0=x0,
             x1=x0,
-            y0=(float(np.nanmin(y_data)) if len(y_data) else 0.0),
-            y1=(float(np.nanmax(y_data)) if len(y_data) else 1.0),
+            y0=y0min,
+            y1=y0max,
             line=dict(color="red", dash="dot"),
             name="norm_vline_first",
         )
         fig.add_shape(vline)
 
     def _draw_selection_visuals(x0, x1):
-        y0min = float(np.nanmin(y_data)) if len(y_data) else 0.0
-        y0max = float(np.nanmax(y_data)) if len(y_data) else 1.0
+        y0min, y0max = _current_y_bounds()
         vline1 = dict(
             type="line",
             x0=x0,
@@ -6614,6 +6773,14 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
             with info_out:
                 clear_output(wait=True)
                 print("No spectra match the current filters.")
+            # If in time-series mode, also clear the plot so it's obvious
+            try:
+                if plot_timeseries_cb.value:
+                    with fig.batch_update():
+                        fig.data = tuple()
+                        fig.update_layout(title="Time Series | No data to display")
+            except Exception:
+                pass
             return
         spectrum_sel.options = opts
         # Preserve existing selection if still valid; otherwise require manual user selection
@@ -6622,13 +6789,99 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
             with info_out:
                 clear_output(wait=True)
                 print("Select a spectrum from the dropdown to begin normalization.")
+        # If time-series mode is active, refresh plot to reflect current filters
+        try:
+            if plot_timeseries_cb.value:
+                _update_plot_for_selection()
+        except Exception:
+            pass
 
     def _update_plot_for_selection(*_):
         idx = spectrum_sel.value
-        if idx is None:
-            # No active plot -> keep mark row hidden
+        # Time-series mode: plot all spectra currently present in dropdown options (filtered set)
+        if plot_timeseries_cb.value:
+            try:
+                option_indices = [val for label, val in spectrum_sel.options if val is not None]
+            except Exception:
+                option_indices = []
+            if not option_indices:
+                with info_out:
+                    clear_output(wait=True)
+                    print("No spectra available (adjust Material/Conditions or Include bad spectra).")
+                try:
+                    mark_row.layout.display = "none"
+                except Exception:
+                    pass
+                with fig.batch_update():
+                    fig.data = tuple()
+                    fig.update_layout(title="Time Series | No spectra")
+                return
+            traces = []
+            count_plotted = 0
+            multi_material = material_dd.value == "any"
+            for i in option_indices:
+                try:
+                    r = FTIR_DataFrame.loc[i]
+                    x_arr, y_arr, _used_bc = _get_xy(i)
+                    if x_arr.size < 2 or y_arr.size < 2 or x_arr.size != y_arr.size:
+                        continue
+                    t = r.get("Time", "?")
+                    cond_val = r.get(cond_col, "?") if cond_col else None
+                    mat_val = r.get("Material", "?")
+                    parts = []
+                    if multi_material:
+                        parts.append(str(mat_val))
+                    parts.append(f"t={t}")
+                    if cond_col:
+                        parts.append(str(cond_val))
+                    name = " | ".join(parts)
+                    traces.append(go.Scatter(x=x_arr.tolist(), y=y_arr.tolist(), mode="lines", name=name))
+                    count_plotted += 1
+                except Exception:
+                    continue
+            title_mat = material_dd.value if material_dd.value != "any" else "All Materials"
+            title_cond_sel = conditions_dd.value if (cond_col and conditions_dd.value != "any") else None
+            with fig.batch_update():
+                fig.data = tuple(traces)
+                title = f"Time Series | {title_mat}"
+                if title_cond_sel:
+                    title += f" | Condition: {title_cond_sel} (+ unexposed)"
+                fig.update_layout(title=title)
+            # Attach click handlers to all traces (non-Colab) for range selection
+            try:
+                if not _IN_COLAB:
+                    for tr in fig.data:
+                        try:
+                            tr.on_click(_on_click)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            _clear_selection_visuals()
+            selected_points.clear()
             try:
                 mark_row.layout.display = "none"
+            except Exception:
+                pass
+            with info_out:
+                clear_output(wait=True)
+                print(f"Plotted {count_plotted} trace(s). Click two points to set normalization range.")
+            return
+        # Single-spectrum mode below
+        if idx is None:
+            # Leaving time-series mode or no spectrum chosen yet -> clear figure for clarity
+            try:
+                mark_row.layout.display = "none"
+            except Exception:
+                pass
+            try:
+                if not plot_timeseries_cb.value:
+                    with fig.batch_update():
+                        fig.data = tuple()
+                        fig.update_layout(title="Select a spectrum (or enable Time-Series)")
+                    with info_out:
+                        clear_output(wait=True)
+                        print("Choose a spectrum from the dropdown to plot, or enable Time-Series.")
             except Exception:
                 pass
             return
@@ -6638,9 +6891,15 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
         nonlocal x_data, y_data
         x_arr, y_arr, used_bc = _get_xy(idx)
         x_data, y_data = x_arr, y_arr
-        # update trace
-        fig.data[0].x = x_data.tolist()
-        fig.data[0].y = y_data.tolist()
+        # update trace (create if missing)
+        try:
+            if len(fig.data) == 0:
+                fig.add_scatter(x=x_data.tolist(), y=y_data.tolist(), mode="lines", name="Spectrum")
+            else:
+                fig.data[0].x = x_data.tolist()
+                fig.data[0].y = y_data.tolist()
+        except Exception:
+            pass
         try:
             fig.data[0].name = (
                 "Baseline-Corrected" if used_bc else "Raw Data (baseline not saved)"
@@ -6778,6 +7037,7 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
             material_dd,
             conditions_dd,
             include_bad_cb,
+            plot_timeseries_cb,
             info_out,  # ensure info output removed after close
         ]
         if range_slider is not None:
@@ -6913,6 +7173,8 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
     conditions_dd.observe(_rebuild_spectrum_options, names="value")
     spectrum_sel.observe(_update_plot_for_selection, names="value")
     include_bad_cb.observe(_rebuild_spectrum_options, names="value")
+    include_bad_cb.observe(_update_plot_for_selection, names="value")
+    plot_timeseries_cb.observe(_update_plot_for_selection, names="value")
     save_mat_btn.on_click(_save_for_this_material)
     redo_btn.on_click(_redo)
     # The helper already wires core quality changes; add post-effects
@@ -6922,7 +7184,7 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
 
     # Layout: controls on top, then plot, then info and messages, then buttons
     controls_row = widgets.HBox([material_dd, conditions_dd])
-    spectrum_row = widgets.HBox([spectrum_sel, include_bad_cb])
+    spectrum_row = widgets.HBox([spectrum_sel, include_bad_cb, plot_timeseries_cb])
     if range_slider is not None:
         # Compose Colab range selection row with texts + slider + Apply button and help
         try:
