@@ -13,115 +13,107 @@ from pybaselines.spline import irsqr
 from pybaselines.classification import fabc
 from scipy.interpolate import CubicSpline
 from pybaselines.utils import optimize_window
-from scipy.signal import find_peaks
 import ast
-import ipywidgets as widgets
+import html
+import contextlib
 import plotly.graph_objs as go
-from IPython.display import display, clear_output
+import ipywidgets as widgets
+from IPython.display import clear_output, display
 from math import ceil
-import importlib
 from plotly.subplots import make_subplots
-import threading
-from lmfit.models import PseudoVoigtModel
 import json
+from scipy.signal import find_peaks
+import importlib
+import threading
+import time
+from lmfit.models import PseudoVoigtModel
 
-# ----------------------- Colab environment detection ----------------------- #
-# Detect if running inside Google Colab so click-based interactions that rely
-# on Plotly FigureWidget callbacks can be replaced with slider/text-input
-# fallbacks (Colab does not support the .on_click events reliably).
-try:  # noqa: SIM105
-    import google.colab  # type: ignore  # noqa: F401
-
+# Environment detection (used for some interactive behaviors)
+try:
+    import google.colab  # type: ignore
     _IN_COLAB = True
-except Exception:  # pragma: no cover
+except Exception:
     _IN_COLAB = False
 
-import time
-import html
-import json
-import contextlib
+    
+def _convert_dates_iso(directory: str, dry_run: bool = False):
+    """Convert date substrings in folder and file names under ``directory`` to ISO
+    format (YYYY-MM-DD). Recognizes MM-DD-YYYY (US) patterns and variants with
+    separators '-', '_', '.', or space. Already-ISO dates are left unchanged.
 
-# ----------------------- Date conversion helper (ISO) ----------------------- #
-def _convert_dates_iso(directory, *, dry_run: bool = False):
-    """Rename dates in filenames and folder names under `directory` to ISO (YYYY-MM-DD).
-
-    Handles patterns:
-    - YYYY-MM-DD (already ISO, left unchanged)
-    - MM-DD-YYYY or M-D-YYYY
-    - MMDDYYYY
-    - YYYYMMDD
-    Safely renames both folders and files, preserving other name parts.
-    Set dry_run=True to only print intended changes without renaming.
+    Parameters:
+        directory: Root directory to scan.
+        dry_run: If True, only print planned changes.
     """
-    def _convert_to_iso(date_str):
-        # Already ISO
-        if re.match(r"^\d{4}-\d{2}-\d{2}$", date_str):
-            return date_str
-        # MM-DD-YYYY or M-D-YYYY
-        m = re.match(r"^(\d{1,2})-(\d{1,2})-(\d{4})$", date_str)
-        if m:
-            mm, dd, yy = m.groups()
-            return f"{yy}-{int(mm):02d}-{int(dd):02d}"
-        # MMDDYYYY
-        m = re.match(r"^(\d{2})(\d{2})(\d{4})$", date_str)
-        if m:
-            mm, dd, yy = m.groups()
-            return f"{yy}-{mm}-{dd}"
-        # YYYYMMDD
-        m = re.match(r"^(\d{4})(\d{2})(\d{2})$", date_str)
-        if m:
-            yy, mm, dd = m.groups()
-            return f"{yy}-{mm}-{dd}"
-        return date_str
+    if not os.path.isdir(directory):
+        raise FileNotFoundError(f"Directory not found: {directory}")
 
-    date_patterns = [
-        r"\b\d{4}-\d{2}-\d{2}\b",      # ISO
-        r"\b\d{1,2}-\d{1,2}-\d{4}\b",  # MM-DD-YYYY / M-D-YYYY
-        r"\b\d{8}\b",                   # contiguous 8 digits (MMDDYYYY or YYYYMMDD)
-    ]
+    # Regex to capture potential date tokens (month/day/year with varied separators)
+    date_token = re.compile(r"\b\d{1,2}[-_\. ]\d{1,2}[-_\. ]\d{4}\b")
 
-    print("Renaming dates in filenames/folders to ISO format...")
-    for root, dirs, files in os.walk(directory):
-        # Folders
-        for current_dir in list(dirs):
-            new_dirname = current_dir
-            for pattern in date_patterns:
-                for date_match in re.findall(pattern, current_dir):
-                    iso_date = _convert_to_iso(date_match)
-                    if iso_date != date_match:
-                        print(
-                            f"In folder '{current_dir}': changing date '{date_match}' -> '{iso_date}'"
-                        )
-                        new_dirname = new_dirname.replace(date_match, iso_date)
-            if new_dirname != current_dir:
-                old_dirpath = os.path.join(root, current_dir)
-                new_dirpath = os.path.join(root, new_dirname)
+    def _normalize_token(token: str) -> str:
+        # unify separators to '-'
+        clean = re.sub(r"[-_\. ]", "-", token)
+        parts = clean.split("-")
+        if len(parts) != 3:
+            return token
+        a, b, c = parts
+        # If already ISO (year first)
+        if len(a) == 4:
+            return f"{a}-{b.zfill(2)}-{c.zfill(2)}"  # ensure zero padding
+        # Otherwise treat as month-day-year
+        if len(c) == 4 and len(a) <= 2 and len(b) <= 2:
+            # Basic bounds check
+            try:
+                m = int(a); d = int(b)
+                if not (1 <= m <= 12 and 1 <= d <= 31):
+                    return token
+            except Exception:
+                return token
+            return f"{c}-{a.zfill(2)}-{b.zfill(2)}"
+        return token
+
+    def _rename_entry(parent: str, name: str) -> str:
+        new_name = name
+        for match in date_token.findall(name):
+            iso = _normalize_token(match)
+            if iso != match:
+                print(f"Found date '{match}' -> '{iso}' in '{name}'")
+                new_name = new_name.replace(match, iso)
+        return new_name
+
+    print("Converting date substrings to ISO format..." if not dry_run else "(dry-run) Simulating date conversion...")
+    # Rename directories first so file paths remain valid
+    for current_root, dirnames, filenames in os.walk(directory):
+        # Directories
+        for d in list(dirnames):
+            new_d = _rename_entry(current_root, d)
+            if new_d != d:
+                old_path = os.path.join(current_root, d)
+                new_path = os.path.join(current_root, new_d)
                 if dry_run:
-                    print(f"(dry-run) Would rename folder: {old_dirpath} -> {new_dirpath}")
+                    print(f"(dry-run) Would rename directory: {old_path} -> {new_path}")
                 else:
-                    print(f"Renaming folder: {old_dirpath} -> {new_dirpath}")
-                    os.rename(old_dirpath, new_dirpath)
+                    print(f"Renaming directory: {old_path} -> {new_path}")
+                    os.rename(old_path, new_path)
+                # Update dirnames list for continued traversal
+                try:
+                    dir_index = dirnames.index(d)
+                    dirnames[dir_index] = new_d
+                except ValueError:
+                    pass
         # Files
-        for current_filename in files:
-            new_filename = current_filename
-            for pattern in date_patterns:
-                for date_match in re.findall(pattern, current_filename):
-                    iso_date = _convert_to_iso(date_match)
-                    if iso_date != date_match:
-                        print(
-                            f"In file '{current_filename}': changing date '{date_match}' -> '{iso_date}'"
-                        )
-                        new_filename = new_filename.replace(date_match, iso_date)
-            if new_filename != current_filename:
-                old_filepath = os.path.join(root, current_filename)
-                new_filepath = os.path.join(root, new_filename)
+        for fname in filenames:
+            new_fname = _rename_entry(current_root, fname)
+            if new_fname != fname:
+                old_fp = os.path.join(current_root, fname)
+                new_fp = os.path.join(current_root, new_fname)
                 if dry_run:
-                    print(f"(dry-run) Would rename file: {old_filepath} -> {new_filepath}")
+                    print(f"(dry-run) Would rename file: {old_fp} -> {new_fp}")
                 else:
-                    print(f"Renaming file: {old_filepath} -> {new_filepath}")
-                    os.rename(old_filepath, new_filepath)
+                    print(f"Renaming file: {old_fp} -> {new_fp}")
+                    os.rename(old_fp, new_fp)
     print("Date renaming to ISO format complete." if not dry_run else "(dry-run) Date renaming simulation complete.")
-
 
 def rename_files(
     directory=None,
@@ -6395,7 +6387,13 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
         layout=widgets.Layout(width="40%"),
     )
     include_bad_cb = widgets.Checkbox(value=False, description="Include bad spectra")
-    plot_timeseries_cb = widgets.Checkbox(value=False, description="Plot TIme-Series")
+    # New user-facing display mode toggle: Single vs Time-series
+    display_mode = widgets.ToggleButtons(
+        options=[("Single spectrum", "single"), ("Time-series", "series")],
+        value="single",
+        description="Display",
+        layout=widgets.Layout(width="40%"),
+    )
     spectrum_sel = widgets.Dropdown(
         options=[], description="Spectrum", layout=widgets.Layout(width="70%")
     )
@@ -6438,7 +6436,7 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
         In time-series mode, compute from all plotted traces; otherwise use current y_data.
         """
         try:
-            if 'plot_timeseries_cb' in locals() and plot_timeseries_cb.value and len(fig.data) > 0:
+            if display_mode.value == "series" and len(fig.data) > 0:
                 ys = []
                 for tr in fig.data:
                     try:
@@ -6775,7 +6773,7 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
                 print("No spectra match the current filters.")
             # If in time-series mode, also clear the plot so it's obvious
             try:
-                if plot_timeseries_cb.value:
+                if display_mode.value == "series":
                     with fig.batch_update():
                         fig.data = tuple()
                         fig.update_layout(title="Time Series | No data to display")
@@ -6786,12 +6784,14 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
         # Preserve existing selection if still valid; otherwise require manual user selection
         if spectrum_sel.value not in [v for _, v in opts]:
             spectrum_sel.value = None
-            with info_out:
-                clear_output(wait=True)
-                print("Select a spectrum from the dropdown to begin normalization.")
+            # Only show dropdown guidance in single-spectrum mode
+            if display_mode.value == "single":
+                with info_out:
+                    clear_output(wait=True)
+                    print("Select a spectrum from the dropdown to begin normalization.")
         # If time-series mode is active, refresh plot to reflect current filters
         try:
-            if plot_timeseries_cb.value:
+            if display_mode.value == "series":
                 _update_plot_for_selection()
         except Exception:
             pass
@@ -6799,15 +6799,49 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
     def _update_plot_for_selection(*_):
         idx = spectrum_sel.value
         # Time-series mode: plot all spectra currently present in dropdown options (filtered set)
-        if plot_timeseries_cb.value:
+        if display_mode.value == "series":
+            # Require specific Material and (if present) Conditions before plotting
             try:
-                option_indices = [val for label, val in spectrum_sel.options if val is not None]
+                if material_dd.value == "any" or (cond_col and conditions_dd.value == "any"):
+                    with info_out:
+                        clear_output(wait=True)
+                        print("Select specific Material and Conditions (not 'any') to view time-series.")
+                    try:
+                        mark_row.layout.display = "none"
+                    except Exception:
+                        pass
+                    with fig.batch_update():
+                        fig.data = tuple()
+                        fig.update_layout(title="Time Series | Awaiting selections")
+                    return
             except Exception:
-                option_indices = []
-            if not option_indices:
+                pass
+            # Build filtered DataFrame directly (dropdown hidden in series mode)
+            try:
+                filtered_ts = FTIR_DataFrame.copy()
+                if material_dd.value != "any":
+                    filtered_ts = filtered_ts[filtered_ts.get("Material", pd.Series([])).astype(str) == str(material_dd.value)]
+                if cond_col and conditions_dd.value != "any":
+                    cond_series = filtered_ts.get(cond_col, pd.Series([None]*len(filtered_ts))).astype(str)
+                    sel_cond = str(conditions_dd.value)
+                    mask = (cond_series == sel_cond) | (cond_series.str.strip().str.lower() == "unexposed")
+                    filtered_ts = filtered_ts[mask]
+                if not include_bad_cb.value and len(filtered_ts):
+                    try:
+                        filtered_ts = filtered_ts[_quality_good_mask(filtered_ts)]
+                    except Exception:
+                        pass
+                if "Time" in filtered_ts.columns:
+                    try:
+                        filtered_ts = filtered_ts.sort_values(by="Time")
+                    except Exception:
+                        pass
+            except Exception:
+                filtered_ts = FTIR_DataFrame.head(0)
+            if filtered_ts is None or len(filtered_ts) == 0:
                 with info_out:
                     clear_output(wait=True)
-                    print("No spectra available (adjust Material/Conditions or Include bad spectra).")
+                    print("No spectra match the current filters.")
                 try:
                     mark_row.layout.display = "none"
                 except Exception:
@@ -6816,33 +6850,64 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
                     fig.data = tuple()
                     fig.update_layout(title="Time Series | No spectra")
                 return
-            traces = []
+            series_data = []  # list of dicts: {x, y, name}
             count_plotted = 0
-            multi_material = material_dd.value == "any"
-            for i in option_indices:
+            for i in filtered_ts.index:
                 try:
                     r = FTIR_DataFrame.loc[i]
                     x_arr, y_arr, _used_bc = _get_xy(i)
                     if x_arr.size < 2 or y_arr.size < 2 or x_arr.size != y_arr.size:
                         continue
-                    t = r.get("Time", "?")
+                    tval = r.get("Time", "?")
                     cond_val = r.get(cond_col, "?") if cond_col else None
-                    mat_val = r.get("Material", "?")
-                    parts = []
-                    if multi_material:
-                        parts.append(str(mat_val))
-                    parts.append(f"t={t}")
+                    parts = [f"t={tval}"]
                     if cond_col:
                         parts.append(str(cond_val))
                     name = " | ".join(parts)
-                    traces.append(go.Scatter(x=x_arr.tolist(), y=y_arr.tolist(), mode="lines", name=name))
+                    series_data.append({
+                        "x": x_arr.tolist(),
+                        "y": y_arr.tolist(),
+                        "name": name,
+                    })
                     count_plotted += 1
                 except Exception:
                     continue
-            title_mat = material_dd.value if material_dd.value != "any" else "All Materials"
+            if len(series_data) == 0:
+                with info_out:
+                    clear_output(wait=True)
+                    print("No spectra match the current filters.")
+                try:
+                    mark_row.layout.display = "none"
+                except Exception:
+                    pass
+                with fig.batch_update():
+                    fig.data = tuple()
+                    fig.update_layout(title="Time Series | No data to display")
+                # Still reveal container so user sees the state
+                try:
+                    bordered_plot.layout.display = ""
+                except Exception:
+                    pass
+                try:
+                    action_row.layout.display = "none"
+                except Exception:
+                    pass
+                return
+            title_mat = material_dd.value
             title_cond_sel = conditions_dd.value if (cond_col and conditions_dd.value != "any") else None
             with fig.batch_update():
-                fig.data = tuple(traces)
+                # Shrink to desired number of traces by taking a subset (allowed by FigureWidget)
+                while len(fig.data) > len(series_data):
+                    fig.data = fig.data[:-1]
+                # Update existing traces or add new ones
+                for i, d in enumerate(series_data):
+                    if i < len(fig.data):
+                        fig.data[i].x = d["x"]
+                        fig.data[i].y = d["y"]
+                        fig.data[i].mode = "lines"
+                        fig.data[i].name = d["name"]
+                    else:
+                        fig.add_scatter(x=d["x"], y=d["y"], mode="lines", name=d["name"])
                 title = f"Time Series | {title_mat}"
                 if title_cond_sel:
                     title += f" | Condition: {title_cond_sel} (+ unexposed)"
@@ -6865,7 +6930,16 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
                 pass
             with info_out:
                 clear_output(wait=True)
-                print(f"Plotted {count_plotted} trace(s). Click two points to set normalization range.")
+                print(f"Plotted {count_plotted} trace(s). Click two points to select the tip of the normalization peak.")
+            # Reveal plot container and show Save/Redo in time-series mode
+            try:
+                bordered_plot.layout.display = ""
+            except Exception:
+                pass
+            try:
+                action_row.layout.display = ""
+            except Exception:
+                pass
             return
         # Single-spectrum mode below
         if idx is None:
@@ -6875,7 +6949,7 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
             except Exception:
                 pass
             try:
-                if not plot_timeseries_cb.value:
+                if display_mode.value != "series":
                     with fig.batch_update():
                         fig.data = tuple()
                         fig.update_layout(title="Select a spectrum (or enable Time-Series)")
@@ -6920,7 +6994,16 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
                 print(
                     "Baseline-corrected data unavailable; showing raw data (apply baseline first)."
                 )
-            print("Click two points to define the normalization range.")
+            print("Click two points to select the tip of the normalization peak.")
+        # Reveal plot and action buttons for single-spectrum mode
+        try:
+            bordered_plot.layout.display = ""
+        except Exception:
+            pass
+        try:
+            action_row.layout.display = ""
+        except Exception:
+            pass
         # if this row already has a saved range, visualize it
         try:
             rng = FTIR_DataFrame.loc[idx].get(target_col, None)
@@ -7002,7 +7085,9 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
         ),
     )
     # Main control row excludes mark buttons; they go on their own row as a pair
-    btn_box = widgets.HBox([save_mat_btn, redo_btn, cancel_btn])
+    # Separate action buttons from Close so Close is always visible
+    action_row = widgets.HBox([save_mat_btn, redo_btn])
+    close_row = widgets.HBox([cancel_btn])
     mark_row = widgets.HBox([mark_bad_btn, mark_good_btn])
     # Hide Mark buttons until a spectrum is selected; place below plot inside border
     try:
@@ -7013,6 +7098,15 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
         [fig, mark_row],
         layout=widgets.Layout(border="1px solid #ccc", padding="8px", margin="6px 0"),
     )
+    # Hide plot and action buttons until actual plotting occurs
+    try:
+        bordered_plot.layout.display = "none"
+    except Exception:
+        pass
+    try:
+        action_row.layout.display = "none"
+    except Exception:
+        pass
 
     # Refresh function provided by helper; keep name for local uses
 
@@ -7037,7 +7131,7 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
             material_dd,
             conditions_dd,
             include_bad_cb,
-            plot_timeseries_cb,
+            display_mode,
             info_out,  # ensure info output removed after close
         ]
         if range_slider is not None:
@@ -7048,7 +7142,7 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
             except Exception:
                 pass
         # Close layout containers (including bordered plot frame) so only summary msg_out remains
-        for container in (controls_row, spectrum_row, mark_row, btn_box, bordered_plot):
+        for container in (controls_row, mode_row, spectrum_row, mark_row, action_row, close_row, bordered_plot):
             try:
                 container.close()
             except Exception:
@@ -7056,23 +7150,33 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
 
 
     def _save_for_this_material(_b=None):
-        idx = spectrum_sel.value
-        if idx is None:
-            with msg_out:
-                clear_output(wait=True)
-                print("No spectrum selected.")
-            return
+        # Determine material context and validate selection range
         rng = _current_range()
         if rng is None:
             with msg_out:
                 clear_output(wait=True)
                 print("Please select two points before saving.")
             return
-        mat = FTIR_DataFrame.loc[idx].get("Material", None)
+        mat = None
+        if display_mode.value == "series":
+            # In time-series mode, use the chosen Material directly
+            try:
+                mat = material_dd.value if material_dd.value != "any" else None
+            except Exception:
+                mat = None
+        else:
+            # In single-spectrum mode, infer from the selected row
+            idx = spectrum_sel.value
+            if idx is None:
+                with msg_out:
+                    clear_output(wait=True)
+                    print("No spectrum selected.")
+                return
+            mat = FTIR_DataFrame.loc[idx].get("Material", None)
         if mat is None:
             with msg_out:
                 clear_output(wait=True)
-                print("Row has no 'Material' value; cannot save for material.")
+                print("Material not determined; select a material/spectrum first.")
             return
         mask = FTIR_DataFrame["Material"] == mat
         FTIR_DataFrame.loc[mask, target_col] = str(rng)
@@ -7103,7 +7207,7 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
         _clear_selection_visuals()
         with msg_out:
             clear_output(wait=True)
-            print("Selection cleared. Click two points to select a range.")
+            print("Selection cleared. Click two points to select the tip of the normalization peak.")
 
     def _close(_b=None):
         # Clear all prior info/messages so only session summary remains
@@ -7174,7 +7278,9 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
     spectrum_sel.observe(_update_plot_for_selection, names="value")
     include_bad_cb.observe(_rebuild_spectrum_options, names="value")
     include_bad_cb.observe(_update_plot_for_selection, names="value")
-    plot_timeseries_cb.observe(_update_plot_for_selection, names="value")
+    # Ensure time-series re-plots immediately on filter changes
+    material_dd.observe(_update_plot_for_selection, names="value")
+    conditions_dd.observe(_update_plot_for_selection, names="value")
     save_mat_btn.on_click(_save_for_this_material)
     redo_btn.on_click(_redo)
     # The helper already wires core quality changes; add post-effects
@@ -7182,9 +7288,93 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
     mark_good_btn.on_click(lambda _b=None: _post_mark_update("good"))
     cancel_btn.on_click(_close)
 
+    # New behaviors: mode toggle and reveal-on-plot
+    def _on_display_mode(change):
+        is_series = change.get("new") == "series"
+        # Toggle spectrum selector visibility
+        try:
+            spectrum_row.layout.display = "none" if is_series else ""
+        except Exception:
+            pass
+        # Hide plot and action buttons until an actual plot is produced
+        try:
+            bordered_plot.layout.display = "none"
+        except Exception:
+            pass
+        try:
+            action_row.layout.display = "none"
+        except Exception:
+            pass
+        try:
+            mark_row.layout.display = "none"
+        except Exception:
+            pass
+        # Auto-trigger update when switching to time-series
+        if is_series:
+            try:
+                _rebuild_spectrum_options()
+                _update_plot_for_selection(None)
+            except Exception:
+                pass
+
+    def _on_spectrum_change_reveal(change):
+        # Reveal plot and action buttons when a single spectrum is chosen
+        if display_mode.value == "single" and change.get("new") is not None:
+            try:
+                bordered_plot.layout.display = ""
+            except Exception:
+                pass
+            try:
+                action_row.layout.display = ""
+            except Exception:
+                pass
+            try:
+                mark_row.layout.display = ""
+            except Exception:
+                pass
+
+    def _on_filter_change_reveal(_change):
+        # In time-series mode, only reveal plot after both Material and Conditions chosen (if conditions exist)
+        if display_mode.value == "series":
+            material_ready = material_dd.value != "any"
+            cond_ready = True if not cond_col else conditions_dd.value != "any"
+            if material_ready and cond_ready:
+                try:
+                    bordered_plot.layout.display = ""
+                except Exception:
+                    pass
+                try:
+                    action_row.layout.display = ""  # show Save/Redo in series mode
+                except Exception:
+                    pass
+                try:
+                    mark_row.layout.display = "none"
+                except Exception:
+                    pass
+            else:
+                # Hide until selections complete
+                try:
+                    bordered_plot.layout.display = "none"
+                except Exception:
+                    pass
+                try:
+                    action_row.layout.display = "none"
+                except Exception:
+                    pass
+                try:
+                    mark_row.layout.display = "none"
+                except Exception:
+                    pass
+
+    display_mode.observe(_on_display_mode, names="value")
+    spectrum_sel.observe(_on_spectrum_change_reveal, names="value")
+    material_dd.observe(_on_filter_change_reveal, names="value")
+    conditions_dd.observe(_on_filter_change_reveal, names="value")
+
     # Layout: controls on top, then plot, then info and messages, then buttons
     controls_row = widgets.HBox([material_dd, conditions_dd])
-    spectrum_row = widgets.HBox([spectrum_sel, include_bad_cb, plot_timeseries_cb])
+    mode_row = widgets.HBox([display_mode])
+    spectrum_row = widgets.HBox([spectrum_sel, include_bad_cb])
     if range_slider is not None:
         # Compose Colab range selection row with texts + slider + Apply button and help
         try:
@@ -7193,6 +7383,7 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
             )
             display(
                 controls_row,
+                mode_row,
                 spectrum_row,
                 colab_range_row,
                 range_slider,
@@ -7200,20 +7391,32 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
                 bordered_plot,
                 info_out,
                 msg_out,
-                btn_box,
+                action_row,
+                close_row,
             )
         except Exception:
             display(
                 controls_row,
+                mode_row,
                 spectrum_row,
                 range_slider,
                 bordered_plot,
                 info_out,
                 msg_out,
-                btn_box,
+                action_row,
+                close_row,
             )
     else:
-        display(controls_row, spectrum_row, bordered_plot, info_out, msg_out, btn_box)
+        display(
+            controls_row,
+            mode_row,
+            spectrum_row,
+            bordered_plot,
+            info_out,
+            msg_out,
+            action_row,
+            close_row,
+        )
     try:
         _refresh_mark_buttons()
     except Exception:
@@ -8224,16 +8427,6 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         description="Conditions",
         layout=widgets.Layout(width="40%"),
     )
-    center_window = widgets.FloatSlider(
-        value=15.0,
-        min=1.0,
-        max=50.0,
-        step=1.0,
-        description="Center ±window (cm⁻¹)",
-        continuous_update=False,
-        style={"description_width": "auto"},
-        readout_format=".0f",
-    )
     # Fit range selector: only peaks within this range will be modeled and shown
     fit_range = widgets.FloatRangeSlider(
         value=[xmin, xmax],
@@ -8245,21 +8438,13 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         readout_format=".1f",
         layout=widgets.Layout(width="90%"),
     )
-    init_sigma = widgets.FloatSlider(
-        value=10.0,
-        min=1.0,
-        max=100.0,
-        step=0.5,
-        description="Initial σ (cm⁻¹)",
-        continuous_update=False,
-        style={"description_width": "auto"},
-        readout_format=".1f",
-    )
+    # Per-peak default seeds (no global center/sigma controls)
+    PER_PEAK_DEFAULT_CENTER_WINDOW = 15.0
+    PER_PEAK_DEFAULT_SIGMA = 10.0
+    SESSION_WINDOW_MARGIN = 1.0  # cm⁻¹ margin used when sizing session peak window vs existing peaks
     # Defaults for reset operations
     DEFAULT_ALPHA = 0.5
     DEFAULT_INCLUDE = True
-    default_center_window_value = float(center_window.value)
-    default_init_sigma_value = float(init_sigma.value)
     default_fit_range_value = (float(fit_range.value[0]), float(fit_range.value[1]))
     # Add peaks workflow controls
     # Fit button (manual trigger for fitting)
@@ -8353,21 +8538,11 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             last_msg_ts = now
 
     # Reset buttons for globals and all
-    reset_center_btn = widgets.Button(
-        description="Reset",
-        tooltip="Reset Center ±window to default",
-        layout=widgets.Layout(width="80px"),
-    )
-    reset_sigma_btn = widgets.Button(
-        description="Reset",
-        tooltip="Reset Initial σ to default",
-        layout=widgets.Layout(width="80px"),
-    )
     reset_all_btn = widgets.Button(
-        description="Reset all",
+        description="Reset all peak parameters to defaults",
         button_style="warning",
-        tooltip="Reset all sliders and selections to defaults",
-        layout=widgets.Layout(width="120px"),
+        tooltip="Reset all per-peak sliders and selections to defaults",
+        layout=widgets.Layout(width="340px"),
     )
 
     # Cancellation/interrupt support for long-running fits
@@ -8410,25 +8585,33 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         except Exception:
             pass
 
-    # Dynamic per-peak controls: include checkbox + alpha slider per peak
+    # Dynamic per-peak controls: include checkbox + per-peak parameter sliders/locks
     alpha_sliders = []  # list[widgets.FloatSlider]
     include_checkboxes = []  # list[widgets.Checkbox]
+    center_window_sliders = []  # list[widgets.FloatSlider] per-peak center ± window
+    sigma_sliders = []  # list[widgets.FloatSlider]
+    lock_alpha_checkboxes = []  # list[widgets.Checkbox]
+    lock_center_checkboxes = []  # list[widgets.Checkbox]
+    lock_sigma_checkboxes = []  # list[widgets.Checkbox]
     peak_controls_box = widgets.VBox([])
 
     # Persisted per-spectrum settings so switching spectra preserves choices
     per_spec_alpha = {}  # idx -> list[float]
     per_spec_include = {}  # idx -> list[bool]
-    per_spec_globals = {}  # idx -> { 'center_window': float, 'init_sigma': float,
-    # 'fit_range': (lo,hi) }
+    per_spec_center_bounds = {}  # idx -> list[(minus, plus)]
+    per_spec_sigma = {}  # idx -> list[float]
+    per_spec_locks = {}  # idx -> { 'alpha': list[bool], 'center': list[bool], 'sigma': list[bool] }
+    per_spec_globals = {}  # idx -> { 'fit_range': (lo,hi) }
     # Track the last active (Material, Conditions) filter to scope the above caches
     current_filter_key = (None, None)
     # Group-level templates (by current (Material, Conditions)) so parameter changes
     # carry over across spectra within the same selection.
     group_alpha_template = {}  # (Material, Conditions) -> list[float]
     group_include_template = {}  # (Material, Conditions) -> list[bool]
-    group_globals_template = (
-        {}
-    )  # (Material, Conditions) -> {center_window, init_sigma, fit_range}
+    group_center_bounds_template = {}  # (Material, Conditions) -> list[(minus, plus)]
+    group_sigma_template = {}  # (Material, Conditions) -> list[float]
+    group_locks_template = {}  # (Material, Conditions) -> { 'alpha': list[bool], 'center': list[bool], 'sigma': list[bool] }
+    group_globals_template = ({})  # (Material, Conditions) -> {fit_range}
     # Shared, group-scoped manual/template peaks (x positions) that should carry over
     # when switching spectra within the same Material/Conditions selection.
     shared_peaks_x = None  # list[float] | None
@@ -8469,10 +8652,27 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         except Exception:
             per_spec_include[idx] = []
         try:
+            # Store as (w, w) tuples for backward compatibility
+            per_spec_center_bounds[idx] = [
+                (float(sw.value), float(sw.value)) for sw in center_window_sliders
+            ]
+        except Exception:
+            per_spec_center_bounds[idx] = []
+        try:
+            per_spec_sigma[idx] = [float(sg.value) for sg in sigma_sliders]
+        except Exception:
+            per_spec_sigma[idx] = []
+        try:
+            per_spec_locks[idx] = {
+                'alpha': [bool(cb.value) for cb in lock_alpha_checkboxes],
+                'center': [bool(cb.value) for cb in lock_center_checkboxes],
+                'sigma': [bool(cb.value) for cb in lock_sigma_checkboxes],
+            }
+        except Exception:
+            per_spec_locks[idx] = {'alpha': [], 'center': [], 'sigma': []}
+        try:
             lo, hi = _current_fit_range()
             per_spec_globals[idx] = {
-                "center_window": float(center_window.value),
-                "init_sigma": float(init_sigma.value),
                 "fit_range": (float(lo), float(hi)),
             }
         except Exception:
@@ -8489,6 +8689,18 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                     group_include_template[key] = list(per_spec_include.get(idx, []))
                 except Exception:
                     group_include_template[key] = []
+                try:
+                    group_center_bounds_template[key] = list(per_spec_center_bounds.get(idx, []))
+                except Exception:
+                    group_center_bounds_template[key] = []
+                try:
+                    group_sigma_template[key] = list(per_spec_sigma.get(idx, []))
+                except Exception:
+                    group_sigma_template[key] = []
+                try:
+                    group_locks_template[key] = dict(per_spec_locks.get(idx, {'alpha': [], 'center': [], 'sigma': []}))
+                except Exception:
+                    group_locks_template[key] = {'alpha': [], 'center': [], 'sigma': []}
                 try:
                     group_globals_template[key] = dict(per_spec_globals.get(idx, {}))
                 except Exception:
@@ -8593,6 +8805,7 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
     # --- Add-peaks mode state ---
     adding_mode = False
     new_peak_xs = []  # temporary stash of user-clicked x positions (snapped to grid)
+    new_peak_windows = {}  # x_new -> effective session window (min(default, min_dist_to_existing - margin))
 
     def _hide(w):
         try:
@@ -8726,9 +8939,38 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             _log_once("Could not determine nearest x for the clicked location.")
             return
         x_new = float(x_arr[nearest_i])
+        # Reject if within any existing visible peak's per-peak Center ± window
+        try:
+            vis_xs, _vis_ys = _get_visible_peaks(idx)
+        except Exception:
+            vis_xs = []
+        try:
+            default_win = float(PER_PEAK_DEFAULT_CENTER_WINDOW)
+        except Exception:
+            default_win = 0.0
+        try:
+            for i, cx in enumerate(vis_xs or []):
+                try:
+                    w_i = float(center_window_sliders[i].value)
+                except Exception:
+                    w_i = default_win
+                if abs(float(cx) - float(x_new)) <= abs(w_i):
+                    try:
+                        status_html.value = (
+                            f"<span style='color:#a00;'>Rejected: {x_new:.3f} cm⁻¹ overlaps existing peak @ {cx:.3f} ±{w_i:.1f} cm⁻¹. "
+                            f"Adjust selection or that peak’s Center ± window.</span>"
+                        )
+                    except Exception:
+                        _log_once(
+                            f"Rejected: {x_new:.3f} cm⁻¹ overlaps existing peak @ {cx:.3f} ±{w_i:.1f} cm⁻¹. "
+                            f"Adjust selection or that peak’s Center ± window."
+                        )
+                    return
+        except Exception:
+            pass
         # Enforce proximity using Center ±window as minimum separation (customizable)
         try:
-            min_sep = float(center_window.value)
+            min_sep = float(PER_PEAK_DEFAULT_CENTER_WINDOW)
         except Exception:
             min_sep = 0.0
         # Too close to a previously selected (session) peak?
@@ -8739,38 +8981,38 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                         f"<span style='color:#a00;'>Rejected: {x_new:.3f} cm⁻¹ is "
                         f"within ±{min_sep:.2f} cm⁻¹ of another selected peak "
                         f"({existing_x:.3f}). "
-                        f"Tip: reduce the Center ±window to fit peaks in small "
+                        f"Tip: reduce the per-peak Center ± slider to fit peaks in small "
                         f"spaces.</span>"
                     )
                 except Exception:
                     _log_once(
                         f"Rejected: {x_new:.3f} cm⁻¹ is within ±{min_sep:.2f} cm⁻¹ of "
                         f"another selected peak ({existing_x:.3f}). Tip: reduce the "
-                        f"Center ±window to fit peaks in small spaces."
+                        f"per-peak Center ± slider to fit peaks in small spaces."
                     )
                 return
-        # Too close to an existing (committed) peak for this spectrum?
-        xs_existing, _ys_existing = _get_peaks(idx)
-        for xe in xs_existing:
-            try:
-                if abs(float(xe) - x_new) <= min_sep:
-                    try:
-                        status_html.value = (
-                            f"<span style='color:#a00;'>Rejected: {x_new:.3f} cm⁻¹ is "
-                            f"within ±{min_sep:.2f} cm⁻¹ of existing peak "
-                            f"{float(xe):.3f}. "
-                            f"Tip: reduce the Center ±window to fit peaks in small "
-                            f"spaces.</span>"
-                        )
-                    except Exception:
-                        _log_once(
-                            f"Rejected: {x_new:.3f} cm⁻¹ is within ±{min_sep:.2f} cm⁻¹ "
-                            f"of existing peak {float(xe):.3f}. Tip: reduce the Center "
-                            f"±window to fit peaks in small spaces."
-                        )
-                    return
-            except Exception:
-                continue
+        # Compute an effective session window so the new peak's window won't cover existing peaks
+        try:
+            xs_existing, _ys_existing = _get_peaks(idx)
+        except Exception:
+            xs_existing = []
+        try:
+            if xs_existing:
+                min_dist = min(abs(float(xe) - x_new) for xe in xs_existing)
+            else:
+                min_dist = float('inf')
+        except Exception:
+            min_dist = float('inf')
+        try:
+            eff_window = float(PER_PEAK_DEFAULT_CENTER_WINDOW)
+            if np.isfinite(min_dist):
+                eff_window = min(eff_window, max(0.0, float(min_dist) - float(SESSION_WINDOW_MARGIN)))
+        except Exception:
+            eff_window = float(PER_PEAK_DEFAULT_CENTER_WINDOW)
+        try:
+            new_peak_windows[x_new] = float(eff_window)
+        except Exception:
+            pass
         # Record and draw a vertical line marker
         new_peak_xs.append(x_new)
         y_min = float(np.nanmin(y_arr))
@@ -8915,21 +9157,37 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             pass
 
     def _rebuild_alpha_sliders(row_idx):
-        nonlocal alpha_sliders, include_checkboxes
-        xs, ys = _get_visible_peaks(row_idx)
+        nonlocal alpha_sliders, include_checkboxes, center_window_sliders, sigma_sliders
+        nonlocal lock_alpha_checkboxes, lock_center_checkboxes, lock_sigma_checkboxes
+        # Build controls for ALL peaks, grouping by Fit X-range membership.
+        # Only in-range peaks contribute to fitting/optimization state (lists).
+        peaks_x_all, peaks_y_all = _get_peaks(row_idx)
         alpha_sliders = []
         include_checkboxes = []
+        center_window_sliders = []
+        sigma_sliders = []
+        lock_alpha_checkboxes = []
+        lock_center_checkboxes = []
+        lock_sigma_checkboxes = []
         children = []
-        if not xs:
+        if not peaks_x_all:
             peak_controls_box.children = [
                 widgets.HTML(
-                    "<b>No peaks in selected range.</b> Adjust 'Fit X-range' or run "
-                    "find_peak_info first."
+                    "<b>No peaks found.</b> Run find_peak_info first."
                 )
             ]
             return
+        try:
+            lo_rng, hi_rng = _current_fit_range()
+        except Exception:
+            lo_rng, hi_rng = float("-inf"), float("inf")
+        lo_rng_v = float(min(lo_rng, hi_rng))
+        hi_rng_v = float(max(lo_rng, hi_rng))
         saved_alphas = per_spec_alpha.get(row_idx)
         saved_includes = per_spec_include.get(row_idx)
+        saved_bounds = per_spec_center_bounds.get(row_idx)
+        saved_sigma = per_spec_sigma.get(row_idx)
+        saved_locks = per_spec_locks.get(row_idx)
         # Fallback to group-level templates if no per-spectrum values exist
         if not saved_alphas:
             try:
@@ -8941,24 +9199,48 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                 saved_includes = group_include_template.get(current_filter_key)
             except Exception:
                 saved_includes = None
-        for i, (cx, cy) in enumerate(zip(xs, ys)):
-            label = widgets.Label(
-                value=f"Peak {i+1} @ {cx:.1f} cm⁻¹",
-                layout=widgets.Layout(width="220px"),
+        if not saved_bounds:
+            try:
+                saved_bounds = group_center_bounds_template.get(current_filter_key)
+            except Exception:
+                saved_bounds = None
+        if not saved_sigma:
+            try:
+                saved_sigma = group_sigma_template.get(current_filter_key)
+            except Exception:
+                saved_sigma = None
+        if not saved_locks:
+            try:
+                saved_locks = group_locks_template.get(current_filter_key)
+            except Exception:
+                saved_locks = {'alpha': None, 'center': None, 'sigma': None}
+        if not isinstance(saved_locks, dict):
+            saved_locks = {'alpha': None, 'center': None, 'sigma': None}
+        included_boxes = []
+        excluded_boxes = []
+        for i, (cx, cy) in enumerate(zip(peaks_x_all, peaks_y_all)):
+            in_range = False
+            try:
+                in_range = lo_rng_v <= float(cx) <= hi_rng_v
+            except Exception:
+                in_range = False
+            header = widgets.HTML(
+                value=f"<b>Peak {i+1} @ {float(cx):.1f} cm⁻¹</b>" + (" <span style='color:#777;'>(out of range)</span>" if not in_range else ""),
             )
-            cb = widgets.Checkbox(
+            include_checkbox = widgets.Checkbox(
                 value=(
                     (
-                        saved_includes[i]
+                        bool(saved_includes[i])
                         if saved_includes is not None and i < len(saved_includes)
                         else DEFAULT_INCLUDE
-                    )
+                    ) if in_range else False
                 ),
-                description="Include",
+                description="Include peak in Fit",
                 indent=False,
-                layout=widgets.Layout(width="100px"),
+                layout=widgets.Layout(width="200px"),
+                disabled=(not in_range),
             )
-            s = widgets.FloatSlider(
+            alpha_slider = widgets.FloatSlider(
                 value=(
                     float(saved_alphas[i])
                     if saved_alphas is not None and i < len(saved_alphas)
@@ -8971,37 +9253,169 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                 continuous_update=False,
                 readout_format=".2f",
                 style={"description_width": "auto"},
-                layout=widgets.Layout(width="300px"),
+                layout=widgets.Layout(width="220px"),
+                disabled=(not in_range),
             )
-            # Per-slider reset button
-            rb = widgets.Button(
+            # Center ± window per-peak (uses per-peak default constant)
+            default_bound = float(PER_PEAK_DEFAULT_CENTER_WINDOW)
+            # Enforce a strictly positive lower bound for the window width
+            min_cwin = 0.5  # cm⁻¹, must be > 0
+            w_saved = (
+                float(saved_bounds[i][0])
+                if saved_bounds is not None and i < len(saved_bounds)
+                and isinstance(saved_bounds[i], (list, tuple)) and len(saved_bounds[i]) == 2
+                else default_bound
+            )
+            if not np.isfinite(w_saved) or w_saved <= 0.0:
+                w_saved = max(default_bound, min_cwin)
+            else:
+                w_saved = max(w_saved, min_cwin)
+            center_window_slider = widgets.FloatSlider(
+                value=w_saved,
+                min=min_cwin,
+                max=max(default_bound * 2.0, 1.0),
+                step=0.5,
+                description="Center ± (cm⁻¹)",
+                continuous_update=False,
+                style={"description_width": "auto"},
+                readout_format=".1f",
+                layout=widgets.Layout(width="260px"),
+                disabled=(not in_range),
+            )
+            # Sigma per-peak (uses per-peak default constant)
+            default_sigma = float(PER_PEAK_DEFAULT_SIGMA)
+            sigma_slider = widgets.FloatSlider(
+                value=(
+                    float(saved_sigma[i]) if saved_sigma is not None and i < len(saved_sigma) else default_sigma
+                ),
+                min=1.0,
+                max=100.0,
+                step=0.5,
+                description="σ (cm⁻¹)",
+                continuous_update=False,
+                style={"description_width": "auto"},
+                readout_format=".1f",
+                layout=widgets.Layout(width="220px"),
+                disabled=(not in_range),
+            )
+            # Per-parameter reset buttons (compact)
+            reset_alpha_btn = widgets.Button(
                 description="Reset",
                 tooltip="Reset α to default (0.5)",
                 layout=widgets.Layout(width="70px"),
             )
+            reset_cwin_btn = widgets.Button(
+                description="Reset",
+                tooltip="Reset Center ± to default",
+                layout=widgets.Layout(width="70px"),
+            )
+            reset_sigma_p_btn = widgets.Button(
+                description="Reset",
+                tooltip="Reset σ to default",
+                layout=widgets.Layout(width="70px"),
+            )
 
-            def _make_reset_one(slider_ref):
-                def _reset_one(_b=None):
-                    nonlocal bulk_update_in_progress
-                    bulk_update_in_progress = True
-                    try:
-                        slider_ref.value = DEFAULT_ALPHA
-                    except Exception:
-                        pass
-                    _snapshot_current_controls()
-                    bulk_update_in_progress = False
-                    _fit_and_update_plot()
+            # Wire reset handlers (capture references via defaults)
+            def _mk_alpha_reset(sl=alpha_slider):
+                return lambda _b=None: (_set_quiet(sl, "value", DEFAULT_ALPHA), _snapshot_current_controls())
 
-                return _reset_one
+            def _mk_cwin_reset(sl=center_window_slider, defb=lambda: float(PER_PEAK_DEFAULT_CENTER_WINDOW)):
+                return lambda _b=None: (_set_quiet(sl, "value", float(defb())), _snapshot_current_controls())
 
-            rb.on_click(_make_reset_one(s))
-            # Observe changes to snapshot + refit
-            cb.observe(_on_include_toggle, names="value")
-            s.observe(_on_alpha_change, names="value")
-            include_checkboxes.append(cb)
-            alpha_sliders.append(s)
-            children.append(widgets.HBox([label, cb, s, rb]))
-        peak_controls_box.children = children
+            def _mk_sigma_reset(sl=sigma_slider, defs=lambda: float(PER_PEAK_DEFAULT_SIGMA)):
+                return lambda _b=None: (_set_quiet(sl, "value", float(defs())), _snapshot_current_controls())
+
+            try:
+                reset_alpha_btn.on_click(_mk_alpha_reset())
+                reset_cwin_btn.on_click(_mk_cwin_reset())
+                reset_sigma_p_btn.on_click(_mk_sigma_reset())
+            except Exception:
+                pass
+            # Locks row
+            lock_alpha_checkbox = widgets.Checkbox(
+                value=(
+                    bool(saved_locks.get('alpha')[i])
+                    if isinstance(saved_locks.get('alpha'), list) and i < len(saved_locks.get('alpha'))
+                    else False
+                ),
+                description="Lock α",
+                indent=False,
+                layout=widgets.Layout(width="120px"),
+                disabled=(not in_range),
+            )
+            lock_center_checkbox = widgets.Checkbox(
+                value=(
+                    bool(saved_locks.get('center')[i])
+                    if isinstance(saved_locks.get('center'), list) and i < len(saved_locks.get('center'))
+                    else False
+                ),
+                description="Lock center",
+                indent=False,
+                layout=widgets.Layout(width="140px"),
+                disabled=(not in_range),
+            )
+            lock_sigma_checkbox = widgets.Checkbox(
+                value=(
+                    bool(saved_locks.get('sigma')[i])
+                    if isinstance(saved_locks.get('sigma'), list) and i < len(saved_locks.get('sigma'))
+                    else False
+                ),
+                description="Lock σ",
+                indent=False,
+                layout=widgets.Layout(width="120px"),
+                disabled=(not in_range),
+            )
+
+            # Observers
+            if in_range:
+                include_checkbox.observe(_on_include_toggle, names="value")
+                alpha_slider.observe(_on_alpha_change, names="value")
+                center_window_slider.observe(_on_center_sigma_change, names="value")
+                sigma_slider.observe(_on_center_sigma_change, names="value")
+                for _cb in (lock_alpha_checkbox, lock_center_checkbox, lock_sigma_checkbox):
+                    _cb.observe(lambda *_: _snapshot_current_controls(), names="value")
+
+            # Only in-range peaks participate in fitting/optimization state lists
+            if in_range:
+                include_checkboxes.append(include_checkbox)
+                alpha_sliders.append(alpha_slider)
+                center_window_sliders.append(center_window_slider)
+                sigma_sliders.append(sigma_slider)
+                lock_alpha_checkboxes.append(lock_alpha_checkbox)
+                lock_center_checkboxes.append(lock_center_checkbox)
+                lock_sigma_checkboxes.append(lock_sigma_checkbox)
+
+            sliders_row = widgets.HBox([
+                widgets.HBox([alpha_slider, reset_alpha_btn], layout=widgets.Layout(align_items="center")),
+                widgets.HBox([center_window_slider, reset_cwin_btn], layout=widgets.Layout(align_items="center")),
+                widgets.HBox([sigma_slider, reset_sigma_p_btn], layout=widgets.Layout(align_items="center")),
+            ])
+            locks_row = widgets.HBox([lock_alpha_checkbox, lock_center_checkbox, lock_sigma_checkbox])
+            include_row = widgets.HBox([include_checkbox])
+            box = widgets.VBox([header, include_row, sliders_row, locks_row], layout=widgets.Layout(border="1px solid #eee", padding="6px", margin="6px 0"))
+            if in_range:
+                included_boxes.append(box)
+            else:
+                excluded_boxes.append(box)
+
+        # Assemble with headings: Included Peaks -> Excluded Peaks (dark containers for visibility)
+        heading_included = widgets.HTML(
+            "<div style='background:#222; color:#fff; padding:6px 10px; border-radius:6px;"
+            " border:1px solid #111; font-weight:600;'>Included Peaks</div>"
+        )
+        heading_excluded = widgets.HTML(
+            "<div style='background:#2f2f2f; color:#fff; padding:6px 10px; border-radius:6px;"
+            " border:1px solid #1a1a1a; font-weight:600;'>Excluded Peaks</div>"
+        )
+        note_none = widgets.HTML("<span style='color:#777;'>No peaks in selected range. Adjust 'Fit X-range' or run find_peak_info.</span>")
+        final_children = [heading_included]
+        if included_boxes:
+            final_children.extend(included_boxes)
+        else:
+            final_children.append(note_none)
+        final_children.append(heading_excluded)
+        final_children.extend(excluded_boxes)
+        peak_controls_box.children = final_children
 
     # --- Filtering helpers for material/conditions -> spectrum options ---
     def _row_condition_value(row):
@@ -9036,17 +9450,14 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                 per_spec_alpha.clear()
                 per_spec_include.clear()
                 per_spec_globals.clear()
+                per_spec_center_bounds.clear()
+                per_spec_sigma.clear()
+                per_spec_locks.clear()
                 last_redchi_by_idx.clear()
                 last_result_by_idx.clear()
                 # Reset shared peaks template when filter changes
                 shared_peaks_x = None
-                # Reset global sliders to defaults without triggering refits
-                bulk_update_in_progress = True
-                try:
-                    center_window.value = default_center_window_value
-                    init_sigma.value = default_init_sigma_value
-                except Exception:
-                    pass
+                # No global sliders to reset; keep only per-peak/state caches
                 bulk_update_in_progress = False
             except Exception:
                 pass
@@ -9202,8 +9613,27 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             _finish_fit_guard()
             return None
 
-        # Determine which peaks are included
+        # Determine which peaks are included (respect Fit X-range explicitly)
         included = [i for i, cb in enumerate(include_checkboxes) if cb.value]
+        try:
+            lo_chk, hi_chk = _current_fit_range()
+        except Exception:
+            lo_chk, hi_chk = float("-inf"), float("inf")
+        lo_v_chk = float(min(lo_chk, hi_chk))
+        hi_v_chk = float(max(lo_chk, hi_chk))
+        # Auto-exclude any selected peaks whose centers fall outside the current range
+        try:
+            included_in_range = [i for i in included if lo_v_chk <= float(peaks_x[i]) <= hi_v_chk]
+        except Exception:
+            included_in_range = list(included)
+        if len(included_in_range) != len(included):
+            included = included_in_range
+            try:
+                status_html.value = (
+                    "<span style='color:#555;'>Some peaks were auto-excluded by the Fit X-range.</span>"
+                )
+            except Exception:
+                pass
         if len(included) == 0:
             _log_once("No peaks selected in current range. Enable one or more to fit.")
             with fig.batch_update():
@@ -9296,21 +9726,40 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                     cx = peaks_x[i]
                     m = PseudoVoigtModel(prefix=f"p{i}_")
                     p = m.make_params()
+                    # Center bounds from per-peak center ± window slider if present
+                    try:
+                        w = float(center_window_sliders[i].value)
+                    except Exception:
+                        w = float(PER_PEAK_DEFAULT_CENTER_WINDOW)
+                    # Center lock
+                    lock_center_i = False
+                    try:
+                        lock_center_i = bool(lock_center_checkboxes[i].value)
+                    except Exception:
+                        lock_center_i = False
                     p[f"p{i}_center"].set(
                         value=float(cx),
-                        min=float(cx) - center_window.value,
-                        max=float(cx) + center_window.value,
+                        min=float(cx) - abs(w),
+                        max=float(cx) + abs(w),
+                        vary=(not lock_center_i),
                     )
-                    p[f"p{i}_sigma"].set(
-                        value=float(init_sigma.value), min=1e-3, max=1e3
-                    )
+                    # Sigma from per-peak slider; lock controls vary
+                    try:
+                        sg_val = float(sigma_sliders[i].value)
+                    except Exception:
+                        sg_val = float(PER_PEAK_DEFAULT_SIGMA)
+                    lock_sigma_i = False
+                    try:
+                        lock_sigma_i = bool(lock_sigma_checkboxes[i].value)
+                    except Exception:
+                        lock_sigma_i = False
+                    p[f"p{i}_sigma"].set(value=sg_val, min=1e-3, max=1e3, vary=(not lock_sigma_i))
+                    # Alpha (fraction): controlled by slider; kept fixed during lmfit; lock applies to iterative tuning only
                     alpha_val = (
                         float(alpha_sliders[i].value) if i < len(alpha_sliders) else 0.5
                     )
-                    p[f"p{i}_fraction"].set(
-                        value=alpha_val, min=0.0, max=1.0, vary=False
-                    )
-                    amp0 = abs(float(peaks_y[i])) * max(1.0, float(init_sigma.value))
+                    p[f"p{i}_fraction"].set(value=alpha_val, min=0.0, max=1.0, vary=False)
+                    amp0 = abs(float(peaks_y[i])) * max(1.0, float(sg_val))
                     p[f"p{i}_amplitude"].set(value=amp0, min=0.0)
 
                     if comp_model is None:
@@ -9625,23 +10074,11 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                 g = per_spec_globals.get(idx)
                 if g is not None:
                     try:
-                        center_window.value = float(
-                            g.get("center_window", center_window.value)
-                        )
-                    except Exception:
-                        pass
-                    try:
-                        init_sigma.value = float(g.get("init_sigma", init_sigma.value))
-                    except Exception:
-                        pass
-                    try:
                         fr = g.get("fit_range")
                         if isinstance(fr, (list, tuple)) and len(fr) == 2:
                             lo, hi = float(fr[0]), float(fr[1])
                             # clamp to bounds
-                            lo = max(
-                                float(fit_range.min), min(lo, float(fit_range.max))
-                            )
+                            lo = max(float(fit_range.min), min(lo, float(fit_range.max)))
                             hi = max(lo, min(hi, float(fit_range.max)))
                             fit_range.value = [lo, hi]
                     except Exception:
@@ -9655,24 +10092,10 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                         gg = None
                     if isinstance(gg, dict) and gg:
                         try:
-                            center_window.value = float(
-                                gg.get("center_window", center_window.value)
-                            )
-                        except Exception:
-                            pass
-                        try:
-                            init_sigma.value = float(
-                                gg.get("init_sigma", init_sigma.value)
-                            )
-                        except Exception:
-                            pass
-                        try:
                             fr = gg.get("fit_range")
                             if isinstance(fr, (list, tuple)) and len(fr) == 2:
                                 lo, hi = float(fr[0]), float(fr[1])
-                                lo = max(
-                                    float(fit_range.min), min(lo, float(fit_range.max))
-                                )
+                                lo = max(float(fit_range.min), min(lo, float(fit_range.max)))
                                 hi = max(lo, min(hi, float(fit_range.max)))
                                 fit_range.value = [lo, hi]
                         except Exception:
@@ -9775,8 +10198,6 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             spectrum_sel.close()
             material_dd.close()
             conditions_dd.close()
-            center_window.close()
-            init_sigma.close()
             add_peaks_btn.close()
             accept_new_peaks_btn.close()
             redo_new_peaks_btn.close()
@@ -9819,54 +10240,13 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
 
     material_dd.observe(_persist_pd_filters, names="value")
     conditions_dd.observe(_persist_pd_filters, names="value")
-    # Global control observers: split to avoid unnecessary per-peak UI rebuilds
-    center_window.observe(_on_center_sigma_change, names="value")
-    init_sigma.observe(_on_center_sigma_change, names="value")
+    # Observers
     fit_range.observe(_on_fit_range_change, names="value")
 
     # Wire reset buttons
-    def _reset_center(_b=None):
-        nonlocal bulk_update_in_progress
-        bulk_update_in_progress = True
-        try:
-            center_window.value = default_center_window_value
-        except Exception:
-            pass
-        _snapshot_current_controls()
-        bulk_update_in_progress = False
-        try:
-            status_html.value = "<span style='color:#555;'>Center window reset. Click Fit to update.</span>"
-        except Exception:
-            pass
-
-    def _reset_sigma(_b=None):
-        nonlocal bulk_update_in_progress
-        bulk_update_in_progress = True
-        try:
-            init_sigma.value = default_init_sigma_value
-        except Exception:
-            pass
-        _snapshot_current_controls()
-        bulk_update_in_progress = False
-        try:
-            status_html.value = (
-                "<span style='color:#555;'>Initial σ reset. Click Fit to update.</span>"
-            )
-        except Exception:
-            pass
-
     def _reset_all(_b=None):
         nonlocal bulk_update_in_progress
         bulk_update_in_progress = True
-        # Reset globals
-        try:
-            center_window.value = default_center_window_value
-        except Exception:
-            pass
-        try:
-            init_sigma.value = default_init_sigma_value
-        except Exception:
-            pass
         try:
             lo, hi = default_fit_range_value
             fit_range.value = [float(lo), float(hi)]
@@ -9883,15 +10263,22 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                 s.value = DEFAULT_ALPHA
         except Exception:
             pass
+        try:
+            for s in center_window_sliders:
+                s.value = float(PER_PEAK_DEFAULT_CENTER_WINDOW)
+        except Exception:
+            pass
+        try:
+            for s in sigma_sliders:
+                s.value = float(PER_PEAK_DEFAULT_SIGMA)
+        except Exception:
+            pass
         _snapshot_current_controls()
         bulk_update_in_progress = False
         try:
-            status_html.value = "<span style='color:#555;'>All controls reset. Click Fit to update.</span>"
+            status_html.value = "<span style='color:#555;'>All peak parameters reset. Click Fit to update.</span>"
         except Exception:
             pass
-
-    reset_center_btn.on_click(_reset_center)
-    reset_sigma_btn.on_click(_reset_sigma)
     reset_all_btn.on_click(_reset_all)
 
     def _on_fit_click(_b=None):
@@ -10127,8 +10514,13 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             sweeps += 1
             # No per-sweep status update; counter increments only on kept changes
 
-            # 1) Per-peak α sliders (only included peaks)
-            for i in included_idxs:
+            # 1) Per-peak α sliders (only included and unlocked peaks)
+            unlocked_alpha_idxs = []
+            try:
+                unlocked_alpha_idxs = [i for i in included_idxs if not (i < len(lock_alpha_checkboxes) and bool(lock_alpha_checkboxes[i].value))]
+            except Exception:
+                unlocked_alpha_idxs = included_idxs
+            for i in unlocked_alpha_idxs:
                 try:
                     if cancel_event.is_set():
                         break
@@ -10171,103 +10563,115 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                     except Exception:
                         pass
 
-            # 2) Center window (affects allowed center bounds)
+            # 2) Per-peak Center ± window (only included and unlocked peaks)
             try:
                 if cancel_event.is_set():
                     break
             except Exception:
                 pass
-            cw0 = float(center_window.value)
-
-            def cw_plus(cw0=cw0):
-                _set_quiet(
-                    center_window,
-                    "value",
-                    _clamp(
-                        cw0 + center_step,
-                        float(center_window.min),
-                        float(center_window.max),
-                    ),
-                )
-
-            def cw_minus(cw0=cw0):
-                _set_quiet(
-                    center_window,
-                    "value",
-                    _clamp(
-                        cw0 - center_step,
-                        float(center_window.min),
-                        float(center_window.max),
-                    ),
-                )
-
-            def cw_restore(cw0=cw0):
-                _set_quiet(center_window, "value", cw0)
-
-            _, kept = _try_adjust(
-                getter=lambda: center_window.value,
-                setter=cw_plus,
-                decrementer=cw_minus,
-                restore=cw_restore,
-                label="center_window",
-            )
-            if kept:
-                improved_any = True
-                iteration_changes += 1
+            unlocked_center_idxs = []
+            try:
+                unlocked_center_idxs = [i for i in included_idxs if not (i < len(lock_center_checkboxes) and bool(lock_center_checkboxes[i].value))]
+            except Exception:
+                unlocked_center_idxs = included_idxs
+            for i in unlocked_center_idxs:
                 try:
-                    status_html.value = (
-                        f"<span style='color:#555;'>iterating... "
-                        f"(iterations so far: {iteration_changes})</span>"
-                    )
+                    if cancel_event.is_set():
+                        break
                 except Exception:
                     pass
+                if i >= len(center_window_sliders):
+                    continue
+                sld = center_window_sliders[i]
+                if sld is None:
+                    continue
+                try:
+                    v0 = float(sld.value)
+                except Exception:
+                    continue
+                step = float(center_step)
 
-            # 3) Initial sigma
+                def set_plus(v0=v0, sld=sld, step=step):
+                    _set_quiet(sld, "value", _clamp(v0 + step, float(getattr(sld, 'min', 0.0) or 0.0), float(getattr(sld, 'max', 1e3) or 1e3)))
+
+                def set_minus(v0=v0, sld=sld, step=step):
+                    _set_quiet(sld, "value", _clamp(v0 - step, float(getattr(sld, 'min', 0.0) or 0.0), float(getattr(sld, 'max', 1e3) or 1e3)))
+
+                def restore(v0=v0, sld=sld):
+                    _set_quiet(sld, "value", v0)
+
+                _, kept = _try_adjust(
+                    getter=lambda: sld.value,
+                    setter=set_plus,
+                    decrementer=set_minus,
+                    restore=restore,
+                    label=f"center_window[{i}]",
+                )
+                if kept:
+                    improved_any = True
+                    iteration_changes += 1
+                    try:
+                        status_html.value = (
+                            f"<span style='color:#555;'>iterating... "
+                            f"(iterations so far: {iteration_changes})</span>"
+                        )
+                    except Exception:
+                        pass
+
+            # 3) Per-peak σ sliders (only included and unlocked peaks)
             try:
                 if cancel_event.is_set():
                     break
             except Exception:
                 pass
-            sg0 = float(init_sigma.value)
-
-            def sg_plus(sg0=sg0):
-                _set_quiet(
-                    init_sigma,
-                    "value",
-                    _clamp(
-                        sg0 + sigma_step, float(init_sigma.min), float(init_sigma.max)
-                    ),
-                )
-
-            def sg_minus(sg0=sg0):
-                _set_quiet(
-                    init_sigma,
-                    "value",
-                    _clamp(
-                        sg0 - sigma_step, float(init_sigma.min), float(init_sigma.max)
-                    ),
-                )
-
-            def sg_restore(sg0=sg0):
-                _set_quiet(init_sigma, "value", sg0)
-
-            _, kept = _try_adjust(
-                getter=lambda: init_sigma.value,
-                setter=sg_plus,
-                decrementer=sg_minus,
-                restore=sg_restore,
-                label="init_sigma",
-            )
-            if kept:
-                improved_any = True
-                iteration_changes += 1
+            unlocked_sigma_idxs = []
+            try:
+                unlocked_sigma_idxs = [i for i in included_idxs if not (i < len(lock_sigma_checkboxes) and bool(lock_sigma_checkboxes[i].value))]
+            except Exception:
+                unlocked_sigma_idxs = included_idxs
+            for i in unlocked_sigma_idxs:
                 try:
-                    status_html.value = (
-                        f"<span style='color:#555;'>iterating... "
-                        f"(iterations so far: {iteration_changes})</span>"
-                    )
+                    if cancel_event.is_set():
+                        break
                 except Exception:
                     pass
+                if i >= len(sigma_sliders):
+                    continue
+                sld = sigma_sliders[i]
+                if sld is None:
+                    continue
+                try:
+                    v0 = float(sld.value)
+                except Exception:
+                    continue
+                step = float(sigma_step)
+
+                def set_plus(v0=v0, sld=sld, step=step):
+                    _set_quiet(sld, "value", _clamp(v0 + step, float(getattr(sld, 'min', 0.1) or 0.1), float(getattr(sld, 'max', 1e3) or 1e3)))
+
+                def set_minus(v0=v0, sld=sld, step=step):
+                    _set_quiet(sld, "value", _clamp(v0 - step, float(getattr(sld, 'min', 0.1) or 0.1), float(getattr(sld, 'max', 1e3) or 1e3)))
+
+                def restore(v0=v0, sld=sld):
+                    _set_quiet(sld, "value", v0)
+
+                _, kept = _try_adjust(
+                    getter=lambda: sld.value,
+                    setter=set_plus,
+                    decrementer=set_minus,
+                    restore=restore,
+                    label=f"sigma[{i}]",
+                )
+                if kept:
+                    improved_any = True
+                    iteration_changes += 1
+                    try:
+                        status_html.value = (
+                            f"<span style='color:#555;'>iterating... "
+                            f"(iterations so far: {iteration_changes})</span>"
+                        )
+                    except Exception:
+                        pass
 
         # Final status: show old -> new comparison
         try:
@@ -10419,12 +10823,6 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
     # Place the Fit X-range slider above the peak modification section
     fit_range_row = widgets.HBox([fit_range])
     # Keep other global parameters grouped below the peak controls
-    globals_column = widgets.VBox(
-        [
-            widgets.HBox([center_window, reset_center_btn]),
-            widgets.HBox([init_sigma, reset_sigma_btn]),
-        ]
-    )
     reset_all_row = widgets.HBox([reset_all_btn])
     # Mark buttons (use shared helper for mutually exclusive controls)
     mark_bad_btn, mark_good_btn, _refresh_mark_buttons = _make_quality_controls(
@@ -10540,6 +10938,7 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
     # Hide row if not in Colab or not in add-peaks mode
     if not _IN_COLAB:
         colab_add_row.layout.display = "none"
+        colab_add_help.layout.display = "none"
     # Place plot + mark row in a bordered container; keep mark below the plot
     plot_and_mark_deconv = widgets.VBox(
         [fig, mark_row],
@@ -10547,17 +10946,25 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
     )
     ui = widgets.VBox(
         [
+            # 1) Material and Conditions
             controls_row_filters,
+            # 2) Spectrum dropdown + Include bad checkbox
             controls_row_spectrum,
-            fit_range_row,
-            peak_controls_box,
-            globals_column,
-            reset_all_row,
+            # 3) Plot container (with mark buttons below plot)
+            plot_and_mark_deconv,
+            # Status (reduced chi-square and operation updates) directly under plot
+            status_row,
+            # 4) Fit/Save/etc buttons
             buttons_row,
+            #    Colab add controls (only shown in Colab when adding)
             colab_add_row,
             colab_add_help,
-            plot_and_mark_deconv,
-            status_row,
+            # 5) Reset button
+            reset_all_row,
+            # 6) X range selector bar
+            fit_range_row,
+            # 7) List of peaks and per-peak controls
+            peak_controls_box,
         ]
     )
 
@@ -10573,9 +10980,7 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         _show(accept_new_peaks_btn)
         _show(redo_new_peaks_btn)
         _show(cancel_new_peaks_btn)
-        # Hide parameter modifiers during add-peaks mode; keep Center ±window visible
-        _hide(init_sigma)
-        _hide(reset_sigma_btn)
+        # Hide parameter modifiers during add-peaks mode
         _hide(iter_btn)
         _hide(cancel_fit_btn)
         _hide(save_btn)
@@ -10637,23 +11042,27 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         xs_list = [float(v) for v in (xs_existing or [])]
         ys_list = [float(v) for v in (ys_existing or [])]
 
-        try:
-            min_sep = float(center_window.value)
-        except Exception:
-            min_sep = 0.0
-
+        # Use per-peak windows from visible peaks for overlap checks
         rejected_close = []
+        try:
+            peaks_x, _ = _get_visible_peaks(idx)
+        except Exception:
+            peaks_x = []
         for x_new in new_peak_xs:
-            # Reject if too close to any existing (committed) peak
-            too_close = False
-            for xe in xs_existing or []:
-                try:
-                    if abs(float(xe) - float(x_new)) <= min_sep:
-                        too_close = True
+            # Reject if new point falls inside any existing peak's per-peak window
+            overlapped = False
+            try:
+                for i, cx in enumerate(peaks_x or []):
+                    try:
+                        w_i = float(center_window_sliders[i].value)
+                    except Exception:
+                        w_i = float(PER_PEAK_DEFAULT_CENTER_WINDOW)
+                    if abs(float(cx) - float(x_new)) <= abs(w_i):
+                        overlapped = True
                         break
-                except Exception:
-                    continue
-            if too_close:
+            except Exception:
+                overlapped = False
+            if overlapped:
                 rejected_close.append(float(x_new))
                 continue
             # find nearest y
@@ -10661,54 +11070,12 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                 i = int(np.argmin(np.abs(x_arr - x_new)))
                 y_new = float(y_arr[i])
             except Exception:
-                y_new = float("nan")
-            xs_list.append(float(x_new))
-            ys_list.append(y_new)
-
-        # Sort by x
-        try:
-            pairs = sorted(zip(xs_list, ys_list), key=lambda t: float(t[0]))
-            xs_sorted, ys_sorted = [list(t) for t in zip(*pairs)] if pairs else ([], [])
-        except Exception:
-            xs_sorted, ys_sorted = xs_list, ys_list
-
-        # Persist back to DataFrame for this spectrum
-        FTIR_DataFrame.at[idx, "Peak Wavenumbers"] = [float(v) for v in xs_sorted]
-        FTIR_DataFrame.at[idx, "Peak Absorbances"] = [float(v) for v in ys_sorted]
-        # Update the shared/template peaks for this filter group so they carry over
-        try:
-            shared_peaks_x = [float(v) for v in xs_sorted]
-        except Exception:
-            shared_peaks_x = xs_sorted
-
-        # Peaks changed; clear any saved per-peak settings for this spectrum
-        try:
-            per_spec_alpha.pop(idx, None)
-            per_spec_include.pop(idx, None)
-        except Exception:
-            pass
-
-        # Rebuild UI and refit with the updated peaks
-        _rebuild_alpha_sliders(idx)
-        # Do not auto-fit; wait for user to click Fit
-        try:
-            status_html.value = (
-                "<span style='color:#555;'>Peaks updated. Click Fit to update.</span>"
-            )
-        except Exception:
-            pass
-
-        # Exit add mode and clean up visuals
-        _clear_add_peak_shapes()
-        new_peak_xs.clear()
-        adding_mode = False
-        _show(add_peaks_btn)
+                # If we cannot compute a nearest point, skip this new peak
+                continue
         _hide(accept_new_peaks_btn)
         _hide(redo_new_peaks_btn)
         _hide(cancel_new_peaks_btn)
         # Restore previously hidden/disabled controls after exiting add-peaks mode
-        _show(init_sigma)
-        _show(reset_sigma_btn)
         _show(iter_btn)
         _update_cancel_fit_visibility()
         _show(save_btn)
@@ -10731,9 +11098,9 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         if rejected_close:
             joined = ", ".join(f"{v:.3f}" for v in rejected_close)
             msg = (
-                "Rejected due to proximity (±{:.2f} cm⁻¹): {}. "
-                "Tip: reduce the Center ±window to fit peaks in small spaces."
-            ).format(min_sep, joined)
+                "Rejected: {} overlap existing peaks' Center ± windows. "
+                "Tip: adjust per-peak Center ± sliders to make room."
+            ).format(joined)
             try:
                 status_html.value = f"<span style='color:#a00;'>{msg}</span>"
             except Exception:
@@ -10763,8 +11130,6 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         _hide(redo_new_peaks_btn)
         _hide(cancel_new_peaks_btn)
         # Restore previously hidden/disabled controls after cancelling add-peaks mode
-        _show(init_sigma)
-        _show(reset_sigma_btn)
         _show(iter_btn)
         _update_cancel_fit_visibility()
         _show(save_btn)
@@ -10808,26 +11173,61 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         except Exception:
             _log_once("Could not determine nearest x for selected location.")
             return
+        # Reject if within any existing visible peak's per-peak Center ± window
         try:
-            min_sep = float(center_window.value)
+            vis_xs, _vis_ys = _get_visible_peaks(idx)
         except Exception:
-            min_sep = 0.0
-        for existing_x in new_peak_xs:
-            if abs(existing_x - x_new) <= min_sep:
-                _log_once(
-                    f"Rejected: {x_new:.3f} cm⁻¹ within ±{min_sep:.2f} cm⁻¹ of another selected peak."
-                )
-                return
-        xs_existing, _ys_existing = _get_peaks(idx)
-        for xe in xs_existing:
-            try:
-                if abs(float(xe) - x_new) <= min_sep:
+            vis_xs = []
+        try:
+            default_win = float(PER_PEAK_DEFAULT_CENTER_WINDOW)
+        except Exception:
+            default_win = 0.0
+        try:
+            for i, cx in enumerate(vis_xs or []):
+                try:
+                    w_i = float(center_window_sliders[i].value)
+                except Exception:
+                    w_i = default_win
+                if abs(float(cx) - float(x_new)) <= abs(w_i):
                     _log_once(
-                        f"Rejected: {x_new:.3f} cm⁻¹ within ±{min_sep:.2f} cm⁻¹ of existing peak {float(xe):.3f}."
+                        f"Rejected: {x_new:.3f} cm⁻¹ overlaps existing peak @ {cx:.3f} ±{w_i:.1f} cm⁻¹. Adjust selection or that peak’s Center ± window."
                     )
                     return
-            except Exception:
-                continue
+        except Exception:
+            pass
+        # Check against session-selected peaks using default window
+        try:
+            min_sep_default = float(PER_PEAK_DEFAULT_CENTER_WINDOW)
+        except Exception:
+            min_sep_default = 0.0
+        for existing_x in new_peak_xs:
+            if abs(existing_x - x_new) <= min_sep_default:
+                _log_once(
+                    f"Rejected: {x_new:.3f} cm⁻¹ overlaps the ±{min_sep_default:.2f} cm⁻¹ window of selected peak {existing_x:.3f}."
+                )
+                return
+        # Compute session-effective window vs existing peaks and store
+        try:
+            xs_existing, _ys_existing = _get_peaks(idx)
+        except Exception:
+            xs_existing = []
+        try:
+            if xs_existing:
+                min_dist = min(abs(float(xe) - x_new) for xe in xs_existing)
+            else:
+                min_dist = float('inf')
+        except Exception:
+            min_dist = float('inf')
+        try:
+            eff_window = float(PER_PEAK_DEFAULT_CENTER_WINDOW)
+            if np.isfinite(min_dist):
+                eff_window = min(eff_window, max(0.0, float(min_dist) - float(SESSION_WINDOW_MARGIN)))
+        except Exception:
+            eff_window = float(PER_PEAK_DEFAULT_CENTER_WINDOW)
+        try:
+            new_peak_windows[x_new] = float(eff_window)
+        except Exception:
+            pass
         # Accept
         new_peak_xs.append(x_new)
         try:
@@ -10860,7 +11260,8 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
     redo_new_peaks_btn.on_click(_redo_new_peaks)
     cancel_new_peaks_btn.on_click(_cancel_new_peaks)
 
-    display(ui, fig, log_html)
+    # Only display the UI (which already contains the figure) and the log
+    display(ui, log_html)
     # Seed options with current filters (defaults 'any') and trigger initial updates
     _rebuild_spectrum_options()
 
