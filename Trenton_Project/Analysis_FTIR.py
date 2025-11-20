@@ -255,6 +255,9 @@ def extract_file_info(
     FTIR_DataFrame : pd.DataFrame
         The updated DataFrame with new file info appended.
     """
+    # Guard for undefined / invalid FTIR_DataFrame
+    if FTIR_DataFrame is None or not isinstance(FTIR_DataFrame, pd.DataFrame):
+        raise ValueError("Error: FTIR_DataFrame not defined. Load or Create DataFrame first.")
 
     # --- Helper functions (scoped to extract_file_info) --- #
     def _find_term(term, text):
@@ -1822,7 +1825,6 @@ def plot_spectra(
     mark_good=None,
     show_bad=False,
     interactive=True,
-    colorblind_mode=False,
 ):
     """
     Plot spectra grouped by material, condition, and time.
@@ -1879,6 +1881,8 @@ def plot_spectra(
         When True, include spectra marked as bad in the plots; when False (default),
         bad spectra are excluded.
     """
+    if FTIR_DataFrame is None or not isinstance(FTIR_DataFrame, pd.DataFrame):
+        raise ValueError("Error: FTIR_DataFrame not defined. Load or Create DataFrame first.")
     # Interactive widget UI
     # - When interactive=True (default) or no filters are provided, build an ipywidgets
     #   control panel for filtering (Material/Conditions/Time), toggling which traces
@@ -2006,11 +2010,6 @@ def plot_spectra(
             downsample_cb = widgets.Checkbox(
                 value=False if materials is None else bool(downsample),
                 description="Downsample spectra",
-                layout=widgets.Layout(width="auto"),
-            )
-            colorblind_cb = widgets.Checkbox(
-                value=False,
-                description="Colorblind mode",
                 layout=widgets.Layout(width="auto"),
             )
             # Traces as a column (left block) with a subtle frame
@@ -2176,6 +2175,28 @@ def plot_spectra(
                                     mask_val &= dfv["Time"].isin(t_list)
                                 except Exception:
                                     mask_val &= dfv.get("Time", pd.Series([])).isin(t_list)
+                                # If time selection includes 0, also include 'unexposed' spectra for the selected material(s)
+                                try:
+                                    if any((isinstance(x, int) and x == 0) or (isinstance(x, str) and x.strip() == "0") for x in t_list):
+                                        try:
+                                            unexp_series = dfv["Conditions"].astype(str).str.lower()
+                                            unexp_mask = unexp_series == "unexposed"
+                                        except Exception:
+                                            unexp_mask = dfv.get("Conditions", pd.Series([])).astype(str).str.lower() == "unexposed"
+                                        # Constrain to selected materials if not 'any'
+                                        if isinstance(m_val, str) and m_val.strip().lower() != "any":
+                                            mats_list = [s.strip() for s in m_val.split(",") if s.strip()]
+                                            try:
+                                                unexp_mask &= dfv["Material"].astype(str).isin(mats_list)
+                                            except Exception:
+                                                unexp_mask &= dfv.get("Material", pd.Series([])).astype(str).isin(mats_list)
+                                        # OR in the unexposed spectra
+                                        try:
+                                            mask_val |= unexp_mask
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    pass
                             filtered_val = dfv[mask_val]
                         except Exception:
                             filtered_val = FTIR_DataFrame
@@ -2221,7 +2242,7 @@ def plot_spectra(
                                     include_replicates=include_replicates_chk.value,
                                     show_bad=show_bad_chk.value,
                                     interactive=False,
-                                    colorblind_mode=bool(colorblind_cb.value),
+                                    # Gradient colors applied automatically based on time.
                                 )
                             except Exception as e:
                                 with out:
@@ -2274,6 +2295,26 @@ def plot_spectra(
                                     mask_est &= df["Time"].isin(t_list)
                                 except Exception:
                                     mask_est &= df.get("Time", pd.Series([])).isin(t_list)
+                                # If time selection includes 0, also include 'unexposed' spectra for the selected material(s)
+                                try:
+                                    if any((isinstance(x, int) and x == 0) or (isinstance(x, str) and x.strip() == "0") for x in t_list):
+                                        try:
+                                            unexp_series = df["Conditions"].astype(str).str.lower()
+                                            unexp_mask = unexp_series == "unexposed"
+                                        except Exception:
+                                            unexp_mask = df.get("Conditions", pd.Series([])).astype(str).str.lower() == "unexposed"
+                                        if isinstance(m_val, str) and m_val.strip().lower() != "any":
+                                            mats_list = [s.strip() for s in m_val.split(",") if s.strip()]
+                                            try:
+                                                unexp_mask &= df["Material"].astype(str).isin(mats_list)
+                                            except Exception:
+                                                unexp_mask &= df.get("Material", pd.Series([])).astype(str).isin(mats_list)
+                                        try:
+                                            mask_est |= unexp_mask
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    pass
                             filtered_est = df[mask_est]
                             if not bool(include_replicates_chk.value) and not filtered_est.empty:
                                 try:
@@ -2501,7 +2542,6 @@ def plot_spectra(
                     separate_plots_chk,
                     include_replicates_chk,
                     show_bad_chk,
-                    colorblind_cb,
                     downsample_cb,
                 ],
                 layout=widgets.Layout(
@@ -2572,6 +2612,24 @@ def plot_spectra(
                 except ValueError:
                     time_list.append(t)
         mask &= FTIR_DataFrame["Time"].isin(time_list)
+        # If time selection includes 0, also include 'unexposed' spectra for the selected material(s)
+        try:
+            if any((isinstance(x, int) and x == 0) or (isinstance(x, str) and x.strip() == "0") for x in time_list):
+                try:
+                    unexp_series = FTIR_DataFrame["Conditions"].astype(str).str.lower()
+                    unexp_mask = unexp_series == "unexposed"
+                except Exception:
+                    unexp_mask = FTIR_DataFrame["Conditions"].astype(str).str.lower() == "unexposed"
+                if isinstance(materials, str) and materials.strip().lower() != "any":
+                    # material_list defined earlier when materials filter applied
+                    try:
+                        material_list_local = [m.strip() for m in materials.split(",") if m.strip()]
+                        unexp_mask &= FTIR_DataFrame["Material"].astype(str).isin(material_list_local)
+                    except Exception:
+                        unexp_mask &= FTIR_DataFrame.get("Material", pd.Series([])).astype(str).isin(material_list_local)
+                mask |= unexp_mask
+        except Exception:
+            pass
 
     filtered_data = FTIR_DataFrame[mask]
 
@@ -2769,123 +2827,160 @@ def plot_spectra(
         except Exception:
             return 1
 
-    # Precompute a consistent color (and dash) per spectrum (row) to reuse across plots
+    # Build a blue -> purple -> red gradient based on time, and apply dash styles for replicates.
+    time_values = [t for t in filtered_data_sorted.get("Time", []) if pd.notna(t)]
     try:
-        from plotly.colors import qualitative as _qual
-
-        if bool(colorblind_mode):
-            # Favor colorblind-friendly palettes; combine for more distinct colors
-            base_palette = []
-            try:
-                base_palette += list(_qual.Safe)
-            except Exception:
-                pass
-            try:
-                base_palette += list(_qual.G10)
-            except Exception:
-                pass
-            try:
-                base_palette += list(_qual.T10)
-            except Exception:
-                pass
-            _palette = base_palette if base_palette else list(_qual.Safe)
-        else:
-            # Larger default palette: Dark24 + Alphabet (~50 colors)
-            base_palette = []
-            try:
-                base_palette += list(_qual.Dark24)
-            except Exception:
-                pass
-            try:
-                base_palette += list(_qual.Alphabet)
-            except Exception:
-                pass
-            _palette = base_palette if base_palette else list(_qual.Plotly)
+        time_values_unique = sorted(set(time_values))
     except Exception:
-        # Fallback basic palette
-        _palette = [
-            "#636EFA",
-            "#EF553B",
-            "#00CC96",
-            "#AB63FA",
-            "#FFA15A",
-            "#19D3F3",
-            "#FF6692",
-            "#B6E880",
-            "#FF97FF",
-            "#FECB52",
-        ]
+        time_values_unique = []
+    if time_values_unique:
+        t_min = float(min(time_values_unique))
+        t_max = float(max(time_values_unique))
+    else:
+        t_min = 0.0
+        t_max = 1.0
 
-    _dashes = ["solid", "dash", "dot", "dashdot", "longdash", "longdashdot"]
-    idx_list = filtered_data_sorted.index.tolist()
+    def _time_to_color(t):
+        try:
+            t = float(t)
+        except Exception:
+            return "#800080"  # fallback purple
+        span = t_max - t_min
+        if span <= 0:
+            norm = 0.5
+        else:
+            norm = (t - t_min) / span
+        norm = max(0.0, min(1.0, norm))
+        if norm <= 0.5:
+            r_ratio = norm / 0.5
+            r = int(0 + (128 - 0) * r_ratio)
+            g = 0
+            b = int(255 + (128 - 255) * r_ratio)  # 255 -> 128
+        else:
+            r_ratio = (norm - 0.5) / 0.5
+            r = int(128 + (255 - 128) * r_ratio)
+            g = 0
+            b = int(128 + (0 - 128) * r_ratio)  # 128 -> 0
+        return f"#{r:02X}{g:02X}{b:02X}"
+
+    dash_styles = ["solid", "dash", "dot", "dashdot", "longdash", "longdashdot"]
+    replicate_counts = {}
     _row_line = {}
-    for j, i in enumerate(idx_list):
-        color = _palette[j % len(_palette)] if len(_palette) > 0 else None
-        dash = _dashes[(j // max(1, len(_palette))) % len(_dashes)]
-        _row_line[i] = {k: v for k, v in (("color", color), ("dash", dash)) if v is not None}
+    for i, row in filtered_data_sorted.iterrows():
+        mat_val = row.get("Material", "")
+        cond_val = row.get("Conditions", row.get("Condition", ""))
+        time_val = row.get("Time")
+        key = (str(mat_val), str(cond_val), time_val)
+        replicate_counts.setdefault(key, 0)
+        rep_idx = replicate_counts[key]
+        replicate_counts[key] += 1
+        color = _time_to_color(time_val)
+        if include_replicates:
+            dash = dash_styles[rep_idx % len(dash_styles)]
+        else:
+            dash = "solid"
+        _row_line[i] = {"color": color, "dash": dash}
 
     # Plot all together (legend in time order) with Plotly
     fig_group = go.FigureWidget()
+    _row_plot_warnings = []
     for idx, spectrum_row in filtered_data_sorted.iterrows():
-        material_val = spectrum_row.get("Material", "")
-        condition_val = spectrum_row.get(
-            "Conditions", spectrum_row.get("Condition", "")
-        )
-        time_val = spectrum_row.get("Time", "")
-        spectrum_label = f"{material_val}, {condition_val}, {time_val}"
-        # Parse x-axis
-        x_axis = spectrum_row.get(x_axis_col)
-        if isinstance(x_axis, str):
-            try:
-                x_axis = ast.literal_eval(x_axis)
-            except Exception:
-                x_axis = None
-        if x_axis is None:
-            print(f"Skipping index {idx}: missing X-axis ('{x_axis_col}').")
-            continue
-
-        # Plot selected series
-        def _add_series(y, name_suffix):
-            if isinstance(y, str):
+        try:
+            material_val = spectrum_row.get("Material", "")
+            condition_val = spectrum_row.get(
+                "Conditions", spectrum_row.get("Condition", "")
+            )
+            time_val = spectrum_row.get("Time", "")
+            spectrum_label = f"{material_val}, {condition_val}, {time_val}"
+            # Parse x-axis
+            x_axis = spectrum_row.get(x_axis_col)
+            if isinstance(x_axis, str):
                 try:
-                    y_v = ast.literal_eval(y)
+                    x_axis = ast.literal_eval(x_axis)
                 except Exception:
-                    y_v = None
-            else:
-                y_v = y
-            if y_v is not None:
-                x_list = list(x_axis)
-                y_list = list(y_v)
-                if downsample:
-                    s = _stride_for(len(x_list))
-                    if s > 1:
-                        x_list = x_list[::s]
-                        y_list = y_list[::s]
-                fig_group.add_scatter(
-                    x=x_list,
-                    y=y_list,
-                    mode="lines",
-                    name=f"{name_suffix}: {spectrum_label}",
-                    line=_row_line.get(idx),
+                    x_axis = None
+            if x_axis is None:
+                _row_plot_warnings.append(
+                    f"Row {idx} skipped: missing X-axis ('{x_axis_col}')."
                 )
+                continue
 
-        if raw_data and ("Raw Data" in spectrum_row):
-            _add_series(spectrum_row.get("Raw Data"), "Raw")
-        if baseline and (spectrum_row.get("Baseline") is not None):
-            _add_series(spectrum_row.get("Baseline"), "Baseline")
-        if baseline_corrected and (
-            spectrum_row.get("Baseline-Corrected Data") is not None
-        ):
-            _add_series(
-                spectrum_row.get("Baseline-Corrected Data"), "Baseline-Corrected"
+            # Plot selected series
+            def _add_series(y, name_suffix):
+                try:
+                    if isinstance(y, str):
+                        try:
+                            y_v = ast.literal_eval(y)
+                        except Exception:
+                            y_v = None
+                    else:
+                        y_v = y
+                    # Suppress scalar numeric (float/int) mistaken as iterable; treat as missing
+                    if isinstance(y_v, (int, float)) and not isinstance(y_v, bool):
+                        y_v = None
+                    if y_v is not None:
+                        x_list = list(x_axis)
+                        y_list = list(y_v)
+                        if downsample:
+                            s = _stride_for(len(x_list))
+                            if s > 1:
+                                x_list = x_list[::s]
+                                y_list = y_list[::s]
+                        fig_group.add_scatter(
+                            x=x_list,
+                            y=y_list,
+                            mode="lines",
+                            name=f"{name_suffix}: {spectrum_label}",
+                            line=_row_line.get(idx),
+                        )
+                    else:
+                        _row_plot_warnings.append(
+                            f"Row {idx} missing data for '{name_suffix}' trace."
+                        )
+                except Exception as e:
+                    # Suppress verbose 'float object is not iterable' errors (already covered by higher-level messages)
+                    if isinstance(e, TypeError) and "float" in str(e) and "iterable" in str(e):
+                        pass
+                    else:
+                        _row_plot_warnings.append(
+                            f"Row {idx} error while adding '{name_suffix}' trace: {e}"
+                        )
+
+            if raw_data and ("Raw Data" in spectrum_row):
+                _add_series(spectrum_row.get("Raw Data"), "Raw")
+            if baseline and (spectrum_row.get("Baseline") is not None):
+                _add_series(spectrum_row.get("Baseline"), "Baseline")
+            if baseline_corrected and (
+                spectrum_row.get("Baseline-Corrected Data") is not None
+            ):
+                _add_series(
+                    spectrum_row.get("Baseline-Corrected Data"), "Baseline-Corrected"
+                )
+            if normalized and (
+                spectrum_row.get("Normalized and Corrected Data") is not None
+            ):
+                _add_series(
+                    spectrum_row.get("Normalized and Corrected Data"),
+                    "Normalized and Corrected",
+                )
+        except Exception as e:
+            _row_plot_warnings.append(
+                f"Row {idx} skipped entirely due to unexpected error: {e}"
             )
-        if normalized and (
-            spectrum_row.get("Normalized and Corrected Data") is not None
-        ):
-            _add_series(
-                spectrum_row.get("Normalized and Corrected Data"),
-                "Normalized and Corrected",
+
+    if _row_plot_warnings:
+        try:
+            warn_html = (
+                "<div style='border:1px solid #e0a800;padding:8px;margin:6px 0;background:#fffbe6'>"
+                "<b>Warning:</b> Some rows were skipped or partially plotted due to missing/invalid data.<br>"
+                + "<br>".join(_row_plot_warnings)
+                + "</div>"
             )
+            display(widgets.HTML(value=warn_html))
+        except Exception:
+            print("Warning: issues encountered while plotting some rows:")
+            for m in _row_plot_warnings:
+                print(" - " + m)
     fig_group.update_layout(
         title=f"Spectra for Material: {materials} | Condition: {conditions} | Time: {times}",
         xaxis_title="Wavenumber (cm⁻¹)",
@@ -3094,6 +3189,8 @@ def baseline_correct_spectra(
     baseline_function=None,
     filepath=None,
 ):
+    if FTIR_DataFrame is None or not isinstance(FTIR_DataFrame, pd.DataFrame):
+        raise ValueError("Error: FTIR_DataFrame not defined. Load or Create DataFrame first.")
     """
     Apply a modifiable baseline to a single spectrum from the DataFrame.
 
@@ -4709,19 +4806,16 @@ def baseline_correct_spectra(
                 # Bordered plot + mark section: Continue row, anchor entry, redo/undo, then plots and mark buttons
                 bordered_manual = widgets.VBox(
                     [
+                        manual_continue_row,
                         anchor_row_m,
                         manual_redo_undo_row,
-                        manual_continue_row,
                         fig_m,
                         fig_corr,
                         mark_row_m,
                     ],
-                    layout=widgets.Layout(
-                        border="1px solid #ccc",
-                        padding="8px",
-                        margin="6px 0",
-                    ),
+                    layout=widgets.Layout(border="1px solid #ccc", padding="8px", margin="6px 0"),
                 )
+                # Assemble full manual UI
                 manual_ui = widgets.VBox(
                     [
                         controls_row_top,
@@ -5887,6 +5981,8 @@ def populate_output_dictionary(
     FTIR_DataFrame,
     materials_json_path=None,
 ):
+    if FTIR_DataFrame is None or not isinstance(FTIR_DataFrame, pd.DataFrame):
+        raise ValueError("Error: FTIR_DataFrame not defined. Load or Create DataFrame first.")
     """
     Populate materials.json with materials, conditions, and time values from FTIR_DataFrame.
 
@@ -6212,6 +6308,8 @@ def bring_in_DataFrame(DataFrame_path=None):
 
 
 def normalize_spectra(FTIR_DataFrame, filepath=None):
+    if FTIR_DataFrame is None or not isinstance(FTIR_DataFrame, pd.DataFrame):
+        raise ValueError("Error: FTIR_DataFrame not defined. Load or Create DataFrame first.")
     """
     Interactively select and save a normalization peak range for FTIR spectra.
 
@@ -7425,6 +7523,8 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
 
 
 def find_peak_info(FTIR_DataFrame, filepath=None):
+    if FTIR_DataFrame is None or not isinstance(FTIR_DataFrame, pd.DataFrame):
+        raise ValueError("Error: FTIR_DataFrame not defined. Load or Create DataFrame first.")
     """
     Interactive peak finder for normalized and baseline-corrected spectra.
 
@@ -8272,6 +8372,8 @@ def find_peak_info(FTIR_DataFrame, filepath=None):
 
 
 def deconvolute_peaks(FTIR_DataFrame, filepath=None):
+    if FTIR_DataFrame is None or not isinstance(FTIR_DataFrame, pd.DataFrame):
+        raise ValueError("Error: FTIR_DataFrame not defined. Load or Create DataFrame first.")
     """
     Interactively deconvolute found peaks for area analysis.
 
@@ -8437,6 +8539,31 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         continuous_update=False,
         readout_format=".1f",
         layout=widgets.Layout(width="90%"),
+    )
+    # Additional optional ranges (disabled until checkbox enabled)
+    use_r2 = widgets.Checkbox(value=False, description="Use range 2")
+    fit_range2 = widgets.FloatRangeSlider(
+        value=[xmin, xmax],
+        min=xmin,
+        max=xmax,
+        step=(xmax - xmin) / 1000 or 1.0,
+        description="X-range 2",
+        continuous_update=False,
+        readout_format=".1f",
+        layout=widgets.Layout(width="90%"),
+        disabled=True,
+    )
+    use_r3 = widgets.Checkbox(value=False, description="Use range 3")
+    fit_range3 = widgets.FloatRangeSlider(
+        value=[xmin, xmax],
+        min=xmin,
+        max=xmax,
+        step=(xmax - xmin) / 1000 or 1.0,
+        description="X-range 3",
+        continuous_update=False,
+        readout_format=".1f",
+        layout=widgets.Layout(width="90%"),
+        disabled=True,
     )
     # Per-peak default seeds (no global center/sigma controls)
     PER_PEAK_DEFAULT_CENTER_WINDOW = 15.0
@@ -9123,12 +9250,39 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             return float(min(lo, hi)), float(max(lo, hi))
         except Exception:
             return xmin, xmax
+    # Multi-range support helpers
+    def _current_fit_ranges():
+        """Return list of active (lo, hi) ranges (1..3)."""
+        ranges = []
+        try:
+            lo, hi = fit_range.value
+            ranges.append((float(min(lo, hi)), float(max(lo, hi))))
+        except Exception:
+            ranges.append((xmin, xmax))
+        if use_r2.value and not fit_range2.disabled:
+            try:
+                lo2, hi2 = fit_range2.value
+                ranges.append((float(min(lo2, hi2)), float(max(lo2, hi2))))
+            except Exception:
+                pass
+        if use_r3.value and not fit_range3.disabled:
+            try:
+                lo3, hi3 = fit_range3.value
+                ranges.append((float(min(lo3, hi3)), float(max(lo3, hi3))))
+            except Exception:
+                pass
+        return ranges
+    def _overall_fit_span():
+        rs = _current_fit_ranges()
+        lows = [r[0] for r in rs]
+        highs = [r[1] for r in rs]
+        return (float(min(lows)), float(max(highs)))
 
     def _get_visible_peaks(row_idx):
         xs, ys = _get_peaks(row_idx)
         if not xs:
             return [], []
-        lo, hi = _current_fit_range()
+        ranges = _current_fit_ranges() if ' _current_fit_ranges' in globals() or True else [(lo, hi)]
         xs_f = []
         ys_f = []
         for cx, cy in zip(xs, ys):
@@ -9136,7 +9290,7 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                 cxv = float(cx)
             except Exception:
                 continue
-            if lo <= cxv <= hi:
+            if any(lo <= cxv <= hi for lo, hi in ranges):
                 xs_f.append(cxv)
                 try:
                     ys_f.append(float(cy))
@@ -9154,22 +9308,24 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         if x_arr is None or y_arr is None or x_arr.size == 0:
             return
         try:
-            lo, hi = _current_fit_range()
+            ranges = _current_fit_ranges()
             y0_min = float(np.nanmin(y_arr))
             y0_max = float(np.nanmax(y_arr))
         except Exception:
             return
-        rect = dict(
-            type="rect",
-            x0=float(min(lo, hi)),
-            x1=float(max(lo, hi)),
-            y0=y0_min,
-            y1=y0_max,
-            fillcolor="rgba(0,120,215,0.12)",  # subtle blue
-            line=dict(color="rgba(0,120,215,0.6)", width=1),
-            layer="below",
-            name="fit_range_rect",
-        )
+        rects = []
+        for ridx, (lo, hi) in enumerate(ranges):
+            rects.append(dict(
+                type="rect",
+                x0=float(min(lo, hi)),
+                x1=float(max(lo, hi)),
+                y0=y0_min,
+                y1=y0_max,
+                fillcolor="rgba(0,120,215,0.12)",
+                line=dict(color="rgba(0,120,215,0.6)", width=1),
+                layer="below",
+                name=f"fit_range_rect_{ridx}",
+            ))
         try:
             shapes = list(getattr(fig.layout, "shapes", ()))
             new_shapes = []
@@ -9185,10 +9341,10 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                         nm = s.get("name")
                     except Exception:
                         nm = None
-                if nm == "fit_range_rect":
+                if nm and nm.startswith("fit_range_rect"):
                     continue
                 new_shapes.append(s)
-            new_shapes.append(rect)
+            new_shapes.extend(rects)
             fig.layout.shapes = tuple(new_shapes)
         except Exception:
             # Best-effort; ignore if shapes unavailable
@@ -9200,6 +9356,13 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         nonlocal lock_alpha_checkboxes, lock_center_checkboxes, lock_sigma_checkboxes
         # Build controls for ALL peaks, grouping by Fit X-range membership.
         # Only in-range peaks contribute to fitting/optimization state (lists).
+        try:
+            # Show transient building message while list is (re)constructed.
+            peak_controls_box.children = [
+                widgets.HTML("<b>Building Peak List . . .</b>")
+            ]
+        except Exception:
+            pass
         peaks_x_all, peaks_y_all = _get_peaks(row_idx)
         alpha_sliders = []
         include_checkboxes = []
@@ -9222,11 +9385,9 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             ]
             return
         try:
-            lo_rng, hi_rng = _current_fit_range()
+            active_ranges = _current_fit_ranges()
         except Exception:
-            lo_rng, hi_rng = float("-inf"), float("inf")
-        lo_rng_v = float(min(lo_rng, hi_rng))
-        hi_rng_v = float(max(lo_rng, hi_rng))
+            active_ranges = [(float("-inf"), float("inf"))]
         saved_alphas = per_spec_alpha.get(row_idx)
         saved_includes = per_spec_include.get(row_idx)
         saved_center = per_spec_center.get(row_idx)
@@ -9284,7 +9445,7 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         # --- Parameter explanations for the toggle ---
         param_details_text = (
             "A: Relates to the height of the peak.\n"
-            "μ: Center position of the peak (wavenumber).\n"
+            "μ: Center position of the peak (wavenumber). In Auto mode, the window is the range within which the center can vary from the set μ value.\n"
             "σ: Relates to the width of the peak. The FWHM is 2σ.\n"
             "α: Inversely relates to the steepness of the peak. Fractional composition of Gaussian (0) and Lorentzian (1) components."
         )
@@ -9317,7 +9478,8 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         for i, (cx, cy) in enumerate(zip(peaks_x_all, peaks_y_all)):
             in_range = False
             try:
-                in_range = lo_rng_v <= float(cx) <= hi_rng_v
+                cxv = float(cx)
+                in_range = any(lo <= cxv <= hi for lo, hi in active_ranges)
             except Exception:
                 in_range = False
             header = widgets.HTML(
@@ -9361,8 +9523,8 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             )
             if not np.isfinite(w_saved) or w_saved <= 0.0:
                 w_saved = max(default_bound, min_cwin)
-            center_min = lo_rng_v
-            center_max = hi_rng_v
+            # Center slider bounds use overall span so manual adjustments can move within union
+            center_min, center_max = _overall_fit_span()
             center_val = float(cx) if saved_center is None or i >= len(saved_center) else float(saved_center[i])
             center_slider = widgets.FloatSlider(
                 value=center_val,
@@ -9514,66 +9676,11 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             sigma_symbol = widgets.HTML(value=symbol_labels['sigma'], layout=widgets.Layout(width='32px', min_width='32px', text_align='center'))
 
 
-            def _sync_modes_local(amplitude_slider=amplitude_slider, amp_mode_toggle=amp_mode_toggle,
-                                 center_slider=center_slider, center_mode_toggle=center_mode_toggle,
-                                 center_window_slider=center_window_slider,
-                                 sigma_slider=sigma_slider, sigma_mode_toggle=sigma_mode_toggle,
-                                 in_range=in_range):
-                try:
-                    # Amplitude
-                    if amp_mode_toggle.value == 'Manual' and in_range:
-                        amplitude_slider.disabled = False
-                        amplitude_slider.style.opacity = 1.0
-                    else:
-                        amplitude_slider.disabled = True
-                        amplitude_slider.style.opacity = 0.5
-                    # Center
-                    if center_mode_toggle.value == 'Manual' and in_range:
-                        center_slider.disabled = False
-                        center_slider.style.opacity = 1.0
-                        center_window_slider.disabled = False
-                        center_window_slider.style.opacity = 1.0
-                    else:
-                        center_slider.disabled = True
-                        center_slider.style.opacity = 0.5
-                        center_window_slider.disabled = True
-                        center_window_slider.style.opacity = 0.5
-                    # Sigma
-                    if sigma_mode_toggle.value == 'Manual' and in_range:
-                        sigma_slider.disabled = False
-                        sigma_slider.style.opacity = 1.0
-                    else:
-                        sigma_slider.disabled = True
-                        sigma_slider.style.opacity = 0.5
-                except Exception:
-                    pass
-
-            # Attach observers with correct closure for each widget instance
-            amp_mode_toggle.observe(
-                (lambda amplitude_slider=amplitude_slider, amp_mode_toggle=amp_mode_toggle,
-                         center_slider=center_slider, center_mode_toggle=center_mode_toggle,
-                         center_window_slider=center_window_slider,
-                         sigma_slider=sigma_slider, sigma_mode_toggle=sigma_mode_toggle,
-                         in_range=in_range:
-                    lambda *_: (_sync_modes_local(amplitude_slider, amp_mode_toggle, center_slider, center_mode_toggle, center_window_slider, sigma_slider, sigma_mode_toggle, in_range), _snapshot_current_controls())
-                )(), names='value')
-            center_mode_toggle.observe(
-                (lambda amplitude_slider=amplitude_slider, amp_mode_toggle=amp_mode_toggle,
-                         center_slider=center_slider, center_mode_toggle=center_mode_toggle,
-                         center_window_slider=center_window_slider,
-                         sigma_slider=sigma_slider, sigma_mode_toggle=sigma_mode_toggle,
-                         in_range=in_range:
-                    lambda *_: (_sync_modes_local(amplitude_slider, amp_mode_toggle, center_slider, center_mode_toggle, center_window_slider, sigma_slider, sigma_mode_toggle, in_range), _snapshot_current_controls())
-                )(), names='value')
-            sigma_mode_toggle.observe(
-                (lambda amplitude_slider=amplitude_slider, amp_mode_toggle=amp_mode_toggle,
-                         center_slider=center_slider, center_mode_toggle=center_mode_toggle,
-                         center_window_slider=center_window_slider,
-                         sigma_slider=sigma_slider, sigma_mode_toggle=sigma_mode_toggle,
-                         in_range=in_range:
-                    lambda *_: (_sync_modes_local(amplitude_slider, amp_mode_toggle, center_slider, center_mode_toggle, center_window_slider, sigma_slider, sigma_mode_toggle, in_range), _snapshot_current_controls())
-                )(), names='value')
-            _sync_modes_local(amplitude_slider, amp_mode_toggle, center_slider, center_mode_toggle, center_window_slider, sigma_slider, sigma_mode_toggle, in_range)
+            # Build slider boxes (must precede mode sync function so references exist)
+            amplitude_slider_box = widgets.HBox([amplitude_slider, reset_amp_btn], layout=widgets.Layout(align_items="center"))
+            center_slider_box = widgets.HBox([center_slider, reset_center_btn], layout=widgets.Layout(align_items="center"))
+            center_window_box = widgets.HBox([center_window_slider, reset_cwin_btn], layout=widgets.Layout(align_items="center"))
+            sigma_slider_box = widgets.HBox([sigma_slider, reset_sigma_p_btn], layout=widgets.Layout(align_items="center"))
 
             if in_range:
                 include_checkbox.observe(_on_include_toggle, names="value")
@@ -9632,29 +9739,113 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             amplitude_row = widgets.HBox([
                 amp_symbol,
                 amp_mode_toggle,
-                widgets.HBox([amplitude_slider, reset_amp_btn], layout=widgets.Layout(align_items="center"))
+                amplitude_slider_box,
             ], layout=widgets.Layout(gap='8px'))
             center_row = widgets.HBox([
                 center_symbol,
                 center_mode_toggle,
-                widgets.HBox([center_slider, reset_center_btn], layout=widgets.Layout(align_items="center")),
-                widgets.HBox([center_window_slider, reset_cwin_btn], layout=widgets.Layout(align_items="center"))
+                center_slider_box,
+                center_window_box,
             ], layout=widgets.Layout(gap='8px'))
             sigma_row = widgets.HBox([
                 sigma_symbol,
                 sigma_mode_toggle,
-                widgets.HBox([sigma_slider, reset_sigma_p_btn], layout=widgets.Layout(align_items="center"))
+                sigma_slider_box,
             ], layout=widgets.Layout(gap='8px'))
             include_row = widgets.HBox([include_checkbox])
 
-            box = widgets.VBox([
-                header,
-                row_container(include_row),
-                row_container(alpha_row),
-                row_container(amplitude_row),
-                row_container(center_row),
-                row_container(sigma_row),
-            ], layout=widgets.Layout(
+            # Wrap rows for easier hide/show of entire parameter row
+            include_outer = row_container(include_row)
+            alpha_outer = row_container(alpha_row)
+            amplitude_outer = row_container(amplitude_row)
+            center_outer = row_container(center_row)
+            sigma_outer = row_container(sigma_row)
+
+            # Preserve original children once; use display toggling for reliability (capture per-peak widgets)
+            amplitude_slider_box.children = (amplitude_slider, reset_amp_btn)
+            center_slider_box.children = (center_slider, reset_center_btn)
+            center_window_box.children = (center_window_slider, reset_cwin_btn)
+            sigma_slider_box.children = (sigma_slider, reset_sigma_p_btn)
+
+            def _sync_modes_local(
+                amplitude_outer=amplitude_outer,
+                center_outer=center_outer,
+                sigma_outer=sigma_outer,
+                amplitude_slider_box=amplitude_slider_box,
+                center_slider_box=center_slider_box,
+                center_window_box=center_window_box,
+                sigma_slider_box=sigma_slider_box,
+                amplitude_slider=amplitude_slider,
+                center_slider=center_slider,
+                center_window_slider=center_window_slider,
+                sigma_slider=sigma_slider,
+                amp_mode_toggle=amp_mode_toggle,
+                center_mode_toggle=center_mode_toggle,
+                sigma_mode_toggle=sigma_mode_toggle,
+                in_range_local=in_range,
+            ):
+                """Synchronize slider visibility with mode selections using layout.display.
+
+                Captures widget references per peak via default arguments to avoid
+                late binding; ensures each peak's dropdown affects only its own
+                sliders.
+                """
+                # Amplitude
+                amplitude_outer.layout.display = 'flex'
+                if in_range_local and amp_mode_toggle.value == 'Manual':
+                    amplitude_slider.disabled = False
+                    amplitude_slider_box.layout.display = 'flex'
+                else:
+                    amplitude_slider.disabled = True
+                    amplitude_slider_box.layout.display = 'none'
+
+                # Center (μ vs window)
+                center_outer.layout.display = 'flex'
+                if in_range_local:
+                    if center_mode_toggle.value == 'Manual':
+                        center_slider.disabled = False
+                        center_window_slider.disabled = True
+                        center_slider_box.layout.display = 'flex'
+                        center_window_box.layout.display = 'none'
+                    else:  # Auto
+                        center_slider.disabled = True
+                        center_window_slider.disabled = False
+                        center_slider_box.layout.display = 'none'
+                        center_window_box.layout.display = 'flex'
+                else:
+                    center_slider.disabled = True
+                    center_window_slider.disabled = True
+                    center_slider_box.layout.display = 'none'
+                    center_window_box.layout.display = 'none'
+
+                # Sigma
+                sigma_outer.layout.display = 'flex'
+                if in_range_local and sigma_mode_toggle.value == 'Manual':
+                    sigma_slider.disabled = False
+                    sigma_slider_box.layout.display = 'flex'
+                else:
+                    sigma_slider.disabled = True
+                    sigma_slider_box.layout.display = 'none'
+
+            # Attach observers after defining sync
+            # Capture the per-row _sync_modes_local in a default arg to avoid late binding to last peak
+            amp_mode_toggle.observe(lambda *_ , sync=_sync_modes_local: (sync(), _snapshot_current_controls()), names='value')
+            center_mode_toggle.observe(lambda *_ , sync=_sync_modes_local: (sync(), _snapshot_current_controls()), names='value')
+            sigma_mode_toggle.observe(lambda *_ , sync=_sync_modes_local: (sync(), _snapshot_current_controls()), names='value')
+            _sync_modes_local()
+
+            if in_range:
+                box_children = [header, include_outer, alpha_outer, amplitude_outer, center_outer, sigma_outer]
+            else:
+                # Hide detail rows for excluded peaks, keep header only
+                for _hide_outer in (include_outer, alpha_outer, amplitude_outer, center_outer, sigma_outer):
+                    try:
+                        _hide_outer.layout.display = 'none'
+                    except Exception:
+                        pass
+                box_children = [header]
+
+            box = widgets.VBox(box_children, layout=widgets.Layout(
                 border="2.5px solid #222",
                 margin="12px 0 12px 0",
                 padding="16px 22px",
@@ -9860,14 +10051,15 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         # Determine which peaks are included (respect Fit X-range explicitly)
         included = [i for i, cb in enumerate(include_checkboxes) if cb.value]
         try:
-            lo_chk, hi_chk = _current_fit_range()
+            active_ranges_chk = _current_fit_ranges()
         except Exception:
-            lo_chk, hi_chk = float("-inf"), float("inf")
-        lo_v_chk = float(min(lo_chk, hi_chk))
-        hi_v_chk = float(max(lo_chk, hi_chk))
+            active_ranges_chk = [(float("-inf"), float("inf"))]
         # Auto-exclude any selected peaks whose centers fall outside the current range
         try:
-            included_in_range = [i for i in included if lo_v_chk <= float(peaks_x[i]) <= hi_v_chk]
+            included_in_range = [
+                i for i in included
+                if any(lo <= float(peaks_x[i]) <= hi for lo, hi in active_ranges_chk)
+            ]
         except Exception:
             included_in_range = list(included)
         if len(included_in_range) != len(included):
@@ -9940,14 +10132,16 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                 # Use only the selected Fit X-range for fitting to prevent components
                 # going nearly flat when focusing on a small region.
                 try:
-                    lo, hi = _current_fit_range()
+                    ranges = _current_fit_ranges()
                 except Exception:
-                    lo, hi = float(np.nanmin(x_arr)), float(np.nanmax(x_arr))
-                # Create mask robust to descending x-arrays
-                lo_v = float(min(lo, hi))
-                hi_v = float(max(lo, hi))
+                    ranges = [(float(np.nanmin(x_arr)), float(np.nanmax(x_arr)))]
+                # Union mask across ranges
                 try:
-                    msk = (x_arr >= lo_v) & (x_arr <= hi_v)
+                    msk = np.zeros_like(x_arr, dtype=bool)
+                    for lo, hi in ranges:
+                        lo_v = float(min(lo, hi))
+                        hi_v = float(max(lo, hi))
+                        msk |= ((x_arr >= lo_v) & (x_arr <= hi_v))
                 except Exception:
                     msk = np.ones_like(x_arr, dtype=bool)
                 x_sub = x_arr[msk]
@@ -9984,8 +10178,11 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                             w = float(center_window_sliders[i].value)
                         except Exception:
                             w = float(PER_PEAK_DEFAULT_CENTER_WINDOW)
+                        # Manual center: previously constrained with min=max causing zero-width bounds.
+                        # This led to lmfit occasionally aborting the fit when any parameter was fixed.
+                        # Fix: set value and vary=False without degenerate bounds so other parameters can still vary.
                         if mode_center == 'Manual':
-                            p[f"p{i}_center"].set(value=mu_val, min=mu_val, max=mu_val, vary=False)
+                            p[f"p{i}_center"].set(value=mu_val, vary=False)
                         else:
                             p[f"p{i}_center"].set(value=mu_val, min=mu_val - abs(w), max=mu_val + abs(w), vary=True)
                         # Sigma (σ)
@@ -9998,7 +10195,8 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                         except Exception:
                             mode_sigma = 'Auto'
                         if mode_sigma == 'Manual':
-                            p[f"p{i}_sigma"].set(value=sg_val, min=sg_val, max=sg_val, vary=False)
+                            # Same fix for sigma: remove min=max zero-width bounds when fixed.
+                            p[f"p{i}_sigma"].set(value=sg_val, vary=False)
                         else:
                             p[f"p{i}_sigma"].set(value=sg_val, min=1e-3, max=1e3, vary=True)
                         # Alpha (fraction) always Manual (fixed)
@@ -10014,7 +10212,8 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                         except Exception:
                             mode_amp = 'Auto'
                         if mode_amp == 'Manual':
-                            p[f"p{i}_amplitude"].set(value=amp_val, min=amp_val, max=amp_val, vary=False)
+                            # Amplitude manual: do not force min=max; simply fix the value.
+                            p[f"p{i}_amplitude"].set(value=amp_val, vary=False)
                         else:
                             # Allow amplitude to vary upwards; keep lower bound at 0
                             p[f"p{i}_amplitude"].set(value=amp_val, min=0.0)
@@ -10503,6 +10702,22 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
     conditions_dd.observe(_persist_pd_filters, names="value")
     # Observers
     fit_range.observe(_on_fit_range_change, names="value")
+    fit_range2.observe(_on_fit_range_change, names="value")
+    fit_range3.observe(_on_fit_range_change, names="value")
+    def _toggle_r2(change):
+        try:
+            fit_range2.disabled = not bool(use_r2.value)
+        except Exception:
+            pass
+        _on_fit_range_change()
+    def _toggle_r3(change):
+        try:
+            fit_range3.disabled = not bool(use_r3.value)
+        except Exception:
+            pass
+        _on_fit_range_change()
+    use_r2.observe(_toggle_r2, names="value")
+    use_r3.observe(_toggle_r3, names="value")
 
     # Wire reset buttons
     def _reset_all(_b=None):
@@ -11112,7 +11327,12 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
     controls_row_filters = widgets.HBox([material_dd, conditions_dd])
     controls_row_spectrum = widgets.HBox([spectrum_sel, include_bad_cb])
     # Place the Fit X-range slider above the peak modification section
-    fit_range_row = widgets.HBox([fit_range])
+    fit_range_row = widgets.VBox([
+        widgets.HTML("<b>Fit X-ranges</b>"),
+        widgets.HBox([fit_range]),
+        widgets.HBox([use_r2, fit_range2]),
+        widgets.HBox([use_r3, fit_range3]),
+    ])
     # Keep other global parameters grouped below the peak controls
     reset_all_row = widgets.HBox([reset_all_btn])
     # Mark buttons (use shared helper for mutually exclusive controls)
@@ -11560,6 +11780,8 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
 
 
 def fit_time_series(FTIR_DataFrame):
+    if FTIR_DataFrame is None or not isinstance(FTIR_DataFrame, pd.DataFrame):
+        raise ValueError("Error: FTIR_DataFrame not defined. Load or Create DataFrame first.")
     """Interactive time-series fitting and visualization.
 
     - Computes time-series fits where peak centers/shapes are shared within a series
@@ -13607,6 +13829,8 @@ def fit_time_series(FTIR_DataFrame):
 
 
 def display_DataFrame(FTIR_DataFrame, height: int = 500):
+    if FTIR_DataFrame is None or not isinstance(FTIR_DataFrame, pd.DataFrame):
+        raise ValueError("Error: FTIR_DataFrame not defined. Load or Create DataFrame first.")
     """Display the DataFrame in a scrollable table with dropdown filters.
 
     - Defaults to showing the entire DataFrame in a scrollable HTML table.
@@ -13893,6 +14117,8 @@ def display_DataFrame(FTIR_DataFrame, height: int = 500):
 
 
 def fit_material(FTIR_DataFrame, materials_json_path=None):
+    if FTIR_DataFrame is None or not isinstance(FTIR_DataFrame, pd.DataFrame):
+        raise ValueError("Error: FTIR_DataFrame not defined. Load or Create DataFrame first.")
     """
     Aggregate time-series parameters across conditions for a selected material,
     compute average alpha and center per peak, and plot the selected material/condition
