@@ -35,6 +35,35 @@ try:
 except Exception:
     _IN_COLAB = False
 
+# Lazy peak widget mode (defer heavy slider construction until user expands a peak).
+# Can be disabled automatically if an exception occurs during materialization.
+LAZY_PEAK_WIDGETS = True
+# Deconvolution debug instrumentation (set DECONV_DEBUG=True before calling
+# deconvolute_peaks to collect and print lazy materialization errors).
+DECONV_DEBUG = False
+_DECONV_DEBUG_ERRORS = []  # list of traceback strings for failed materializations
+
+def _lazy_debug(msg: str):
+    try:
+        if DECONV_DEBUG:
+            print(f"[DECONV][lazy] {msg}")
+    except Exception:
+        pass
+
+class _LazyPlaceholder:
+    """Lightweight stand-in for an ipywidgets widget prior to materialization.
+    Provides a ``value`` attribute and a no-op ``observe`` so existing code paths
+    can interact without errors. ``value`` may be updated programmatically.
+    """
+    def __init__(self, value):
+        self.value = value
+    def observe(self, *_, **__):
+        # No-op: real widgets attach callbacks; placeholder ignores.
+        return
+
+class _LazyModePlaceholder(_LazyPlaceholder):
+    pass
+
     
 def _convert_dates_iso(directory: str, dry_run: bool = False):
     """Convert date substrings in folder and file names under ``directory`` to ISO
@@ -1237,6 +1266,17 @@ def _emit_session_summary(target, lines, *, title: str = "Session Summary"):
 _SESSION_SELECTIONS = {"material": "any", "conditions": "any", "time": "any"}
 # ^ Persist last-used filter selections across interactive tools so a user's context
 #   (material / conditions / time) carries between normalization, peak finding, etc.
+
+# Staged (unsaved) peak additions per spectrum index. When the user Accepts new peaks
+# they are placed here and overlaid for subsequent fitting, but not written back to
+# the DataFrame until the user clicks "Save for spectrum". Changing the selected
+# spectrum does not discard staging; returning to a spectrum with staged additions
+# shows the staged peak set. Structure per idx:
+#   {
+#       'centers': [...], 'center_windows': [...], 'sigma': [...],
+#       'amplitude': [...], 'alpha': [...], 'include': [...],
+#       'modes': {'amplitude': [...], 'center': [...], 'sigma': [...]} }
+_STAGED_PEAK_ADDITIONS = {}
 
 # Track active widgets/figures created by baseline_correct_spectra (interactive) to ensure clean re-entry
 _TB_WIDGETS = []
@@ -4084,7 +4124,7 @@ def baseline_correct_spectra(
                 )
                 undo_btn = widgets.Button(description="Undo last")
                 save_file_btn_m = widgets.Button(
-                    description="Save for file", button_style="success"
+                    description="Save for spectrum", button_style="success"
                 )
                 save_mat_btn_m = widgets.Button(
                     description="Save for material", button_style="info"
@@ -5131,7 +5171,7 @@ def baseline_correct_spectra(
 
             reset_all_btn2.on_click(_reset_all2)
             save_file_btn2 = widgets.Button(
-                description="Save for file",
+                description="Save for spectrum",
                 button_style="success",
                 layout=widgets.Layout(margin="10px 10px 0 0"),
             )
@@ -5663,7 +5703,7 @@ def baseline_correct_spectra(
                 reset_all_btn3.on_click(_reset_all3)
 
                 save_file_btn3 = widgets.Button(
-                    description="Save for file",
+                    description="Save for spectrum",
                     button_style="success",
                     layout=widgets.Layout(margin="10px 10px 0 0"),
                 )
@@ -7945,7 +7985,7 @@ def find_peak_info(FTIR_DataFrame, filepath=None):
         style={"description_width": "auto"},
     )
 
-    save_file_btn = widgets.Button(description="Save for file", button_style="success")
+    save_file_btn = widgets.Button(description="Save for spectrum", button_style="success")
     save_all_btn = widgets.Button(description="Save for filtered", button_style="info")
     # --- Change tracking for session summary on Close ---
     _peak_changes = {
@@ -8372,6 +8412,11 @@ def find_peak_info(FTIR_DataFrame, filepath=None):
 
 
 def deconvolute_peaks(FTIR_DataFrame, filepath=None):
+    # Ensure peak_box_cache exists for lazy placeholder/materialization logic
+    try:
+        peak_box_cache  # type: ignore[name-defined]
+    except Exception:
+        peak_box_cache = {}
     if FTIR_DataFrame is None or not isinstance(FTIR_DataFrame, pd.DataFrame):
         raise ValueError("Error: FTIR_DataFrame not defined. Load or Create DataFrame first.")
     """
@@ -8529,42 +8574,124 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         description="Conditions",
         layout=widgets.Layout(width="40%"),
     )
-    # Fit range selector: only peaks within this range will be modeled and shown
+    # Primary fit range (Range 1). Additional ranges can be added dynamically via a button.
     fit_range = widgets.FloatRangeSlider(
         value=[xmin, xmax],
         min=xmin,
         max=xmax,
         step=(xmax - xmin) / 1000 or 1.0,
-        description="Fit X-range",
+        description="Range 1",
         continuous_update=False,
         readout_format=".1f",
         layout=widgets.Layout(width="90%"),
     )
-    # Additional optional ranges (disabled until checkbox enabled)
-    use_r2 = widgets.Checkbox(value=False, description="Use range 2")
-    fit_range2 = widgets.FloatRangeSlider(
-        value=[xmin, xmax],
-        min=xmin,
-        max=xmax,
-        step=(xmax - xmin) / 1000 or 1.0,
-        description="X-range 2",
-        continuous_update=False,
-        readout_format=".1f",
-        layout=widgets.Layout(width="90%"),
-        disabled=True,
+
+    # Dynamic range slider list (initial contains Range 1). Limit to 3 total to mirror previous functionality.
+    range_sliders = [fit_range]
+
+    add_range_btn = widgets.Button(
+        description="Add another range",
+        button_style="info",
+        layout=widgets.Layout(width="180px"),
+        tooltip="Insert an additional fit range (up to 3).",
     )
-    use_r3 = widgets.Checkbox(value=False, description="Use range 3")
-    fit_range3 = widgets.FloatRangeSlider(
-        value=[xmin, xmax],
-        min=xmin,
-        max=xmax,
-        step=(xmax - xmin) / 1000 or 1.0,
-        description="X-range 3",
-        continuous_update=False,
-        readout_format=".1f",
-        layout=widgets.Layout(width="90%"),
-        disabled=True,
-    )
+
+    def _make_range_slider(n: int):
+        # n is 1-based index
+        return widgets.FloatRangeSlider(
+            value=[xmin, xmax],
+            min=xmin,
+            max=xmax,
+            step=(xmax - xmin) / 1000 or 1.0,
+            description=f"Range {n}",
+            continuous_update=False,
+            readout_format=".1f",
+            layout=widgets.Layout(width="90%"),
+        )
+
+    range_sliders_box = widgets.VBox([widgets.HBox([fit_range])])
+
+    def _renumber_range_sliders():
+        """Update slider descriptions to maintain contiguous numbering after add/remove."""
+        try:
+            for i, sl in enumerate(range_sliders, start=1):
+                sl.description = f"Range {i}"
+        except Exception:
+            pass
+
+    def _refresh_remove_buttons_visibility():
+        """Show remove buttons only when more than one range exists."""
+        # Called inside _refresh_range_box; existence of >1 slider gates button creation.
+        pass  # Placeholder (logic embedded directly in _refresh_range_box for simplicity)
+
+    def _remove_range(slider):
+        try:
+            if slider in range_sliders and len(range_sliders) > 1:
+                range_sliders.remove(slider)
+                _renumber_range_sliders()
+                # Re-enable add button if previously disabled due to max reached
+                try:
+                    if len(range_sliders) < 3:
+                        add_range_btn.disabled = False
+                        add_range_btn.tooltip = "Insert an additional fit range (up to 3)."
+                except Exception:
+                    pass
+                _refresh_range_box()
+                _on_fit_range_change()
+        except Exception:
+            pass
+
+    def _refresh_range_box():
+        try:
+            rows = []
+            multi = len(range_sliders) > 1
+            for sl in range_sliders:
+                if multi:
+                    rm_btn = widgets.Button(
+                        description="Remove Range",
+                        button_style="warning",
+                        layout=widgets.Layout(width="130px"),
+                        tooltip="Remove this fit range",
+                    )
+                    def _bind(btn, s=sl):
+                        try:
+                            btn.on_click(lambda _b: _remove_range(s))
+                        except Exception:
+                            pass
+                    _bind(rm_btn)
+                    rows.append(widgets.HBox([sl, rm_btn]))
+                else:
+                    rows.append(widgets.HBox([sl]))
+            range_sliders_box.children = rows
+        except Exception:
+            pass
+
+    def _add_range(_b=None):
+        if len(range_sliders) >= 3:
+            try:
+                add_range_btn.disabled = True
+                add_range_btn.tooltip = "Maximum of 3 ranges reached"
+            except Exception:
+                pass
+            return
+        idx_new = len(range_sliders) + 1
+        sl = _make_range_slider(idx_new)
+        range_sliders.append(sl)
+        try:
+            sl.observe(_on_fit_range_change, names="value")
+        except Exception:
+            pass
+        _renumber_range_sliders()
+        _refresh_range_box()
+        if len(range_sliders) >= 3:
+            try:
+                add_range_btn.disabled = True
+                add_range_btn.tooltip = "Maximum of 3 ranges reached"
+            except Exception:
+                pass
+        _on_fit_range_change()
+
+    add_range_btn.on_click(_add_range)
     # Per-peak default seeds (no global center/sigma controls)
     PER_PEAK_DEFAULT_CENTER_WINDOW = 15.0
     PER_PEAK_DEFAULT_SIGMA = 10.0
@@ -8617,7 +8744,7 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         button_style="danger",
         layout=widgets.Layout(width="190px"),
     )
-    save_btn = widgets.Button(description="Save for file", button_style="success")
+    save_btn = widgets.Button(description="Save for spectrum", button_style="success")
     close_btn = widgets.Button(description="Close", button_style="danger")
     # Dedicated status label to avoid Output-widget buffering issues
     status_html = widgets.HTML(value="")
@@ -8716,6 +8843,10 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
     alpha_sliders = []  # list[widgets.FloatSlider] (fraction α)
     include_checkboxes = []  # list[widgets.Checkbox]
     center_sliders = []  # list[widgets.FloatSlider] direct center (μ)
+    # Added lists for peak label/header synchronization post-fit
+    peak_label_widgets = []  # list[widgets.HTML] per-peak headers shown in UI
+    original_peak_centers = []  # list[float] detected (pre-fit) peak centers
+    last_active_ranges = []  # list[(lo, hi)] currently active fit ranges for header range status
     sigma_sliders = []  # list[widgets.FloatSlider]
     amplitude_sliders = []  # list[widgets.FloatSlider] amplitude A
     center_window_sliders = []  # list[widgets.FloatSlider] center ± window width
@@ -8728,6 +8859,20 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
     lock_center_checkboxes = []
     lock_sigma_checkboxes = []
     peak_controls_box = widgets.VBox([])
+    # Container (previously Accordion) for peak sections; now simple VBox to avoid nested blank accordion
+    peak_accordion = widgets.VBox([])
+    excluded_peaks_html = widgets.HTML(value="")
+    # Map original peak index -> accordion position for title updates after fit
+    included_index_map = {}
+    # Container displayed in UI
+    peak_controls_section = widgets.VBox([peak_controls_box])
+
+    # Async (asyncio) cancellable peak list rebuild state (thread version replaced)
+    peak_list_build_generation = 0  # incremented for each requested rebuild
+    peak_list_cancelled_tokens = set()  # tokens marked for cancellation
+    peak_list_build_task = None  # current asyncio.Task
+    peak_list_build_lock = threading.Lock()  # serialize task replacement
+    import asyncio as _asyncio
 
     # Persisted per-spectrum settings so switching spectra preserves choices
     per_spec_alpha = {}  # idx -> list[float]
@@ -8882,6 +9027,8 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         """Handle include checkbox toggles without rebuilding the per-peak UI."""
         try:
             if iterating_in_progress or bulk_update_in_progress:
+                # Still snapshot state so iteration worker can see updated flags
+                _snapshot_current_controls()
                 return
         except Exception:
             pass
@@ -9227,6 +9374,14 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         r = FTIR_DataFrame.loc[row_idx]
         xs = _parse_seq(r.get("Peak Wavenumbers"))
         ys = _parse_seq(r.get("Peak Absorbances"))
+        # Overlay staged (unsaved) additions if present for this spectrum index
+        try:
+            if row_idx in _STAGED_PEAK_ADDITIONS:
+                staged = _STAGED_PEAK_ADDITIONS.get(row_idx) or {}
+                xs = list(staged.get('centers')) if staged.get('centers') is not None else xs
+                ys = list(staged.get('amplitude')) if staged.get('amplitude') is not None else ys
+        except Exception:
+            pass
         if xs is None or ys is None:
             return [], []
         try:
@@ -9252,25 +9407,16 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             return xmin, xmax
     # Multi-range support helpers
     def _current_fit_ranges():
-        """Return list of active (lo, hi) ranges (1..3)."""
+        """Return list of active (lo, hi) ranges from dynamic slider list."""
         ranges = []
-        try:
-            lo, hi = fit_range.value
-            ranges.append((float(min(lo, hi)), float(max(lo, hi))))
-        except Exception:
+        for sl in range_sliders:
+            try:
+                lo, hi = sl.value
+                ranges.append((float(min(lo, hi)), float(max(lo, hi))))
+            except Exception:
+                continue
+        if not ranges:
             ranges.append((xmin, xmax))
-        if use_r2.value and not fit_range2.disabled:
-            try:
-                lo2, hi2 = fit_range2.value
-                ranges.append((float(min(lo2, hi2)), float(max(lo2, hi2))))
-            except Exception:
-                pass
-        if use_r3.value and not fit_range3.disabled:
-            try:
-                lo3, hi3 = fit_range3.value
-                ranges.append((float(min(lo3, hi3)), float(max(lo3, hi3))))
-            except Exception:
-                pass
         return ranges
     def _overall_fit_span():
         rs = _current_fit_ranges()
@@ -9350,12 +9496,20 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             # Best-effort; ignore if shapes unavailable
             pass
 
-    def _rebuild_alpha_sliders(row_idx):
+    def _rebuild_alpha_sliders_sync(row_idx, *, generation_token=None):
         nonlocal alpha_sliders, include_checkboxes, center_sliders, sigma_sliders, amplitude_sliders, center_window_sliders
         nonlocal amplitude_mode_toggles, center_mode_toggles, sigma_mode_toggles
         nonlocal lock_alpha_checkboxes, lock_center_checkboxes, lock_sigma_checkboxes
-        # Build controls for ALL peaks, grouping by Fit X-range membership.
-        # Only in-range peaks contribute to fitting/optimization state (lists).
+        # Persistent diff tracking sets/dicts (created once). We keep them in the closure scope.
+        try:
+            previous_in_range_indices  # type: ignore[name-defined]
+        except NameError:
+            previous_in_range_indices = set()  # indices of peaks currently rendered as in-range
+        # Honor cancellation before start
+        if generation_token in peak_list_cancelled_tokens:
+            return
+        # Build controls only for peaks within any active Fit X-range (lazy creation).
+        # Out-of-range peak widgets (headers) are created only when the excluded toggle is enabled.
         try:
             # Show transient building message while list is (re)constructed.
             peak_controls_box.children = [
@@ -9439,8 +9593,15 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                 saved_locks = {'alpha': None, 'center': None, 'sigma': None}
         if not isinstance(saved_locks, dict):
             saved_locks = {'alpha': None, 'center': None, 'sigma': None}
-        included_boxes = []
+        included_boxes = []  # will be used only for full rebuild path
         excluded_boxes = []
+        # Cache for previously built in-range peak widgets so we can reuse them on subsequent rebuilds
+        # (avoids re-instantiating many sliders when only the Fit X-ranges changed).
+        # Persist across calls inside the closure scope.
+        try:
+            peak_box_cache  # type: ignore[name-defined]
+        except NameError:
+            peak_box_cache = {}  # peak index -> dict of widgets
 
         # --- Parameter explanations for the toggle ---
         param_details_text = (
@@ -9475,408 +9636,1062 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             return widgets.HBox([toggle, details], layout=widgets.Layout(margin="4px 0 4px 0"))
 
         # Build per-peak controls as before, but without per-row info buttons
-        for i, (cx, cy) in enumerate(zip(peaks_x_all, peaks_y_all)):
-            in_range = False
-            try:
-                cxv = float(cx)
-                in_range = any(lo <= cxv <= hi for lo, hi in active_ranges)
-            except Exception:
-                in_range = False
-            header = widgets.HTML(
-                value=f"<b>Peak {i+1} @ {float(cx):.1f} cm⁻¹</b>" + (" <span style='color:#777;'>(out of range)</span>" if not in_range else ""),
-            )
-            include_checkbox = widgets.Checkbox(
-                value=(
-                    (
-                        bool(saved_includes[i])
-                        if saved_includes is not None and i < len(saved_includes)
-                        else DEFAULT_INCLUDE
-                    ) if in_range else False
-                ),
-                description="Include peak in Fit",
-                indent=False,
-                layout=widgets.Layout(width="200px"),
-                disabled=(not in_range),
-            )
-            alpha_slider = widgets.FloatSlider(
-                value=(
-                    float(saved_alphas[i])
-                    if saved_alphas is not None and i < len(saved_alphas)
-                    else DEFAULT_ALPHA
-                ),
-                min=0.0,
-                max=1.0,
-                step=0.01,
-                description="α",
-                continuous_update=False,
-                readout_format=".2f",
-                style={"description_width": "auto"},
-                layout=widgets.Layout(width="220px"),
-                disabled=(not in_range),
-            )
-            default_bound = float(PER_PEAK_DEFAULT_CENTER_WINDOW)
-            min_cwin = 0.5  # cm⁻¹, must be > 0
-            w_saved = (
-                float(saved_center_window[i])
-                if saved_center_window is not None and i < len(saved_center_window)
-                else default_bound
-            )
-            if not np.isfinite(w_saved) or w_saved <= 0.0:
-                w_saved = max(default_bound, min_cwin)
-            # Center slider bounds use overall span so manual adjustments can move within union
-            center_min, center_max = _overall_fit_span()
-            center_val = float(cx) if saved_center is None or i >= len(saved_center) else float(saved_center[i])
-            center_slider = widgets.FloatSlider(
-                value=center_val,
-                min=center_min,
-                max=center_max,
-                step=0.1,
-                description="μ (cm⁻¹)",
-                continuous_update=False,
-                style={"description_width": "auto"},
-                readout_format=".1f",
-                layout=widgets.Layout(width="220px"),
-                disabled=(not in_range),
-            )
-            center_window_slider = widgets.FloatSlider(
-                value=w_saved,
-                min=min_cwin,
-                max=max(default_bound * 2.0, 1.0),
-                step=0.5,
-                description="Window ± (cm⁻¹)",
-                continuous_update=False,
-                style={"description_width": "auto"},
-                readout_format=".1f",
-                layout=widgets.Layout(width="220px"),
-                disabled=(not in_range),
-            )
-            default_sigma = float(PER_PEAK_DEFAULT_SIGMA)
-            # Always use the current sigma value from the fit if available, else fallback
-            sigma_val = None
-            if saved_sigma is not None and i < len(saved_sigma):
+        # Reset tracking lists for headers/original centers and capture current active ranges
+        peak_label_widgets.clear()
+        original_peak_centers.clear()
+        last_active_ranges = list(active_ranges)
+        # Vectorized in-range computation for performance (avoids per-peak Python loops)
+        try:
+            import numpy as _np
+            cx_array = _np.asarray(peaks_x_all, dtype=float)
+            in_range_mask = _np.zeros_like(cx_array, dtype=bool)
+            for _lo, _hi in active_ranges:
                 try:
-                    sigma_val = float(saved_sigma[i])
+                    lo_v = float(min(_lo, _hi))
+                    hi_v = float(max(_lo, _hi))
+                    in_range_mask |= (cx_array >= lo_v) & (cx_array <= hi_v)
                 except Exception:
-                    sigma_val = None
-            if sigma_val is None:
-                sigma_val = default_sigma
-            sigma_slider = widgets.FloatSlider(
-                value=sigma_val,
-                min=1.0,
-                max=100.0,
-                step=0.5,
-                description="σ (cm⁻¹)",
-                continuous_update=False,
-                style={"description_width": "auto"},
-                readout_format=".1f",
-                layout=widgets.Layout(width="220px"),
-                disabled=(not in_range),
-            )
-            amp_default = abs(float(cy)) * max(1.0, float(default_sigma))
-            amp_val = (
-                float(saved_amplitude[i]) if saved_amplitude is not None and i < len(saved_amplitude) else amp_default
-            )
-            amplitude_slider = widgets.FloatSlider(
-                value=amp_val,
-                min=0.0,
-                max=max(amp_default * 5.0, amp_val, 1.0),
-                step=max(amp_default * 0.01, 0.01),
-                description="A",
-                continuous_update=False,
-                style={"description_width": "auto"},
-                readout_format=".3f",
-                layout=widgets.Layout(width="220px"),
-                disabled=(not in_range),
-            )
-            reset_alpha_btn = widgets.Button(
-                description="Reset",
-                tooltip="Reset α to default (0.5)",
-                layout=widgets.Layout(width="70px"),
-            )
-            reset_center_btn = widgets.Button(
-                description="Reset",
-                tooltip="Reset μ to detected peak position",
-                layout=widgets.Layout(width="70px"),
-            )
-            reset_sigma_p_btn = widgets.Button(
-                description="Reset",
-                tooltip="Reset σ to default",
-                layout=widgets.Layout(width="70px"),
-            )
-            reset_amp_btn = widgets.Button(
-                description="Reset",
-                tooltip="Reset A to initial estimate",
-                layout=widgets.Layout(width="70px"),
-            )
-            reset_cwin_btn = widgets.Button(
-                description="Reset",
-                tooltip="Reset window to default",
-                layout=widgets.Layout(width="70px"),
-            )
+                    pass
+        except Exception:
+            # Fallback: compute naïvely if numpy not available
+            in_range_mask = []
+            for _cx in peaks_x_all:
+                try:
+                    _cxv = float(_cx)
+                    in_range_mask.append(any(lo <= _cxv <= hi for lo, hi in active_ranges))
+                except Exception:
+                    in_range_mask.append(False)
 
-            def _mk_alpha_reset(sl=alpha_slider):
-                return lambda _b=None: (_set_quiet(sl, "value", DEFAULT_ALPHA), _snapshot_current_controls())
-            def _mk_center_reset(sl=center_slider, val=float(cx)):
-                return lambda _b=None: (_set_quiet(sl, "value", float(val)), _snapshot_current_controls())
-            def _mk_sigma_reset(sl=sigma_slider, defs=lambda: float(PER_PEAK_DEFAULT_SIGMA)):
-                return lambda _b=None: (_set_quiet(sl, "value", float(defs())), _snapshot_current_controls())
-            def _mk_amp_reset(sl=amplitude_slider, val=amp_default):
-                return lambda _b=None: (_set_quiet(sl, "value", float(val)), _snapshot_current_controls())
-            def _mk_cwin_reset(sl=center_window_slider, val=default_bound):
-                return lambda _b=None: (_set_quiet(sl, "value", float(val)), _snapshot_current_controls())
-            try:
-                reset_alpha_btn.on_click(_mk_alpha_reset())
-                reset_center_btn.on_click(_mk_center_reset())
-                reset_sigma_p_btn.on_click(_mk_sigma_reset())
-                reset_amp_btn.on_click(_mk_amp_reset())
-                reset_cwin_btn.on_click(_mk_cwin_reset())
-            except Exception:
-                pass
-            amp_mode_val = (
-                saved_modes['amplitude'][i] if saved_modes and isinstance(saved_modes.get('amplitude'), list) and i < len(saved_modes.get('amplitude')) else 'Auto'
-            )
-            center_mode_val = (
-                saved_modes['center'][i] if saved_modes and isinstance(saved_modes.get('center'), list) and i < len(saved_modes.get('center')) else 'Auto'
-            )
-            sigma_mode_val = (
-                saved_modes['sigma'][i] if saved_modes and isinstance(saved_modes.get('sigma'), list) and i < len(saved_modes.get('sigma')) else 'Auto'
-            )
-            amp_mode_toggle = widgets.Dropdown(
-                options=[('Auto', 'Auto'), ('Manual', 'Manual')],
-                value=('Auto' if not in_range else amp_mode_val),
-                layout=widgets.Layout(width='110px'),
-                style={'description_width': 'initial'},
-                description=''
-            )
-            center_mode_toggle = widgets.Dropdown(
-                options=[('Auto', 'Auto'), ('Manual', 'Manual')],
-                value=('Auto' if not in_range else center_mode_val),
-                layout=widgets.Layout(width='110px'),
-                style={'description_width': 'initial'},
-                description=''
-            )
-            sigma_mode_toggle = widgets.Dropdown(
-                options=[('Auto', 'Auto'), ('Manual', 'Manual')],
-                value=('Auto' if not in_range else sigma_mode_val),
-                layout=widgets.Layout(width='110px'),
-                style={'description_width': 'initial'},
-                description=''
-            )
+        excluded_peaks_list = []
+        included_titles = []
 
-            # --- Parameter symbol labels ---
-            symbol_labels = {
-                'A': '<b>A</b>',
-                'mu': '<b>&mu;</b>',
-                'sigma': '<b>&sigma;</b>',
-                'alpha': '<b>&alpha;</b>',
-            }
-            alpha_symbol = widgets.HTML(value=symbol_labels['alpha'], layout=widgets.Layout(width='32px', min_width='32px', text_align='center'))
-            amp_symbol = widgets.HTML(value=symbol_labels['A'], layout=widgets.Layout(width='32px', min_width='32px', text_align='center'))
-            center_symbol = widgets.HTML(value=symbol_labels['mu'], layout=widgets.Layout(width='32px', min_width='32px', text_align='center'))
-            sigma_symbol = widgets.HTML(value=symbol_labels['sigma'], layout=widgets.Layout(width='32px', min_width='32px', text_align='center'))
+        # --- Diff removal path -------------------------------------------------
+        # If we have a cache of all previously built peak boxes and the total count of peaks
+        # did not change, we can perform an in-place diff update instead of a full rebuild.
+        diff_applicable = False
+        try:
+            peak_box_cache  # type: ignore[name-defined]
+            # We only attempt diff if peaks_x_all length matches cache size (no additions/removals of actual peaks).
+            if isinstance(peak_box_cache, dict) and len(peak_box_cache) == len(peaks_x_all):
+                diff_applicable = True
+        except NameError:
+            peak_box_cache = {}
+            diff_applicable = False
 
+        # Compute new in-range set early for diff logic
+        new_in_range_set = {i for i, flag in enumerate(in_range_mask) if bool(flag)}
 
-            # Build slider boxes (must precede mode sync function so references exist)
-            amplitude_slider_box = widgets.HBox([amplitude_slider, reset_amp_btn], layout=widgets.Layout(align_items="center"))
-            center_slider_box = widgets.HBox([center_slider, reset_center_btn], layout=widgets.Layout(align_items="center"))
-            center_window_box = widgets.HBox([center_window_slider, reset_cwin_btn], layout=widgets.Layout(align_items="center"))
-            sigma_slider_box = widgets.HBox([sigma_slider, reset_sigma_p_btn], layout=widgets.Layout(align_items="center"))
-
-            if in_range:
-                include_checkbox.observe(_on_include_toggle, names="value")
-                alpha_slider.observe(_on_alpha_change, names="value")
-                center_slider.observe(_on_center_sigma_change, names="value")
-                amplitude_slider.observe(_on_center_sigma_change, names="value")
-                center_window_slider.observe(_on_center_sigma_change, names="value")
-                # Ensure sigma slider always updates the fit value in Manual mode
-                def _on_sigma_change(change, idx=i):
-                    if sigma_mode_toggle.value == 'Manual':
-                        # Update the per_spec_sigma for this spectrum and peak
-                        if row_idx not in per_spec_sigma:
-                            per_spec_sigma[row_idx] = [None] * len(peaks_x_all)
-                        per_spec_sigma[row_idx][idx] = change['new']
-                        _snapshot_current_controls()
-                sigma_slider.observe(_on_sigma_change, names="value")
-                # When the fit updates sigma, update the slider value (if not in Manual mode)
-                def _sync_sigma_slider(*_, idx=i):
-                    # Only update slider if not in Manual mode (Auto mode)
-                    if sigma_mode_toggle.value != 'Manual':
-                        val = None
-                        if saved_sigma is not None and idx < len(saved_sigma):
-                            try:
-                                val = float(saved_sigma[idx])
-                            except Exception:
-                                val = None
-                        if val is None:
-                            val = default_sigma
-                        sigma_slider.value = val
-                sigma_mode_toggle.observe(_sync_sigma_slider, names='value')
-
-            if in_range:
-                include_checkboxes.append(include_checkbox)
-                alpha_sliders.append(alpha_slider)
-                center_sliders.append(center_slider)
-                sigma_sliders.append(sigma_slider)
-                amplitude_sliders.append(amplitude_slider)
-                center_window_sliders.append(center_window_slider)
-                amplitude_mode_toggles.append(amp_mode_toggle)
-                center_mode_toggles.append(center_mode_toggle)
-                sigma_mode_toggles.append(sigma_mode_toggle)
-
-            def row_container(widget):
-                return widgets.Box([widget], layout=widgets.Layout(
-                    border="1.5px solid #888",
-                    margin="4px 0 4px 0",
-                    padding="6px 10px",
-                    border_radius="7px",
-                    background="#e0e7ef",
-                ))
-
-            alpha_row = widgets.HBox([
-                alpha_symbol,
-                widgets.HBox([alpha_slider, reset_alpha_btn], layout=widgets.Layout(align_items="center"))
-            ], layout=widgets.Layout(gap='8px'))
-            amplitude_row = widgets.HBox([
-                amp_symbol,
-                amp_mode_toggle,
-                amplitude_slider_box,
-            ], layout=widgets.Layout(gap='8px'))
-            center_row = widgets.HBox([
-                center_symbol,
-                center_mode_toggle,
-                center_slider_box,
-                center_window_box,
-            ], layout=widgets.Layout(gap='8px'))
-            sigma_row = widgets.HBox([
-                sigma_symbol,
-                sigma_mode_toggle,
-                sigma_slider_box,
-            ], layout=widgets.Layout(gap='8px'))
-            include_row = widgets.HBox([include_checkbox])
-
-            # Wrap rows for easier hide/show of entire parameter row
-            include_outer = row_container(include_row)
-            alpha_outer = row_container(alpha_row)
-            amplitude_outer = row_container(amplitude_row)
-            center_outer = row_container(center_row)
-            sigma_outer = row_container(sigma_row)
-
-            # Preserve original children once; use display toggling for reliability (capture per-peak widgets)
-            amplitude_slider_box.children = (amplitude_slider, reset_amp_btn)
-            center_slider_box.children = (center_slider, reset_center_btn)
-            center_window_box.children = (center_window_slider, reset_cwin_btn)
-            sigma_slider_box.children = (sigma_slider, reset_sigma_p_btn)
-
-            def _sync_modes_local(
-                amplitude_outer=amplitude_outer,
-                center_outer=center_outer,
-                sigma_outer=sigma_outer,
-                amplitude_slider_box=amplitude_slider_box,
-                center_slider_box=center_slider_box,
-                center_window_box=center_window_box,
-                sigma_slider_box=sigma_slider_box,
-                amplitude_slider=amplitude_slider,
-                center_slider=center_slider,
-                center_window_slider=center_window_slider,
-                sigma_slider=sigma_slider,
-                amp_mode_toggle=amp_mode_toggle,
-                center_mode_toggle=center_mode_toggle,
-                sigma_mode_toggle=sigma_mode_toggle,
-                in_range_local=in_range,
-            ):
-                """Synchronize slider visibility with mode selections using layout.display.
-
-                Captures widget references per peak via default arguments to avoid
-                late binding; ensures each peak's dropdown affects only its own
-                sliders.
-                """
-                # Amplitude
-                amplitude_outer.layout.display = 'flex'
-                if in_range_local and amp_mode_toggle.value == 'Manual':
-                    amplitude_slider.disabled = False
-                    amplitude_slider_box.layout.display = 'flex'
-                else:
-                    amplitude_slider.disabled = True
-                    amplitude_slider_box.layout.display = 'none'
-
-                # Center (μ vs window)
-                center_outer.layout.display = 'flex'
-                if in_range_local:
-                    if center_mode_toggle.value == 'Manual':
-                        center_slider.disabled = False
-                        center_window_slider.disabled = True
-                        center_slider_box.layout.display = 'flex'
-                        center_window_box.layout.display = 'none'
-                    else:  # Auto
-                        center_slider.disabled = True
-                        center_window_slider.disabled = False
-                        center_slider_box.layout.display = 'none'
-                        center_window_box.layout.display = 'flex'
-                else:
-                    center_slider.disabled = True
-                    center_window_slider.disabled = True
-                    center_slider_box.layout.display = 'none'
-                    center_window_box.layout.display = 'none'
-
-                # Sigma
-                sigma_outer.layout.display = 'flex'
-                if in_range_local and sigma_mode_toggle.value == 'Manual':
-                    sigma_slider.disabled = False
-                    sigma_slider_box.layout.display = 'flex'
-                else:
-                    sigma_slider.disabled = True
-                    sigma_slider_box.layout.display = 'none'
-
-            # Attach observers after defining sync
-            # Capture the per-row _sync_modes_local in a default arg to avoid late binding to last peak
-            amp_mode_toggle.observe(lambda *_ , sync=_sync_modes_local: (sync(), _snapshot_current_controls()), names='value')
-            center_mode_toggle.observe(lambda *_ , sync=_sync_modes_local: (sync(), _snapshot_current_controls()), names='value')
-            sigma_mode_toggle.observe(lambda *_ , sync=_sync_modes_local: (sync(), _snapshot_current_controls()), names='value')
-            _sync_modes_local()
-
-            if in_range:
-                box_children = [header, include_outer, alpha_outer, amplitude_outer, center_outer, sigma_outer]
-            else:
-                # Hide detail rows for excluded peaks, keep header only
-                for _hide_outer in (include_outer, alpha_outer, amplitude_outer, center_outer, sigma_outer):
+        if diff_applicable and previous_in_range_indices and generation_token not in peak_list_cancelled_tokens:
+            removed = previous_in_range_indices - new_in_range_set
+            added = new_in_range_set - previous_in_range_indices
+            unchanged = previous_in_range_indices & new_in_range_set
+            # If no changes, simply update summary and return fast
+            if not removed and not added:
+                try:
+                    # Update excluded list text (unchanged except counts)
+                    excluded_peaks_list = [
+                        (i+1, float(peaks_x_all[i])) for i in range(len(peaks_x_all)) if i not in new_in_range_set
+                    ]
+                    if excluded_peaks_list:
+                        excluded_lines = [f"Peak {num} @ {val:.1f} cm⁻¹" for num, val in excluded_peaks_list]
+                        excluded_text = "<br>".join(excluded_lines)
+                        excluded_peaks_html.value = (
+                            f"<b>Excluded Peaks:</b><div style='color:#777; margin-top:4px; line-height:1.35;'>{excluded_text}</div>"
+                        )
+                    else:
+                        excluded_peaks_html.value = "<b>Excluded Peaks:</b> <span style='color:#777;'>None</span>"
+                    summary_html = widgets.HTML(
+                        f"<span style='color:#555;'>In-range peaks: {len(new_in_range_set)} / Total: {len(peaks_x_all)}</span>"
+                    )
+                    # Preserve existing parameter details row (first child) and accordion
                     try:
-                        _hide_outer.layout.display = 'none'
+                        existing_children = list(peak_controls_box.children)
+                        if existing_children and isinstance(existing_children[0], widgets.HBox):
+                            param_row = existing_children[0]
+                        else:
+                            param_row = _make_param_details_row()
+                        # Reconstruct children minimally (param row, included header, accordion, excluded html)
+                        peak_controls_box.children = [
+                            param_row,
+                            widgets.HTML("<b>Included Peaks:</b>"),
+                            peak_accordion,
+                            excluded_peaks_html,
+                        ]
+                        # Swap summary HTML into param row if it contains a summary placeholder
+                        # (We assume param_row contains toggle + details; we append summary alongside)
+                        try:
+                            if len(param_row.children) == 2:
+                                param_row.children = (param_row.children[0], param_row.children[1], summary_html)
+                        except Exception:
+                            pass
                     except Exception:
                         pass
-                box_children = [header]
+                except Exception:
+                    pass
+                previous_in_range_indices = new_in_range_set
+                # Rebuild tracking lists from cache for unchanged peaks
+                alpha_sliders = []
+                include_checkboxes = []
+                center_sliders = []
+                sigma_sliders = []
+                amplitude_sliders = []
+                center_window_sliders = []
+                amplitude_mode_toggles = []
+                center_mode_toggles = []
+                sigma_mode_toggles = []
+                for i in sorted(new_in_range_set):
+                    try:
+                        w = peak_box_cache[i]
+                        include_checkboxes.append(w['include'])
+                        alpha_sliders.append(w['alpha'])
+                        center_sliders.append(w['center'])
+                        sigma_sliders.append(w['sigma'])
+                        amplitude_sliders.append(w['amplitude'])
+                        center_window_sliders.append(w['center_window'])
+                        amplitude_mode_toggles.append(w['amp_mode'])
+                        center_mode_toggles.append(w['center_mode'])
+                        sigma_mode_toggles.append(w['sigma_mode'])
+                    except Exception:
+                        pass
+                return  # No UI rebuild required
 
-            box = widgets.VBox(box_children, layout=widgets.Layout(
-                border="2.5px solid #222",
-                margin="12px 0 12px 0",
-                padding="16px 22px",
-                border_radius="12px",
-                background="#2d3748",
-                box_shadow="0 2px 8px rgba(0,0,0,0.12)",
+            # Process removals: hide or remove boxes
+            try:
+                current_children = list(getattr(peak_accordion, 'children', ()))
+            except Exception:
+                current_children = []
+            # Map box -> peak index for quick removal
+            inv_map = {}
+            for idx in previous_in_range_indices:
+                try:
+                    inv_map[peak_box_cache[idx]['box']] = idx
+                except Exception:
+                    pass
+            # Remove boxes for peaks leaving range
+            if removed:
+                new_children = []
+                for box in current_children:
+                    idx = inv_map.get(box, None)
+                    if idx is not None and idx in removed:
+                        # Move to excluded (we just drop from included; excluded list is text-only)
+                        try:
+                            box.layout.display = 'none'
+                        except Exception:
+                            pass
+                        continue
+                    new_children.append(box)
+                try:
+                    peak_accordion.children = tuple(new_children)
+                except Exception:
+                    pass
+            # Helper to rebuild tracking lists (placeholders and materialized widgets alike)
+            def _refresh_slider_lists():
+                nonlocal alpha_sliders, include_checkboxes, center_sliders, sigma_sliders, amplitude_sliders, center_window_sliders
+                nonlocal amplitude_mode_toggles, center_mode_toggles, sigma_mode_toggles
+                alpha_sliders = []
+                include_checkboxes = []
+                center_sliders = []
+                sigma_sliders = []
+                amplitude_sliders = []
+                center_window_sliders = []
+                amplitude_mode_toggles = []
+                center_mode_toggles = []
+                sigma_mode_toggles = []
+                for _i in sorted(new_in_range_set):
+                    try:
+                        w = peak_box_cache[_i]
+                        include_checkboxes.append(w['include'])
+                        alpha_sliders.append(w['alpha'])
+                        center_sliders.append(w['center'])
+                        sigma_sliders.append(w['sigma'])
+                        amplitude_sliders.append(w['amplitude'])
+                        center_window_sliders.append(w['center_window'])
+                        amplitude_mode_toggles.append(w['amp_mode'])
+                        center_mode_toggles.append(w['center_mode'])
+                        sigma_mode_toggles.append(w['sigma_mode'])
+                    except Exception:
+                        pass
+
+            # Materialization function builds full controls for a single peak on demand
+            def _materialize_peak(peak_idx: int, force: bool = False):
+                # Build full control set for a peak. When lazy mode has been disabled
+                # (LAZY_PEAK_WIDGETS False) we allow forced materialization for eager
+                # fallback by passing force=True.
+                global LAZY_PEAK_WIDGETS
+                if (not LAZY_PEAK_WIDGETS) and (not force):
+                    return
+                try:
+                    cache_entry = peak_box_cache.get(peak_idx)
+                    if not cache_entry or cache_entry.get('materialized'):
+                        return  # Already built or missing
+                    # Heavy build replicating original per-peak construction logic
+                    cx = peaks_x_all[peak_idx]; cy = peaks_y_all[peak_idx]
+                    original_center_val_local = float(cx)
+                    default_bound = float(PER_PEAK_DEFAULT_CENTER_WINDOW)
+                    min_cwin = 0.5
+                    # Recover saved values if present
+                    w_saved = default_bound
+                    if saved_center_window is not None and peak_idx < len(saved_center_window):
+                        try:
+                            candidate = float(saved_center_window[peak_idx])
+                            if np.isfinite(candidate) and candidate > 0.0:
+                                w_saved = candidate
+                        except Exception:
+                            pass
+                    center_min, center_max = _overall_fit_span()
+                    center_val_local = float(cx)
+                    if saved_center is not None and peak_idx < len(saved_center):
+                        try:
+                            center_val_local = float(saved_center[peak_idx])
+                        except Exception:
+                            pass
+                    center_slider = widgets.FloatSlider(
+                        value=center_val_local, min=center_min, max=center_max, step=0.1,
+                        description="μ (cm⁻¹)", continuous_update=False, style={"description_width": "auto"},
+                        readout_format=".1f", layout=widgets.Layout(width="220px")
+                    )
+                    center_window_slider = widgets.FloatSlider(
+                        value=w_saved, min=min_cwin, max=max(default_bound*2.0, 1.0), step=0.5,
+                        description="Window ± (cm⁻¹)", continuous_update=False, style={"description_width": "auto"},
+                        readout_format=".1f", layout=widgets.Layout(width="220px")
+                    )
+                    sigma_val = float(PER_PEAK_DEFAULT_SIGMA)
+                    if saved_sigma is not None and peak_idx < len(saved_sigma):
+                        try:
+                            tmp = float(saved_sigma[peak_idx])
+                            if np.isfinite(tmp):
+                                sigma_val = tmp
+                        except Exception:
+                            pass
+                    sigma_slider = widgets.FloatSlider(
+                        value=sigma_val, min=1.0, max=100.0, step=0.5, description="σ (cm⁻¹)",
+                        continuous_update=False, style={"description_width": "auto"}, readout_format=".1f",
+                        layout=widgets.Layout(width="220px")
+                    )
+                    amp_default = abs(float(cy)) * max(1.0, float(PER_PEAK_DEFAULT_SIGMA))
+                    amp_val_local = amp_default
+                    if saved_amplitude is not None and peak_idx < len(saved_amplitude):
+                        try:
+                            amp_candidate = float(saved_amplitude[peak_idx])
+                            if np.isfinite(amp_candidate) and amp_candidate >= 0.0:
+                                amp_val_local = amp_candidate
+                        except Exception:
+                            pass
+                    amplitude_slider = widgets.FloatSlider(
+                        value=amp_val_local, min=0.0, max=max(amp_default*5.0, amp_val_local, 1.0),
+                        step=max(amp_default*0.01, 0.01), description="A", continuous_update=False,
+                        style={"description_width": "auto"}, readout_format=".3f", layout=widgets.Layout(width="220px")
+                    )
+                    alpha_val_local = DEFAULT_ALPHA
+                    if saved_alphas is not None and peak_idx < len(saved_alphas):
+                        try:
+                            a_candidate = float(saved_alphas[peak_idx])
+                            if 0.0 <= a_candidate <= 1.0:
+                                alpha_val_local = a_candidate
+                        except Exception:
+                            pass
+                    alpha_slider = widgets.FloatSlider(
+                        value=alpha_val_local, min=0.0, max=1.0, step=0.01, description="α",
+                        continuous_update=False, readout_format=".2f", style={"description_width": "auto"},
+                        layout=widgets.Layout(width="220px")
+                    )
+                    include_val_local = True
+                    if saved_includes is not None and peak_idx < len(saved_includes):
+                        try:
+                            include_val_local = bool(saved_includes[peak_idx])
+                        except Exception:
+                            pass
+                    include_checkbox = widgets.Checkbox(value=include_val_local, description="Include peak in Fit", indent=False,
+                                                       layout=widgets.Layout(width="200px"))
+                    # Restore saved modes if available
+                    amp_mode_val_local = 'Auto'
+                    center_mode_val_local = 'Auto'
+                    sigma_mode_val_local = 'Auto'
+                    if saved_modes and isinstance(saved_modes.get('amplitude'), list) and peak_idx < len(saved_modes.get('amplitude')):
+                        amp_mode_val_local = saved_modes['amplitude'][peak_idx]
+                    if saved_modes and isinstance(saved_modes.get('center'), list) and peak_idx < len(saved_modes.get('center')):
+                        center_mode_val_local = saved_modes['center'][peak_idx]
+                    if saved_modes and isinstance(saved_modes.get('sigma'), list) and peak_idx < len(saved_modes.get('sigma')):
+                        sigma_mode_val_local = saved_modes['sigma'][peak_idx]
+                    amp_mode_toggle = widgets.Dropdown(options=[('Auto','Auto'),('Manual','Manual')], value=amp_mode_val_local, layout=widgets.Layout(width='110px'), style={'description_width':'initial'}, description='')
+                    center_mode_toggle = widgets.Dropdown(options=[('Auto','Auto'),('Manual','Manual')], value=center_mode_val_local, layout=widgets.Layout(width='110px'), style={'description_width':'initial'}, description='')
+                    sigma_mode_toggle = widgets.Dropdown(options=[('Auto','Auto'),('Manual','Manual')], value=sigma_mode_val_local, layout=widgets.Layout(width='110px'), style={'description_width':'initial'}, description='')
+
+                    # Attach observers (subset copied from original logic)
+                    include_checkbox.observe(_on_include_toggle, names="value")
+                    alpha_slider.observe(_on_alpha_change, names="value")
+                    center_slider.observe(_on_center_sigma_change, names="value")
+                    amplitude_slider.observe(_on_center_sigma_change, names="value")
+                    center_window_slider.observe(_on_center_sigma_change, names="value")
+                    def _on_sigma_change(change, idx_local=peak_idx):
+                        if sigma_mode_toggle.value == 'Manual':
+                            if row_idx not in per_spec_sigma:
+                                per_spec_sigma[row_idx] = [None] * len(peaks_x_all)
+                            per_spec_sigma[row_idx][idx_local] = change['new']
+                            _snapshot_current_controls()
+                    sigma_slider.observe(_on_sigma_change, names="value")
+
+                    # Build layout inside details box
+                    details_box = cache_entry['details']
+                    try:
+                        # Separate labels to keep all controls horizontal; remove slider descriptions (except alpha) to prevent vertical stacking.
+                        amplitude_slider.description = ''
+                        center_slider.description = ''
+                        center_window_slider.description = ''  # we will render a side label instead
+                        sigma_slider.description = ''
+                        alpha_slider.description = ''  # remove inline description per request
+                        # Short widths for horizontal fit
+                        amplitude_slider.layout.width = '160px'
+                        center_slider.layout.width = '160px'
+                        center_window_slider.layout.width = '160px'
+                        sigma_slider.layout.width = '160px'
+                        alpha_slider.layout.width = '160px'
+                        # Capture original values for reset functionality
+                        amplitude_slider._original_value = amplitude_slider.value  # type: ignore[attr-defined]
+                        center_slider._original_value = center_slider.value  # type: ignore[attr-defined]
+                        center_window_slider._original_value = center_window_slider.value  # type: ignore[attr-defined]
+                        sigma_slider._original_value = sigma_slider.value  # type: ignore[attr-defined]
+                        alpha_slider._original_value = alpha_slider.value  # type: ignore[attr-defined]
+                        # Build reset buttons
+                        def _mk_reset(target):
+                            btn = widgets.Button(description='Reset', layout=widgets.Layout(width='58px'))
+                            def _on_click(_):
+                                try:
+                                    orig = getattr(target, '_original_value', None)
+                                    if orig is not None:
+                                        target.value = orig
+                                except Exception:
+                                    pass
+                            btn.on_click(_on_click)
+                            return btn
+                        amplitude_reset = _mk_reset(amplitude_slider)
+                        center_reset = _mk_reset(center_slider)
+                        center_window_reset = _mk_reset(center_window_slider)
+                        sigma_reset = _mk_reset(sigma_slider)
+                        alpha_reset = _mk_reset(alpha_slider)
+                        # Common row layout: horizontal flex, visible overflow, generous height to avoid scroll
+                        _row_layout = widgets.Layout(
+                            display='flex', flex_flow='row nowrap', align_items='center',
+                            gap='10px', overflow='visible', min_height='42px'
+                        )
+                        include_row = widgets.HBox([include_checkbox], layout=_row_layout)
+                        # Restore row labels for legibility
+                        amplitude_label = widgets.HTML('<b>A</b>')
+                        amplitude_row = widgets.HBox([
+                            amplitude_label, amp_mode_toggle, amplitude_slider, amplitude_reset
+                        ], layout=_row_layout)
+                        # Window label separate to avoid vertical stacking; mu label separated for mode visibility logic
+                        mu_label = widgets.HTML('<b>μ</b>')
+                        # Make window label non-bold for reduced visual weight
+                        window_label = widgets.HTML('Window ± (cm⁻¹)')
+                        mu_row = widgets.HBox([
+                            mu_label, center_mode_toggle, center_slider, center_reset, window_label, center_window_slider, center_window_reset
+                        ], layout=_row_layout)
+                        sigma_label = widgets.HTML('<b>σ</b>')
+                        sigma_row = widgets.HBox([
+                            sigma_label, sigma_mode_toggle, sigma_slider, sigma_reset
+                        ], layout=_row_layout)
+                        alpha_row = widgets.HBox([
+                            widgets.HTML('<b>α</b>'), alpha_slider, alpha_reset
+                        ], layout=_row_layout)
+                        # Ensure container overflow does not force internal scrolling
+                        try:
+                            details_box.layout.overflow = 'visible'
+                        except Exception:
+                            pass
+
+                        def _sync_mode_visibility(*_):
+                            # Amplitude row: show label always; hide slider/reset in Auto
+                            try:
+                                if amp_mode_toggle.value == 'Auto':
+                                    amplitude_slider.layout.display = 'none'
+                                    amplitude_reset.layout.display = 'none'
+                                else:
+                                    amplitude_slider.layout.display = 'block'
+                                    amplitude_reset.layout.display = 'block'
+                                amplitude_label.layout.display = 'block'
+                            except Exception:
+                                pass
+                            # Center/window row: label always; toggle sliders per mode
+                            try:
+                                if center_mode_toggle.value == 'Auto':
+                                    center_slider.layout.display = 'none'
+                                    center_reset.layout.display = 'none'
+                                    center_window_slider.layout.display = 'block'
+                                    center_window_reset.layout.display = 'block'
+                                    window_label.layout.display = 'block'
+                                else:
+                                    center_slider.layout.display = 'block'
+                                    center_reset.layout.display = 'block'
+                                    center_window_slider.layout.display = 'none'
+                                    center_window_reset.layout.display = 'none'
+                                    window_label.layout.display = 'none'
+                                mu_label.layout.display = 'block'
+                            except Exception:
+                                pass
+                            # Sigma row: show label always; hide slider/reset in Auto
+                            try:
+                                if sigma_mode_toggle.value == 'Auto':
+                                    sigma_slider.layout.display = 'none'
+                                    sigma_reset.layout.display = 'none'
+                                else:
+                                    sigma_slider.layout.display = 'block'
+                                    sigma_reset.layout.display = 'block'
+                                sigma_label.layout.display = 'block'
+                            except Exception:
+                                pass
+                        try:
+                            amp_mode_toggle.observe(_sync_mode_visibility, names='value')
+                            center_mode_toggle.observe(_sync_mode_visibility, names='value')
+                            sigma_mode_toggle.observe(_sync_mode_visibility, names='value')
+                        except Exception:
+                            pass
+                        _sync_mode_visibility()
+                        details_box.children = [include_row, alpha_row, amplitude_row, mu_row, sigma_row]
+                    except Exception:
+                        details_box.children = [alpha_slider, amplitude_slider, center_slider, center_window_slider, sigma_slider]
+
+                    # Update cache entry with real widgets
+                    cache_entry.update({
+                        'include': include_checkbox,
+                        'alpha': alpha_slider,
+                        'center': center_slider,
+                        'sigma': sigma_slider,
+                        'amplitude': amplitude_slider,
+                        'center_window': center_window_slider,
+                        'amp_mode': amp_mode_toggle,
+                        'center_mode': center_mode_toggle,
+                        'sigma_mode': sigma_mode_toggle,
+                        'materialized': True,
+                    })
+                    _refresh_slider_lists()
+                except Exception as e:
+                    # Capture detailed traceback for diagnostics when debug enabled
+                    try:
+                        import traceback
+                        _DECONV_DEBUG_ERRORS.append(traceback.format_exc(limit=12))
+                    except Exception:
+                        pass
+                    _lazy_debug(f"Materialization failed for peak {peak_idx}: {e.__class__.__name__}: {e}")
+                    try:
+                        status_html.value = "<span style='color:#c33;'>Lazy peak build failed; reverting to eager mode. Set DECONV_DEBUG=True for details.</span>"
+                    except Exception:
+                        pass
+                    LAZY_PEAK_WIDGETS = False
+                    return
+
+            # Add boxes for peaks newly entering range
+            if added:
+                for idx in sorted(added):
+                    try:
+                        # Reuse existing cached widgets if previously built; make visible
+                        if idx in peak_box_cache:
+                            peak_box_cache[idx]['box'].layout.display = ''
+                            continue
+                        # Minimal lazy build: only toggle + empty details container; placeholders for controls
+                        cx = peaks_x_all[idx]
+                        original_center_val_local = float(cx)
+                        details = widgets.VBox([]); details.layout.display = 'none'
+                        toggle = widgets.ToggleButton(value=False, description=f"Peak {idx+1} @ {original_center_val_local:.1f} → {original_center_val_local:.1f} cm⁻¹", icon='chevron-down', layout=widgets.Layout(width='auto'))
+                        def _on_toggle_local(change, _t=toggle, _d=details, _idx=idx):
+                            if change.get('name') == 'value':
+                                show = bool(change.get('new'))
+                                _d.layout.display = 'block' if show else 'none'
+                                try:
+                                    _t.icon = 'chevron-up' if show else 'chevron-down'
+                                except Exception:
+                                    pass
+                                # Lazy materialization trigger
+                                if show:
+                                    try:
+                                        # Try lazy first (may raise). If lazy disabled, force eager build.
+                                        if LAZY_PEAK_WIDGETS:
+                                            _materialize_peak(_idx)
+                                        else:
+                                            _materialize_peak(_idx, force=True)
+                                    except Exception:
+                                        # Capture traceback for diagnostics
+                                        try:
+                                            import traceback
+                                            global _DECONV_DEBUG_ERRORS
+                                            _DECONV_DEBUG_ERRORS.append(traceback.format_exc(limit=12))
+                                        except Exception:
+                                            pass
+                                        _lazy_debug(f"Toggle local failed for peak {_idx}")
+                                        try:
+                                            status_html.value = "<span style='color:#c33;'>Lazy materialization failed; switching to eager mode.</span>"
+                                        except Exception:
+                                            pass
+                                        try:
+                                            LAZY_PEAK_WIDGETS = False
+                                        except Exception:
+                                            pass
+                                        # Attempt eager materialization once after failure
+                                        try:
+                                            _materialize_peak(_idx, force=True)
+                                        except Exception:
+                                            pass
+                        toggle.observe(_on_toggle_local, names='value')
+                        box = widgets.VBox([toggle, details], layout=widgets.Layout(border="2.5px solid #222", margin="12px 0", padding="16px 22px", border_radius="12px", background="#2d3748"))
+                        # Insert at correct sorted position
+                        try:
+                            current_children = list(getattr(peak_accordion, 'children', ()))
+                            insert_pos = 0
+                            # Determine insertion point by counting existing children with peak index < idx
+                            for c in current_children:
+                                try:
+                                    desc = getattr(c.children[0], 'description', '')
+                                    if desc.startswith('Peak '):
+                                        # Extract original peak number
+                                        num_part = desc.split(' ')[1]
+                                        peak_num = int(num_part)
+                                        # peak_num is 1-based
+                                        if peak_num-1 < idx:
+                                            insert_pos += 1
+                                except Exception:
+                                    pass
+                            current_children.insert(insert_pos, box)
+                            peak_accordion.children = tuple(current_children)
+                        except Exception:
+                            pass
+                        # Cache placeholders initially (values chosen to mirror defaults)
+                        peak_box_cache[idx] = {
+                            'box': box,
+                            'toggle': toggle,
+                            'details': details,
+                            'include': _LazyPlaceholder(True),
+                            'alpha': _LazyPlaceholder(DEFAULT_ALPHA),
+                            'center': _LazyPlaceholder(float(cx)),
+                            'sigma': _LazyPlaceholder(float(PER_PEAK_DEFAULT_SIGMA)),
+                            'amplitude': _LazyPlaceholder(abs(float(peaks_y_all[idx])) * max(1.0, float(PER_PEAK_DEFAULT_SIGMA))),
+                            'center_window': _LazyPlaceholder(float(PER_PEAK_DEFAULT_CENTER_WINDOW)),
+                            'amp_mode': _LazyModePlaceholder('Auto'),
+                            'center_mode': _LazyModePlaceholder('Auto'),
+                            'sigma_mode': _LazyModePlaceholder('Auto'),
+                            'materialized': False,
+                        }
+                    except Exception:
+                        pass
+                # After lazy additions, refresh tracking lists (placeholders included)
+                _refresh_slider_lists()
+            # Update excluded list & summary after diff ops
+            try:
+                excluded_peaks_list = [
+                    (i+1, float(peaks_x_all[i])) for i in range(len(peaks_x_all)) if i not in new_in_range_set
+                ]
+                if excluded_peaks_list:
+                    excluded_lines = [f"Peak {num} @ {val:.1f} cm⁻¹" for num, val in excluded_peaks_list]
+                    excluded_text = "<br>".join(excluded_lines)
+                    excluded_peaks_html.value = (
+                        f"<b>Excluded Peaks:</b><div style='color:#777; margin-top:4px; line-height:1.35;'>{excluded_text}</div>"
+                    )
+                else:
+                    excluded_peaks_html.value = "<b>Excluded Peaks:</b> <span style='color:#777;'>None</span>"
+                summary_html = widgets.HTML(
+                    f"<span style='color:#555;'>In-range peaks: {len(new_in_range_set)} / Total: {len(peaks_x_all)}</span>"
+                )
+                # Reconstruct control box children minimally
+                try:
+                    existing_children = list(peak_controls_box.children)
+                    if existing_children and isinstance(existing_children[0], widgets.HBox):
+                        param_row = existing_children[0]
+                    else:
+                        param_row = _make_param_details_row()
+                    peak_controls_box.children = [
+                        param_row,
+                        widgets.HTML("<b>Included Peaks:</b>"),
+                        peak_accordion,
+                        excluded_peaks_html,
+                    ]
+                    try:
+                        if len(param_row.children) == 2:
+                            param_row.children = (param_row.children[0], param_row.children[1], summary_html)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            # Rebuild tracking lists from cache for new set
+            alpha_sliders = []
+            include_checkboxes = []
+            center_sliders = []
+            sigma_sliders = []
+            amplitude_sliders = []
+            center_window_sliders = []
+            amplitude_mode_toggles = []
+            center_mode_toggles = []
+            sigma_mode_toggles = []
+            for i in sorted(new_in_range_set):
+                try:
+                    w = peak_box_cache[i]
+                    include_checkboxes.append(w['include'])
+                    alpha_sliders.append(w['alpha'])
+                    center_sliders.append(w['center'])
+                    sigma_sliders.append(w['sigma'])
+                    amplitude_sliders.append(w['amplitude'])
+                    center_window_sliders.append(w['center_window'])
+                    amplitude_mode_toggles.append(w['amp_mode'])
+                    center_mode_toggles.append(w['center_mode'])
+                    sigma_mode_toggles.append(w['sigma_mode'])
+                except Exception:
+                    pass
+            previous_in_range_indices = new_in_range_set
+            return  # Diff path handled fully; skip full rebuild below
+
+        # --- End diff removal path; fall back to full rebuild ------------------
+        previous_in_range_indices = new_in_range_set  # initialize tracking for next diff cycle
+        # Placeholder-only initial build (no heavy sliders) when diff path not available
+        included_boxes = []
+        excluded_peaks_list = []
+        for i, cx in enumerate(peaks_x_all):
+            if generation_token in peak_list_cancelled_tokens:
+                return
+            in_range = bool(in_range_mask[i]) if i < len(in_range_mask) else False
+            original_center_val = float(cx)
+            if not in_range:
+                excluded_peaks_list.append((i+1, original_center_val))
+                continue
+            # Ensure materialization function exists even when entering fallback path
+            if '_materialize_peak' not in locals():
+                def _materialize_peak(peak_idx: int, force: bool = False):
+                    global LAZY_PEAK_WIDGETS
+                    if (not LAZY_PEAK_WIDGETS) and (not force):
+                        return
+                    try:
+                        cache_entry = peak_box_cache.get(peak_idx)
+                        if not cache_entry or cache_entry.get('materialized'):
+                            return
+                        cx_local = peaks_x_all[peak_idx]; cy_local = peaks_y_all[peak_idx]
+                        original_center_val_local = float(cx_local)
+                        default_bound_local = float(PER_PEAK_DEFAULT_CENTER_WINDOW)
+                        min_cwin_local = 0.5
+                        w_saved_local = default_bound_local
+                        try:
+                            if saved_center_window is not None and peak_idx < len(saved_center_window):
+                                cand = float(saved_center_window[peak_idx])
+                                if np.isfinite(cand) and cand > 0.0:
+                                    w_saved_local = cand
+                        except Exception:
+                            pass
+                        center_min_local, center_max_local = _overall_fit_span() if ' _overall_fit_span' in globals() or '_overall_fit_span' in locals() else (float(np.nanmin(peaks_x_all)), float(np.nanmax(peaks_x_all)))
+                        center_val_local = float(cx_local)
+                        try:
+                            if saved_center is not None and peak_idx < len(saved_center):
+                                center_val_local = float(saved_center[peak_idx])
+                        except Exception:
+                            pass
+                        center_slider = widgets.FloatSlider(value=center_val_local, min=center_min_local, max=center_max_local, step=0.1, description="μ (cm⁻¹)", continuous_update=False, style={"description_width": "auto"}, readout_format=".1f", layout=widgets.Layout(width="220px"))
+                        center_window_slider = widgets.FloatSlider(value=w_saved_local, min=min_cwin_local, max=max(default_bound_local*2.0, 1.0), step=0.5, description="Window ± (cm⁻¹)", continuous_update=False, style={"description_width": "auto"}, readout_format=".1f", layout=widgets.Layout(width="220px"))
+                        sigma_val_local = float(PER_PEAK_DEFAULT_SIGMA)
+                        try:
+                            if saved_sigma is not None and peak_idx < len(saved_sigma):
+                                tmp = float(saved_sigma[peak_idx])
+                                if np.isfinite(tmp):
+                                    sigma_val_local = tmp
+                        except Exception:
+                            pass
+                        sigma_slider = widgets.FloatSlider(value=sigma_val_local, min=1.0, max=100.0, step=0.5, description="σ (cm⁻¹)", continuous_update=False, style={"description_width": "auto"}, readout_format=".1f", layout=widgets.Layout(width="220px"))
+                        amp_default_local = abs(float(cy_local)) * max(1.0, float(PER_PEAK_DEFAULT_SIGMA))
+                        amp_val_local = amp_default_local
+                        try:
+                            if saved_amplitude is not None and peak_idx < len(saved_amplitude):
+                                cand_a = float(saved_amplitude[peak_idx])
+                                if np.isfinite(cand_a) and cand_a >= 0.0:
+                                    amp_val_local = cand_a
+                        except Exception:
+                            pass
+                        amplitude_slider = widgets.FloatSlider(value=amp_val_local, min=0.0, max=max(amp_default_local*5.0, amp_val_local, 1.0), step=max(amp_default_local*0.01, 0.01), description="A", continuous_update=False, style={"description_width": "auto"}, readout_format=".3f", layout=widgets.Layout(width="220px"))
+                        alpha_val_local = DEFAULT_ALPHA
+                        try:
+                            if saved_alphas is not None and peak_idx < len(saved_alphas):
+                                cand_alpha = float(saved_alphas[peak_idx])
+                                if 0.0 <= cand_alpha <= 1.0:
+                                    alpha_val_local = cand_alpha
+                        except Exception:
+                            pass
+                        alpha_slider = widgets.FloatSlider(value=alpha_val_local, min=0.0, max=1.0, step=0.01, description="α", continuous_update=False, readout_format=".2f", style={"description_width": "auto"}, layout=widgets.Layout(width="220px"))
+                        include_val_local = True
+                        try:
+                            if saved_includes is not None and peak_idx < len(saved_includes):
+                                include_val_local = bool(saved_includes[peak_idx])
+                        except Exception:
+                            pass
+                        include_checkbox = widgets.Checkbox(value=include_val_local, description="Include peak in Fit", indent=False, layout=widgets.Layout(width="200px"))
+                        amp_mode_val_local = 'Auto'; center_mode_val_local = 'Auto'; sigma_mode_val_local = 'Auto'
+                        try:
+                            if saved_modes and isinstance(saved_modes.get('amplitude'), list) and peak_idx < len(saved_modes.get('amplitude')):
+                                amp_mode_val_local = saved_modes['amplitude'][peak_idx]
+                            if saved_modes and isinstance(saved_modes.get('center'), list) and peak_idx < len(saved_modes.get('center')):
+                                center_mode_val_local = saved_modes['center'][peak_idx]
+                            if saved_modes and isinstance(saved_modes.get('sigma'), list) and peak_idx < len(saved_modes.get('sigma')):
+                                sigma_mode_val_local = saved_modes['sigma'][peak_idx]
+                        except Exception:
+                            pass
+                        amp_mode_toggle = widgets.Dropdown(options=[('Auto','Auto'),('Manual','Manual')], value=amp_mode_val_local, layout=widgets.Layout(width='110px'), style={'description_width':'initial'}, description='')
+                        center_mode_toggle = widgets.Dropdown(options=[('Auto','Auto'),('Manual','Manual')], value=center_mode_val_local, layout=widgets.Layout(width='110px'), style={'description_width':'initial'}, description='')
+                        sigma_mode_toggle = widgets.Dropdown(options=[('Auto','Auto'),('Manual','Manual')], value=sigma_mode_val_local, layout=widgets.Layout(width='110px'), style={'description_width':'initial'}, description='')
+                        try:
+                            include_checkbox.observe(_on_include_toggle, names='value')
+                            alpha_slider.observe(_on_alpha_change, names='value')
+                            center_slider.observe(_on_center_sigma_change, names='value')
+                            amplitude_slider.observe(_on_center_sigma_change, names='value')
+                            center_window_slider.observe(_on_center_sigma_change, names='value')
+                            def _on_sigma_change_stub(change, idx_local=peak_idx):
+                                if sigma_mode_toggle.value == 'Manual':
+                                    if row_idx not in per_spec_sigma:
+                                        per_spec_sigma[row_idx] = [None] * len(peaks_x_all)
+                                    per_spec_sigma[row_idx][idx_local] = change['new']
+                                    _snapshot_current_controls()
+                            sigma_slider.observe(_on_sigma_change_stub, names='value')
+                        except Exception:
+                            pass
+                        details_box_local = cache_entry['details']
+                        try:
+                            amplitude_slider.description = ''
+                            center_slider.description = ''
+                            center_window_slider.description = ''  # side label used instead
+                            sigma_slider.description = ''
+                            alpha_slider.description = ''
+                            amplitude_slider.layout.width = '160px'
+                            center_slider.layout.width = '160px'
+                            center_window_slider.layout.width = '160px'
+                            sigma_slider.layout.width = '160px'
+                            alpha_slider.layout.width = '160px'
+                            amplitude_slider._original_value = amplitude_slider.value  # type: ignore[attr-defined]
+                            center_slider._original_value = center_slider.value  # type: ignore[attr-defined]
+                            center_window_slider._original_value = center_window_slider.value  # type: ignore[attr-defined]
+                            sigma_slider._original_value = sigma_slider.value  # type: ignore[attr-defined]
+                            alpha_slider._original_value = alpha_slider.value  # type: ignore[attr-defined]
+                            def _mk_reset_local(target):
+                                btn = widgets.Button(description='Reset', layout=widgets.Layout(width='58px'))
+                                def _on_click(_):
+                                    try:
+                                        orig = getattr(target, '_original_value', None)
+                                        if orig is not None:
+                                            target.value = orig
+                                    except Exception:
+                                        pass
+                                btn.on_click(_on_click)
+                                return btn
+                            amplitude_reset_l = _mk_reset_local(amplitude_slider)
+                            center_reset_l = _mk_reset_local(center_slider)
+                            center_window_reset_l = _mk_reset_local(center_window_slider)
+                            sigma_reset_l = _mk_reset_local(sigma_slider)
+                            alpha_reset_l = _mk_reset_local(alpha_slider)
+                            _row_layout_local = widgets.Layout(
+                                display='flex', flex_flow='row nowrap', align_items='center',
+                                gap='10px', overflow='visible', min_height='42px'
+                            )
+                            include_row_local = widgets.HBox([include_checkbox], layout=_row_layout_local)
+                            amplitude_label_l = widgets.HTML('<b>A</b>')
+                            amplitude_row_local = widgets.HBox([amplitude_label_l, amp_mode_toggle, amplitude_slider, amplitude_reset_l], layout=_row_layout_local)
+                            mu_label_l = widgets.HTML('<b>μ</b>')
+                            window_label_l = widgets.HTML('Window ± (cm⁻¹)')
+                            mu_row_local = widgets.HBox([mu_label_l, center_mode_toggle, center_slider, center_reset_l, window_label_l, center_window_slider, center_window_reset_l], layout=_row_layout_local)
+                            sigma_label_l = widgets.HTML('<b>σ</b>')
+                            sigma_row_local = widgets.HBox([sigma_label_l, sigma_mode_toggle, sigma_slider, sigma_reset_l], layout=_row_layout_local)
+                            alpha_row_local = widgets.HBox([widgets.HTML('<b>α</b>'), alpha_slider, alpha_reset_l], layout=_row_layout_local)
+                            try:
+                                details_box_local.layout.overflow = 'visible'
+                            except Exception:
+                                pass
+                            def _sync_mode_visibility_local(*_):
+                                # Amplitude row labels always visible
+                                try:
+                                    if amp_mode_toggle.value == 'Auto':
+                                        amplitude_slider.layout.display = 'none'
+                                        amplitude_reset_l.layout.display = 'none'
+                                    else:
+                                        amplitude_slider.layout.display = 'block'
+                                        amplitude_reset_l.layout.display = 'block'
+                                    amplitude_label_l.layout.display = 'block'
+                                except Exception:
+                                    pass
+                                # Center / window handling
+                                try:
+                                    if center_mode_toggle.value == 'Auto':
+                                        center_slider.layout.display = 'none'
+                                        center_reset_l.layout.display = 'none'
+                                        center_window_slider.layout.display = 'block'
+                                        center_window_reset_l.layout.display = 'block'
+                                        window_label_l.layout.display = 'block'
+                                    else:
+                                        center_slider.layout.display = 'block'
+                                        center_reset_l.layout.display = 'block'
+                                        center_window_slider.layout.display = 'none'
+                                        center_window_reset_l.layout.display = 'none'
+                                        window_label_l.layout.display = 'none'
+                                    mu_label_l.layout.display = 'block'
+                                except Exception:
+                                    pass
+                                # Sigma row handling
+                                try:
+                                    if sigma_mode_toggle.value == 'Auto':
+                                        sigma_slider.layout.display = 'none'
+                                        sigma_reset_l.layout.display = 'none'
+                                    else:
+                                        sigma_slider.layout.display = 'block'
+                                        sigma_reset_l.layout.display = 'block'
+                                    sigma_label_l.layout.display = 'block'
+                                except Exception:
+                                    pass
+                            try:
+                                amp_mode_toggle.observe(_sync_mode_visibility_local, names='value')
+                                center_mode_toggle.observe(_sync_mode_visibility_local, names='value')
+                                sigma_mode_toggle.observe(_sync_mode_visibility_local, names='value')
+                            except Exception:
+                                pass
+                            _sync_mode_visibility_local()
+                            details_box_local.children = [include_row_local, alpha_row_local, amplitude_row_local, mu_row_local, sigma_row_local]
+                        except Exception:
+                            details_box_local.children = [alpha_slider, amplitude_slider, center_slider, center_window_slider, sigma_slider]
+                        cache_entry.update({'include': include_checkbox,'alpha': alpha_slider,'center': center_slider,'sigma': sigma_slider,'amplitude': amplitude_slider,'center_window': center_window_slider,'amp_mode': amp_mode_toggle,'center_mode': center_mode_toggle,'sigma_mode': sigma_mode_toggle,'materialized': True})
+                    except Exception as e:
+                        try:
+                            import traceback
+                            _DECONV_DEBUG_ERRORS.append(traceback.format_exc(limit=12))
+                        except Exception:
+                            pass
+                        _lazy_debug(f"Fallback materialization failed for peak {peak_idx}: {e}")
+                        try:
+                            status_html.value = "<span style='color:#c33;'>Fallback materialization failed; disabling lazy mode.</span>"
+                        except Exception:
+                            pass
+                        LAZY_PEAK_WIDGETS = False
+                        return
+            # Toggle + empty details; materialization deferred until expand
+            details = widgets.VBox([]); details.layout.display = 'none'
+            toggle = widgets.ToggleButton(
+                value=False,
+                description=f"Peak {i+1} @ {original_center_val:.1f} → {original_center_val:.1f} cm⁻¹",
+                icon='chevron-down', layout=widgets.Layout(width='auto'),
+                tooltip='Show/hide peak parameter controls'
+            )
+            def _on_toggle_init(change, _t=toggle, _d=details, _idx=i):
+                # Declare global early since we conditionally reassign LAZY_PEAK_WIDGETS
+                global LAZY_PEAK_WIDGETS
+                if change.get('name') == 'value':
+                    show = bool(change.get('new'))
+                    _d.layout.display = 'block' if show else 'none'
+                    try:
+                        _t.icon = 'chevron-up' if show else 'chevron-down'
+                    except Exception:
+                        pass
+                    if show:
+                        try:
+                            if LAZY_PEAK_WIDGETS:
+                                _materialize_peak(_idx)
+                            else:
+                                _materialize_peak(_idx, force=True)
+                        except Exception:
+                            # Capture traceback for diagnostics
+                            try:
+                                import traceback
+                                global _DECONV_DEBUG_ERRORS
+                                _DECONV_DEBUG_ERRORS.append(traceback.format_exc(limit=12))
+                            except Exception:
+                                pass
+                            _lazy_debug(f"Toggle init failed for peak {_idx}")
+                            # Switch to eager mode and attempt forced build so user sees controls
+                            try:
+                                status_html.value = "<span style='color:#c33;'>Lazy materialization failed; forcing eager build.</span>"
+                            except Exception:
+                                pass
+                            try:
+                                LAZY_PEAK_WIDGETS = False
+                            except Exception:
+                                pass
+                            try:
+                                _materialize_peak(_idx, force=True)
+                            except Exception:
+                                pass
+            toggle.observe(_on_toggle_init, names='value')
+            box = widgets.VBox([toggle, details], layout=widgets.Layout(
+                border="2.5px solid #222", margin="12px 0", padding="16px 22px", border_radius="12px", background="#2d3748"
             ))
-            if in_range:
-                included_boxes.append(box)
-            else:
-                excluded_boxes.append(box)
-
-        # Assemble with Parameter Details toggle and headings: Included Peaks -> Excluded Peaks
-        heading_included = widgets.HTML(
-            "<div style='background:#222; color:#fff; padding:6px 10px; border-radius:6px;"
-            " border:1px solid #111; font-weight:600;'>Included Peaks</div>"
-        )
-        heading_excluded = widgets.HTML(
-            "<div style='background:#2f2f2f; color:#fff; padding:6px 10px; border-radius:6px;"
-            " border:1px solid #1a1a1a; font-weight:600;'>Excluded Peaks</div>"
-        )
-        note_none = widgets.HTML("<span style='color:#777;'>No peaks in selected range. Adjust 'Fit X-range' or run find_peak_info.</span>")
-        param_details_row = _make_param_details_row()
-        final_children = [param_details_row, heading_included]
-        if included_boxes:
-            final_children.extend(included_boxes)
+            included_boxes.append(box)
+            # Cache placeholder entry (full widgets populated when materialized)
+            peak_box_cache[i] = {
+                'box': box,
+                'toggle': toggle,
+                'details': details,
+                'include': _LazyPlaceholder(True),
+                'alpha': _LazyPlaceholder(DEFAULT_ALPHA),
+                'center': _LazyPlaceholder(float(cx)),
+                'sigma': _LazyPlaceholder(float(PER_PEAK_DEFAULT_SIGMA)),
+                'amplitude': _LazyPlaceholder(abs(float(peaks_y_all[i])) * max(1.0, float(PER_PEAK_DEFAULT_SIGMA))),
+                'center_window': _LazyPlaceholder(float(PER_PEAK_DEFAULT_CENTER_WINDOW)),
+                'amp_mode': _LazyModePlaceholder('Auto'),
+                'center_mode': _LazyModePlaceholder('Auto'),
+                'sigma_mode': _LazyModePlaceholder('Auto'),
+                'materialized': False,
+            }
+        # Populate accordion
+        try:
+            peak_accordion.children = tuple(included_boxes)
+        except Exception:
+            pass
+        # Update excluded peaks HTML
+        if excluded_peaks_list:
+            excluded_lines = [f"Peak {num} @ {val:.1f} cm⁻¹" for num, val in excluded_peaks_list]
+            excluded_peaks_html.value = (
+                "<b>Excluded Peaks:</b><div style='color:#777; margin-top:4px; line-height:1.35;'>" + "<br>".join(excluded_lines) + "</div>"
+            )
         else:
-            final_children.append(note_none)
-        final_children.append(heading_excluded)
-        final_children.extend(excluded_boxes)
-        peak_controls_box.children = final_children
+            excluded_peaks_html.value = "<b>Excluded Peaks:</b> <span style='color:#777;'>None</span>"
+        summary_html = widgets.HTML(
+            f"<span style='color:#555;'>In-range peaks: {len(included_boxes)} / Total: {len(peaks_x_all)}</span>"
+        )
+        param_row = _make_param_details_row()
+        peak_controls_box.children = [
+            widgets.HBox([param_row, summary_html]),
+            widgets.HTML("<b>Included Peaks:</b>"),
+            peak_accordion,
+            excluded_peaks_html,
+        ]
+        # Rebuild tracking lists using placeholders
+        alpha_sliders = []
+        include_checkboxes = []
+        center_sliders = []
+        sigma_sliders = []
+        amplitude_sliders = []
+        center_window_sliders = []
+        amplitude_mode_toggles = []
+        center_mode_toggles = []
+        sigma_mode_toggles = []
+        for i in range(len(peaks_x_all)):
+            if i in peak_box_cache and i in new_in_range_set:
+                w = peak_box_cache[i]
+                include_checkboxes.append(w['include'])
+                alpha_sliders.append(w['alpha'])
+                center_sliders.append(w['center'])
+                sigma_sliders.append(w['sigma'])
+                amplitude_sliders.append(w['amplitude'])
+                center_window_sliders.append(w['center_window'])
+                amplitude_mode_toggles.append(w['amp_mode'])
+                center_mode_toggles.append(w['center_mode'])
+                sigma_mode_toggles.append(w['sigma_mode'])
+                try:
+                    included_index_map[i] = w['toggle']
+                except Exception:
+                    pass
+        previous_in_range_indices = new_in_range_set
+        return
+
+    async def _rebuild_alpha_sliders_async(row_idx, *, generation_token):
+        """Async incremental build with cooperative cancellation and yielding."""
+        # Placeholder already set by caller; perform synchronous build in small batches so UI remains responsive.
+        # We delegate most heavy lifting to sync function but chunk creation of controls.
+        # Strategy: build data structures first (fast), then progressively attach included boxes to accordion.
+        if generation_token in peak_list_cancelled_tokens:
+            return
+        # Run initial sync portion up to creation of included/excluded boxes but intercept final assignment.
+        # Simplify: reuse full sync if peak count small (<150); else chunk.
+        try:
+            peaks_x_all, peaks_y_all = _get_peaks(row_idx)
+        except Exception:
+            peaks_x_all, peaks_y_all = [], []
+        if not peaks_x_all:
+            _rebuild_alpha_sliders_sync(row_idx, generation_token=generation_token)
+            return
+        try:
+            active_ranges = _current_fit_ranges()
+        except Exception:
+            active_ranges = [(float('-inf'), float('inf'))]
+        # Precompute mask
+        try:
+            import numpy as _np
+            cx_array = _np.asarray(peaks_x_all, dtype=float)
+            in_range_mask = _np.zeros_like(cx_array, dtype=bool)
+            for _lo, _hi in active_ranges:
+                lo_v = float(min(_lo, _hi)); hi_v = float(max(_lo, _hi))
+                in_range_mask |= (cx_array >= lo_v) & (cx_array <= hi_v)
+        except Exception:
+            in_range_mask = [(any(lo <= float(cx) <= hi for lo, hi in active_ranges) if cx is not None else False) for cx in peaks_x_all]
+        # Reset containers (lightweight)
+        included_boxes = []
+        excluded_boxes = []
+        original_peak_centers.clear()
+        last_active_ranges[:] = list(active_ranges)
+        # Build per-peak widgets lazily; capture state lists for later fit logic
+        alpha_sliders.clear(); include_checkboxes.clear(); center_sliders.clear(); sigma_sliders.clear(); amplitude_sliders.clear(); center_window_sliders.clear()
+        amplitude_mode_toggles.clear(); center_mode_toggles.clear(); sigma_mode_toggles.clear()
+        # Determine saved parameter arrays
+        saved_alphas = per_spec_alpha.get(row_idx) or group_alpha_template.get(current_filter_key)
+        saved_includes = per_spec_include.get(row_idx) or group_include_template.get(current_filter_key)
+        saved_center = per_spec_center.get(row_idx) or group_center_template.get(current_filter_key)
+        saved_sigma = per_spec_sigma.get(row_idx) or group_sigma_template.get(current_filter_key)
+        saved_amplitude = per_spec_amplitude.get(row_idx) or group_amplitude_template.get(current_filter_key)
+        saved_modes = per_spec_modes.get(row_idx) or group_modes_template.get(current_filter_key)
+        saved_center_window = per_spec_center_window.get(row_idx) or group_center_window_template.get(current_filter_key)
+        if not isinstance(saved_modes, dict):
+            saved_modes = {'amplitude': None, 'center': None, 'sigma': None}
+        # Chunk parameters
+        CHUNK = 25
+        total = len(peaks_x_all)
+        for start in range(0, total, CHUNK):
+            end = min(start + CHUNK, total)
+            if generation_token in peak_list_cancelled_tokens:
+                return
+            for i in range(start, end):
+                if generation_token in peak_list_cancelled_tokens:
+                    return
+                cx = peaks_x_all[i]; cy = peaks_y_all[i]
+                in_range = bool(in_range_mask[i]) if i < len(in_range_mask) else False
+                original_center_val = float(cx)
+                original_peak_centers.append(original_center_val)
+                # Minimal UI for excluded peaks (just record list, skip heavy controls)
+                if not in_range:
+                    continue
+                # Lightweight toggle only (full sliders built synchronously after final batch by calling sync helper on filtered subset)
+                tgl = widgets.ToggleButton(
+                    value=False,
+                    description=f"Peak {i+1} @ {original_center_val:.1f} → {original_center_val:.1f} cm⁻¹",
+                    icon="chevron-down",
+                    layout=widgets.Layout(width="auto"),
+                    tooltip="Show/hide peak parameter controls"
+                )
+                box = widgets.VBox([tgl], layout=widgets.Layout(border="2.5px solid #222", margin="12px 0", padding="12px 18px", border_radius="12px", background="#2d3748"))
+                included_boxes.append(box)
+            # Update partial UI to keep user informed
+            try:
+                peak_accordion.children = tuple(included_boxes)
+                peak_controls_box.children = [widgets.HTML(f"<b>Building Peak List...</b> Loaded {end} / {total} peaks")]  # transient
+            except Exception:
+                pass
+            await _asyncio.sleep(0)  # yield to event loop for button processing
+        # Finalize with full sync build (recreates detailed controls) if not cancelled
+        if generation_token in peak_list_cancelled_tokens:
+            return
+        _rebuild_alpha_sliders_sync(row_idx, generation_token=generation_token)
+
+    def _rebuild_alpha_sliders(row_idx):
+        """Start or restart async build; cancel previous task immediately."""
+        nonlocal peak_list_build_generation, peak_list_build_task
+        with peak_list_build_lock:
+            peak_list_build_generation += 1
+            token = peak_list_build_generation
+            # Cancel prior
+            if peak_list_build_task and not peak_list_build_task.done():
+                peak_list_cancelled_tokens.add(getattr(peak_list_build_task, '_peak_token', None))
+            peak_list_cancelled_tokens.discard(token)  # ensure not marked cancelled
+            # Placeholder UI
+            try:
+                peak_controls_box.children = [widgets.HTML("<b>Building Peak List...</b>")]
+            except Exception:
+                pass
+            try:
+                loop = _asyncio.get_event_loop()
+            except Exception:
+                loop = None
+            if loop and loop.is_running():
+                task = loop.create_task(_rebuild_alpha_sliders_async(row_idx, generation_token=token))
+                setattr(task, '_peak_token', token)
+                peak_list_build_task = task
+            else:
+                # Fallback synchronous
+                _rebuild_alpha_sliders_sync(row_idx, generation_token=token)
 
     # --- Filtering helpers for material/conditions -> spectrum options ---
     def _row_condition_value(row):
@@ -9990,7 +10805,7 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             _on_spectrum_change()
         # If no valid values remain, hide mark row until user selects something later
         try:
-            if not valid_values:
+            if not valid_values and ('mark_row' in locals() or 'mark_row' in globals()):
                 mark_row.layout.display = "none"
         except Exception:
             pass
@@ -10048,8 +10863,27 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             _finish_fit_guard()
             return None
 
-        # Determine which peaks are included (respect Fit X-range explicitly)
-        included = [i for i, cb in enumerate(include_checkboxes) if cb.value]
+        # Determine which peaks are included (respect Fit X-range explicitly).
+        # Use persisted snapshot (per_spec_include) as source of truth to avoid any
+        # transient widget list misalignment; fall back to live checkboxes if needed.
+        try:
+            saved_includes = per_spec_include.get(idx, [])
+        except Exception:
+            saved_includes = []
+        num_widgets = len(include_checkboxes)
+        # Use snapshot only if it matches current widget count; else fall back to live state
+        use_snapshot = isinstance(saved_includes, (list, tuple)) and len(saved_includes) == num_widgets
+        if not use_snapshot and 'np' in globals():
+            try:
+                if isinstance(saved_includes, np.ndarray) and saved_includes.ndim == 1 and saved_includes.size == num_widgets:
+                    saved_includes = list(saved_includes.tolist())
+                    use_snapshot = True
+            except Exception:
+                use_snapshot = False
+        if use_snapshot:
+            included = [i for i, flag in enumerate(saved_includes) if bool(flag)]
+        else:
+            included = [i for i, cb in enumerate(include_checkboxes) if cb.value]
         try:
             active_ranges_chk = _current_fit_ranges()
         except Exception:
@@ -10090,12 +10924,13 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                 fig.data = tuple(list(fig.data)[: 2 + comp_traces_needed])
             elif current_components < comp_traces_needed:
                 for _k in range(comp_traces_needed - current_components):
+                    # Placeholder name will be updated after fit with actual peak number
                     fig.add_scatter(
                         x=[],
                         y=[],
                         mode="lines",
                         line=dict(dash="dot"),
-                        name=f"Component {_k+1}",
+                        name="Peak ?",
                     )
 
         # Cancel any running fit and start a new one in the background
@@ -10270,7 +11105,7 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                                         y=[],
                                         mode="lines",
                                         line=dict(dash="dot"),
-                                        name=f"Component {_k+1}",
+                                        name="Peak ?",
                                     )
                             # Update data and fit traces
                             fig.data[0].x = x_arr.tolist()
@@ -10291,9 +11126,30 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                                     if hasattr(y_comp, "tolist")
                                     else list(y_comp)
                                 )
-                                # Ensure component names reflect the corresponding peak number
+                                # Ensure component names reflect peak number and FINAL fitted center value
                                 try:
-                                    fig.data[2 + comp_idx].name = f"Peak {i+1}"
+                                    mu_display = None
+                                    try:
+                                        par_obj = result.params.get(f"p{comp_idx}_center")
+                                        if par_obj is not None:
+                                            mu_display = float(getattr(par_obj, 'value', par_obj))
+                                    except Exception:
+                                        mu_display = None
+                                    if mu_display is None:
+                                        try:
+                                            mu_display = float(center_sliders[i].value)
+                                        except Exception:
+                                            mu_display = float(peaks_x[i]) if i < len(peaks_x) else float('nan')
+                                    # Legend numbering uses original peak index (i+1) to match toggle titles
+                                    fig.data[2 + comp_idx].name = f"Peak {i+1} @ {mu_display:.1f} cm⁻¹"
+                                    # Update toggle description with latest fitted center
+                                    try:
+                                        orig_mu = original_peak_centers[i] if i < len(original_peak_centers) else mu_display
+                                        toggle = included_index_map.get(i)
+                                        if toggle is not None:
+                                            toggle.description = f"Peak {i+1} @ {orig_mu:.1f} → {mu_display:.1f} cm⁻¹"
+                                    except Exception:
+                                        pass
                                 except Exception:
                                     pass
                     except Exception:
@@ -10595,7 +11451,8 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                 pass
             # Show mark row now that a spectrum is actively selected
             try:
-                mark_row.layout.display = ""
+                if 'mark_row' in locals() or 'mark_row' in globals():
+                    mark_row.layout.display = ""
             except Exception:
                 pass
         finally:
@@ -10611,13 +11468,26 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         if _recent_click("save_for_file"):
             return
         idx = spectrum_sel.value
-        # Use the last completed result if available; if not, trigger a fit and inform
-        # the user to wait for completion.
+        # If there are staged peak additions, require a Fit before committing so
+        # saved parameters reflect the updated component set.
         res = last_result_by_idx.get(idx)
+        if idx in _STAGED_PEAK_ADDITIONS:
+            if res is None:
+                _log_once("Staged peaks pending: run Fit before Save to commit them.")
+                return
+            # Commit staged peaks to DataFrame (structural change) prior to saving results
+            try:
+                staged = _STAGED_PEAK_ADDITIONS.get(idx) or {}
+                FTIR_DataFrame.loc[idx, 'Peak Wavenumbers'] = list(staged.get('centers') or [])
+                FTIR_DataFrame.loc[idx, 'Peak Absorbances'] = list(staged.get('amplitude') or [])
+                # Remove staging entry after commit
+                del _STAGED_PEAK_ADDITIONS[idx]
+                _log_once(f"Committed {len(FTIR_DataFrame.loc[idx, 'Peak Wavenumbers'])} staged peaks to DataFrame.")
+            except Exception as _e_commit:
+                _log_once(f"Failed committing staged peaks: {_e_commit}")
+        # If still no result (and no staging), instruct user to Fit
         if res is None:
-            _log_once(
-                "No current fit. Click 'Fit' to compute, then click 'Save' again."
-            )
+            _log_once("No current fit. Click 'Fit' to compute, then click 'Save' again.")
             return
         # Only save parameters for peaks in the currently selected fit range
         peaks_x, _ = _get_visible_peaks(idx)
@@ -10667,8 +11537,26 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             cancel_fit_btn.close()
             save_btn.close()
             close_btn.close()
-            for s in alpha_sliders:
-                s.close()
+            # Safely close any parameter widgets (placeholders lack .close)
+            for lst in [alpha_sliders, center_sliders, sigma_sliders, amplitude_sliders, center_window_sliders, amplitude_mode_toggles, center_mode_toggles, sigma_mode_toggles, include_checkboxes]:
+                for w in lst:
+                    if hasattr(w, "close"):
+                        try:
+                            w.close()
+                        except Exception:
+                            pass
+            # Close any cached peak boxes (handles lazy placeholders + materialized widgets)
+            try:
+                for entry in getattr(peak_box_cache, 'values', lambda: [])():
+                    for k in ['box','toggle','details','include','alpha','center','sigma','amplitude','center_window','amp_mode','center_mode','sigma_mode']:
+                        w = entry.get(k)
+                        if hasattr(w, 'close'):
+                            try:
+                                w.close()
+                            except Exception:
+                                pass
+            except Exception:
+                pass
             peak_controls_box.close()
             # Close the main UI container and status label so no stray widgets remain
             try:
@@ -10701,23 +11589,11 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
     material_dd.observe(_persist_pd_filters, names="value")
     conditions_dd.observe(_persist_pd_filters, names="value")
     # Observers
-    fit_range.observe(_on_fit_range_change, names="value")
-    fit_range2.observe(_on_fit_range_change, names="value")
-    fit_range3.observe(_on_fit_range_change, names="value")
-    def _toggle_r2(change):
-        try:
-            fit_range2.disabled = not bool(use_r2.value)
-        except Exception:
-            pass
-        _on_fit_range_change()
-    def _toggle_r3(change):
-        try:
-            fit_range3.disabled = not bool(use_r3.value)
-        except Exception:
-            pass
-        _on_fit_range_change()
-    use_r2.observe(_toggle_r2, names="value")
-    use_r3.observe(_toggle_r3, names="value")
+    # Observe all dynamic range sliders
+    try:
+        fit_range.observe(_on_fit_range_change, names="value")
+    except Exception:
+        pass
 
     # Wire reset buttons
     def _reset_all(_b=None):
@@ -10935,16 +11811,30 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             base_rc = _run_fit_and_wait()
 
         # Build the list of adjustable parameters
-        included_idxs = [i for i, cb in enumerate(include_checkboxes) if cb.value]
+        # Source of truth: persisted include snapshot; fallback to widgets (avoid ndarray truthiness)
+        try:
+            saved_includes_iter = per_spec_include.get(spectrum_sel.value, [])
+        except Exception:
+            saved_includes_iter = []
+        num_widgets_iter = len(include_checkboxes)
+        use_snapshot_iter = isinstance(saved_includes_iter, (list, tuple)) and len(saved_includes_iter) == num_widgets_iter
+        if not use_snapshot_iter and 'np' in globals():
+            try:
+                if isinstance(saved_includes_iter, np.ndarray) and saved_includes_iter.ndim == 1 and saved_includes_iter.size == num_widgets_iter:
+                    saved_includes_iter = list(saved_includes_iter.tolist())
+                    use_snapshot_iter = True
+            except Exception:
+                use_snapshot_iter = False
+        if use_snapshot_iter:
+            included_idxs = [i for i, flag in enumerate(saved_includes_iter) if bool(flag)]
+        else:
+            included_idxs = [i for i, cb in enumerate(include_checkboxes) if cb.value]
         if len(included_idxs) == 0:
             try:
-                status_html.value = (
-                    f"<span style='color:#a00;'>Cannot iterate: no peaks "
-                    f"selected.</span>"
-                )
+                status_html.value = "<span style='color:#a00;'>Cannot iterate: no peaks selected.</span>"
             except Exception:
                 _log_once("Cannot iterate: no peaks selected.")
-            # End iteration lifecycle cleanly: unfreeze, clear flag, and hide
+            # End iteration lifecycle cleanly: unfreeze, clear flag, and hide cancel button
             try:
                 iterating_in_progress = False
                 cancel_fit_btn_frozen = False
@@ -11003,6 +11893,22 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         improved_any = True
         while improved_any and sweeps < max_sweeps:
             # Check for cancellation at the start of each sweep
+            # Recompute included indices so mid-iteration include/uninclude changes take effect
+            try:
+                # Re-read persisted snapshot for dynamic mid-iteration changes
+                saved_includes_iter = per_spec_include.get(spectrum_sel.value, [])
+                use_snapshot_iter = False
+                if isinstance(saved_includes_iter, (list, tuple)):
+                    use_snapshot_iter = True
+                else:
+                    if 'np' in globals() and isinstance(saved_includes_iter, np.ndarray):
+                        use_snapshot_iter = True
+                if use_snapshot_iter:
+                    included_idxs = [i for i, flag in enumerate(list(saved_includes_iter)) if bool(flag)]
+                else:
+                    included_idxs = [i for i, cb in enumerate(include_checkboxes) if cb.value]
+            except Exception:
+                included_idxs = included_idxs  # keep previous if failure
             try:
                 if cancel_event.is_set():
                     # Show running total and break to final message below
@@ -11329,9 +12235,8 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
     # Place the Fit X-range slider above the peak modification section
     fit_range_row = widgets.VBox([
         widgets.HTML("<b>Fit X-ranges</b>"),
-        widgets.HBox([fit_range]),
-        widgets.HBox([use_r2, fit_range2]),
-        widgets.HBox([use_r3, fit_range3]),
+        range_sliders_box,
+        widgets.HBox([add_range_btn]),
     ])
     # Keep other global parameters grouped below the peak controls
     reset_all_row = widgets.HBox([reset_all_btn])
@@ -11475,7 +12380,7 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             # 6) X range selector bar
             fit_range_row,
             # 7) List of peaks and per-peak controls
-            peak_controls_box,
+            peak_controls_section,
         ]
     )
 
@@ -11552,6 +12457,8 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         xs_existing, ys_existing = _get_peaks(idx)
         xs_list = [float(v) for v in (xs_existing or [])]
         ys_list = [float(v) for v in (ys_existing or [])]
+        # Collect newly accepted (non-overlapping) peaks before integrating
+        valid_new_peaks = []
 
         # Use per-peak windows from visible peaks for overlap checks
         rejected_close = []
@@ -11583,6 +12490,118 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             except Exception:
                 # If we cannot compute a nearest point, skip this new peak
                 continue
+            # Stash valid new peak (we'll integrate after the loop)
+            try:
+                valid_new_peaks.append((float(x_new), float(y_new)))
+            except Exception:
+                pass
+        # Integrate new peaks: build combined sorted list and update DataFrame + per-spectrum parameter lists
+        try:
+            # Prepare mapping of existing peak center -> parameter values (for preservation)
+            existing_param_map = {}
+            old_centers = per_spec_center.get(idx) or []
+            old_center_windows = per_spec_center_window.get(idx) or []
+            old_sigmas = per_spec_sigma.get(idx) or []
+            old_amplitudes = per_spec_amplitude.get(idx) or []
+            old_alphas = per_spec_alpha.get(idx) or []
+            old_includes = per_spec_include.get(idx) or []
+            old_modes = per_spec_modes.get(idx) or {'amplitude': [], 'center': [], 'sigma': []}
+            # tolerance for matching existing centers
+            tol = 1e-9
+            for j, c_old in enumerate(xs_list):
+                existing_param_map[c_old] = {
+                    'center': c_old,
+                    'center_window': old_center_windows[j] if j < len(old_center_windows) else PER_PEAK_DEFAULT_CENTER_WINDOW,
+                    'sigma': old_sigmas[j] if j < len(old_sigmas) else PER_PEAK_DEFAULT_SIGMA,
+                    'amplitude': old_amplitudes[j] if j < len(old_amplitudes) else ys_list[j] if j < len(ys_list) else 1.0,
+                    'alpha': old_alphas[j] if j < len(old_alphas) else DEFAULT_ALPHA,
+                    'include': old_includes[j] if j < len(old_includes) else True,
+                    # Preserve prior modes exactly; default to 'Auto' (not Manual) when absent.
+                    'mode_amplitude': (old_modes.get('amplitude') or [None]*len(xs_list))[j] if j < len(old_modes.get('amplitude') or []) and (old_modes.get('amplitude') or [None])[j] is not None else 'Auto',
+                    'mode_center': (old_modes.get('center') or [None]*len(xs_list))[j] if j < len(old_modes.get('center') or []) and (old_modes.get('center') or [None])[j] is not None else 'Auto',
+                    'mode_sigma': (old_modes.get('sigma') or [None]*len(xs_list))[j] if j < len(old_modes.get('sigma') or []) and (old_modes.get('sigma') or [None])[j] is not None else 'Auto',
+                }
+            # Append valid new peaks into working list
+            for (c_new, a_new) in valid_new_peaks:
+                xs_list.append(c_new)
+                ys_list.append(a_new)
+            # Sort combined peaks
+            combined = sorted(zip(xs_list, ys_list), key=lambda t: float(t[0]))
+            new_xs, new_ys = [list(t) for t in zip(*combined)] if combined else ([], [])
+            # Build new parameter lists aligned with sorted centers
+            new_centers = []
+            new_center_windows = []
+            new_sigmas = []
+            new_amplitudes = []
+            new_alphas = []
+            new_includes = []
+            new_mode_amp = []
+            new_mode_center = []
+            new_mode_sigma = []
+            for c in new_xs:
+                # Match existing center within tolerance; else assign defaults
+                reused = None
+                for c_old, pdata in existing_param_map.items():
+                    if abs(c_old - c) <= tol:
+                        reused = pdata
+                        break
+                if reused is not None:
+                    new_centers.append(reused['center'])
+                    new_center_windows.append(reused['center_window'])
+                    new_sigmas.append(reused['sigma'])
+                    new_amplitudes.append(reused['amplitude'])
+                    new_alphas.append(reused['alpha'])
+                    new_includes.append(reused['include'])
+                    # Preserve previously selected modes exactly.
+                    new_mode_amp.append(reused['mode_amplitude'])
+                    new_mode_center.append(reused['mode_center'])
+                    new_mode_sigma.append(reused['mode_sigma'])
+                else:
+                    # Defaults for brand-new peak
+                    new_centers.append(c)
+                    new_center_windows.append(new_peak_windows.get(c, PER_PEAK_DEFAULT_CENTER_WINDOW))
+                    new_sigmas.append(PER_PEAK_DEFAULT_SIGMA)
+                    # amplitude guess = y value from combined list matching c
+                    try:
+                        idx_amp = new_xs.index(c)
+                        new_amplitudes.append(new_ys[idx_amp])
+                    except Exception:
+                        new_amplitudes.append(1.0)
+                    new_alphas.append(DEFAULT_ALPHA)
+                    new_includes.append(True)
+                    # Default brand-new peak modes to Auto (user can switch to Manual explicitly)
+                    new_mode_amp.append('Auto')
+                    new_mode_center.append('Auto')
+                    new_mode_sigma.append('Auto')
+            # Stage (do not persist yet) new peak set so user can Fit before saving
+            try:
+                _STAGED_PEAK_ADDITIONS[idx] = {
+                    'centers': list(new_centers),
+                    'center_windows': list(new_center_windows),
+                    'sigma': list(new_sigmas),
+                    'amplitude': list(new_amplitudes),
+                    'alpha': list(new_alphas),
+                    'include': list(new_includes),
+                    'modes': {
+                        'amplitude': list(new_mode_amp),
+                        'center': list(new_mode_center),
+                        'sigma': list(new_mode_sigma),
+                    },
+                }
+            except Exception:
+                pass
+            # Update per-spectrum parameter stores (working copies) so Fit uses staged set
+            per_spec_center[idx] = list(_STAGED_PEAK_ADDITIONS[idx]['centers'])
+            per_spec_center_window[idx] = list(_STAGED_PEAK_ADDITIONS[idx]['center_windows'])
+            per_spec_sigma[idx] = list(_STAGED_PEAK_ADDITIONS[idx]['sigma'])
+            per_spec_amplitude[idx] = list(_STAGED_PEAK_ADDITIONS[idx]['amplitude'])
+            per_spec_alpha[idx] = list(_STAGED_PEAK_ADDITIONS[idx]['alpha'])
+            per_spec_include[idx] = list(_STAGED_PEAK_ADDITIONS[idx]['include'])
+            per_spec_modes[idx] = dict(_STAGED_PEAK_ADDITIONS[idx]['modes'])
+            # Clear shared peaks template (force rebuild reflecting new list)
+            shared_peaks_x = None
+        except Exception as _e_add:
+            _log_once(f"Failed to integrate new peaks: {_e_add}")
         _hide(accept_new_peaks_btn)
         _hide(redo_new_peaks_btn)
         _hide(cancel_new_peaks_btn)
@@ -11592,6 +12611,19 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         _show(save_btn)
         _show(close_btn)
         _show(peak_controls_box)
+        # Exit add mode and restore Add peaks button
+        try:
+            adding_mode = False
+            _show(add_peaks_btn)
+            _clear_add_peak_shapes()
+            new_peak_xs.clear()
+        except Exception:
+            pass
+        # Rebuild UI to reflect newly added peaks
+        try:
+            _rebuild_alpha_sliders(idx)
+        except Exception:
+            pass
         # Hide Colab slider row when exiting add-peaks mode via Accept
         if _IN_COLAB:
             try:
@@ -11617,7 +12649,20 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             except Exception:
                 _log_once(msg)
         else:
-            _log_once("New peaks accepted and added to the current spectrum.")
+            # Build informative message listing the newly staged peak centers.
+            try:
+                staged_centers = [p[0] for p in valid_new_peaks] if 'valid_new_peaks' in locals() else []
+            except Exception:
+                staged_centers = []
+            if staged_centers:
+                locs = ", ".join(f"{c:.3f}" for c in staged_centers)
+                _log_once(
+                    f"New peaks accepted and staged at: {locs}. (Unsaved – run Fit then Save to commit.)"
+                )
+            else:
+                _log_once(
+                    "New peaks staged (unsaved). Run Fit then click Save to commit."
+                )
 
     def _redo_new_peaks(b=None):
         if _recent_click("redo_new_peaks"):
@@ -14094,10 +15139,11 @@ def display_DataFrame(FTIR_DataFrame, height: int = 500):
             out.close()
         except Exception:
             pass
-        try:
-            ui.close()
-        except Exception:
-            pass
+            try:
+                if 'ui' in locals() or 'ui' in globals():
+                    ui.close()
+            except Exception:
+                pass
 
     reset_btn.on_click(_on_reset)
     close_btn.on_click(_on_close)
