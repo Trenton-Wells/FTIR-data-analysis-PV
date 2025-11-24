@@ -3,30 +3,24 @@
 # Organization: NREL
 # NREL Contact: trenton.wells@nrel.gov
 # Personal Contact: trentonwells73@gmail.com
-import pandas as pd
-import os
-import re
+
+import os, re, json, math, contextlib, threading, traceback, time, collections, importlib
+from math import ceil
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import ipywidgets as widgets
 from pybaselines.whittaker import arpls
 from pybaselines.spline import irsqr
 from pybaselines.classification import fabc
 from scipy.interpolate import CubicSpline
 from pybaselines.utils import optimize_window
-import ast
-import html
-import contextlib
-import plotly.graph_objs as go
-import ipywidgets as widgets
-from IPython.display import clear_output, display
-from math import ceil
-from plotly.subplots import make_subplots
-import json
 from scipy.signal import find_peaks
-import importlib
-import threading
-import time
 from lmfit.models import PseudoVoigtModel
+from IPython.display import clear_output, display
+import ast, html
 
 # Environment detection (used for some interactive behaviors)
 try:
@@ -36,12 +30,41 @@ except Exception:
     _IN_COLAB = False
 
 # Lazy peak widget mode (defer heavy slider construction until user expands a peak).
-# Can be disabled automatically if an exception occurs during materialization.
 LAZY_PEAK_WIDGETS = True
-# Deconvolution debug instrumentation (set DECONV_DEBUG=True before calling
-# deconvolute_peaks to collect and print lazy materialization errors).
+# Deconvolution debug instrumentation flag
 DECONV_DEBUG = False
 _DECONV_DEBUG_ERRORS = []  # list of traceback strings for failed materializations
+try:
+    _DECONV_DEBUG_LOG  # type: ignore[name-defined]
+except Exception:
+    _DECONV_DEBUG_LOG = []  # persistent list of debug lines
+
+def _debug_log(msg: str):
+    if not isinstance(msg, str):
+        try:
+            msg = str(msg)
+        except Exception:
+            return
+    try:
+        _DECONV_DEBUG_LOG.append(msg)
+        if len(_DECONV_DEBUG_LOG) > 10000:
+            _DECONV_DEBUG_LOG[:] = _DECONV_DEBUG_LOG[-8000:]
+    except Exception:
+        pass
+    if DECONV_DEBUG:
+        try:
+            print(msg)
+        except Exception:
+            pass
+
+def enable_deconv_debug(flag: bool = True, *, verbose: bool = True):
+    global DECONV_DEBUG
+    try:
+        DECONV_DEBUG = bool(flag)
+        if verbose:
+            print(f"Deconvolution debug {'ENABLED' if DECONV_DEBUG else 'DISABLED'}")
+    except Exception:
+        pass
 
 def _lazy_debug(msg: str):
     try:
@@ -8843,6 +8866,13 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
     alpha_sliders = []  # list[widgets.FloatSlider] (fraction α)
     include_checkboxes = []  # list[widgets.Checkbox]
     center_sliders = []  # list[widgets.FloatSlider] direct center (μ)
+    # Map the ordering of per-peak sliders to original peak indices. The existing logic
+    # builds slider lists in ascending order of original peak indices, but later fit
+    # code incorrectly indexes sliders with the original peak index (which may be
+    # sparse), causing parameter tweaks to be ignored. We capture the ordered list
+    # here and keep it updated on rebuild so we can translate original peak indices
+    # to slider positions reliably.
+    center_slider_peak_indices = []  # list[int] parallel to center_sliders
     # Added lists for peak label/header synchronization post-fit
     peak_label_widgets = []  # list[widgets.HTML] per-peak headers shown in UI
     original_peak_centers = []  # list[float] detected (pre-fit) peak centers
@@ -10216,6 +10246,7 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             alpha_sliders = []
             include_checkboxes = []
             center_sliders = []
+            center_slider_peak_indices = []
             sigma_sliders = []
             amplitude_sliders = []
             center_window_sliders = []
@@ -10228,6 +10259,7 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                     include_checkboxes.append(w['include'])
                     alpha_sliders.append(w['alpha'])
                     center_sliders.append(w['center'])
+                    center_slider_peak_indices.append(i)
                     sigma_sliders.append(w['sigma'])
                     amplitude_sliders.append(w['amplitude'])
                     center_window_sliders.append(w['center_window'])
@@ -10339,9 +10371,18 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                             center_window_slider.observe(_on_center_sigma_change, names='value')
                             def _on_sigma_change_stub(change, idx_local=peak_idx):
                                 if sigma_mode_toggle.value == 'Manual':
-                                    if row_idx not in per_spec_sigma:
-                                        per_spec_sigma[row_idx] = [None] * len(peaks_x_all)
-                                    per_spec_sigma[row_idx][idx_local] = change['new']
+                                    try:
+                                        # Ensure row entry exists
+                                        if row_idx not in per_spec_sigma:
+                                            per_spec_sigma[row_idx] = [None] * len(peaks_x_all)
+                                        # Dynamically expand list if new peak index exceeds current length
+                                        needed = idx_local + 1
+                                        current_len = len(per_spec_sigma[row_idx])
+                                        if needed > current_len:
+                                            per_spec_sigma[row_idx].extend([None] * (needed - current_len))
+                                        per_spec_sigma[row_idx][idx_local] = change.get('new')
+                                    except Exception:
+                                        pass
                                     _snapshot_current_controls()
                             sigma_slider.observe(_on_sigma_change_stub, names='value')
                         except Exception:
@@ -10446,7 +10487,33 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                             details_box_local.children = [include_row_local, alpha_row_local, amplitude_row_local, mu_row_local, sigma_row_local]
                         except Exception:
                             details_box_local.children = [alpha_slider, amplitude_slider, center_slider, center_window_slider, sigma_slider]
-                        cache_entry.update({'include': include_checkbox,'alpha': alpha_slider,'center': center_slider,'sigma': sigma_slider,'amplitude': amplitude_slider,'center_window': center_window_slider,'amp_mode': amp_mode_toggle,'center_mode': center_mode_toggle,'sigma_mode': sigma_mode_toggle,'materialized': True})
+                        # Update cache with real widgets; store both 'amp_mode' and 'amplitude_mode' for consistency with downstream re-sync logic
+                        cache_entry.update({
+                            'include': include_checkbox,
+                            'alpha': alpha_slider,
+                            'center': center_slider,
+                            'sigma': sigma_slider,
+                            'amplitude': amplitude_slider,
+                            'center_window': center_window_slider,
+                            'amp_mode': amp_mode_toggle,
+                            'amplitude_mode': amp_mode_toggle,
+                            'center_mode': center_mode_toggle,
+                            'sigma_mode': sigma_mode_toggle,
+                            'materialized': True
+                        })
+                        try:
+                            # Replace placeholder references in master lists at index i so subsequent fits read real widgets directly
+                            center_sliders[i] = center_slider
+                            sigma_sliders[i] = sigma_slider
+                            amplitude_sliders[i] = amplitude_slider
+                            alpha_sliders[i] = alpha_slider
+                            center_window_sliders[i] = center_window_slider
+                            amplitude_mode_toggles[i] = amp_mode_toggle
+                            center_mode_toggles[i] = center_mode_toggle
+                            sigma_mode_toggles[i] = sigma_mode_toggle
+                            _debug_log(f"[PEAK_MATERIALIZED] peak={peak_idx+1} center={center_slider.value} sigma={sigma_slider.value} amp={amplitude_slider.value} win={center_window_slider.value} modes c={center_mode_toggle.value} s={sigma_mode_toggle.value} a={amp_mode_toggle.value}")
+                        except Exception:
+                            pass
                     except Exception as e:
                         try:
                             import traceback
@@ -10479,11 +10546,51 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                     except Exception:
                         pass
                     if show:
+                        # Instrument toggle open prior to any materialization attempt
+                        try:
+                            pre_mat = peak_box_cache.get(_idx, {}).get('materialized', False)
+                            cur_center = None
+                            try:
+                                cent_obj = peak_box_cache.get(_idx, {}).get('center')
+                                if cent_obj is not None:
+                                    cur_center = getattr(cent_obj, 'value', cent_obj)
+                            except Exception:
+                                cur_center = None
+                            _debug_log(f"[PEAK_TOGGLE_OPEN] peak={_idx+1} pre_materialized={pre_mat} center={cur_center}")
+                        except Exception:
+                            pass
                         try:
                             if LAZY_PEAK_WIDGETS:
                                 _materialize_peak(_idx)
                             else:
                                 _materialize_peak(_idx, force=True)
+                            # Post-materialization instrumentation
+                            try:
+                                entry = peak_box_cache.get(_idx, {})
+                                post_mat = entry.get('materialized', False)
+                                # Detect any remaining placeholder keys
+                                placeholder_keys = []
+                                try:
+                                    from inspect import isclass
+                                except Exception:
+                                    pass
+                                for k in ('center','sigma','amplitude','center_window','alpha','amp_mode','center_mode','sigma_mode'):
+                                    v = entry.get(k)
+                                    try:
+                                        if isinstance(v, (_LazyPlaceholder, _LazyModePlaceholder)):
+                                            placeholder_keys.append(k)
+                                    except Exception:
+                                        pass
+                                post_center = None
+                                try:
+                                    c_obj = entry.get('center')
+                                    if c_obj is not None:
+                                        post_center = getattr(c_obj, 'value', c_obj)
+                                except Exception:
+                                    post_center = None
+                                _debug_log(f"[PEAK_TOGGLE_AFTER] peak={_idx+1} materialized={post_mat} center={post_center} remaining_placeholders={placeholder_keys}")
+                            except Exception:
+                                pass
                         except Exception:
                             # Capture traceback for diagnostics
                             try:
@@ -10554,6 +10661,7 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         alpha_sliders = []
         include_checkboxes = []
         center_sliders = []
+        center_slider_peak_indices = []
         sigma_sliders = []
         amplitude_sliders = []
         center_window_sliders = []
@@ -10566,6 +10674,7 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                 include_checkboxes.append(w['include'])
                 alpha_sliders.append(w['alpha'])
                 center_sliders.append(w['center'])
+                center_slider_peak_indices.append(i)
                 sigma_sliders.append(w['sigma'])
                 amplitude_sliders.append(w['amplitude'])
                 center_window_sliders.append(w['center_window'])
@@ -10813,108 +10922,602 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
     def _fit_and_update_plot(*_):
         nonlocal fit_thread, cancel_event, fit_cancel_token, iterating_in_progress
         nonlocal fit_update_inflight, last_fit_update_ts
-        # Debounce/guard: prevent rapid double invocation
-        try:
-            now_ts = time.time()
-        except Exception:
-            now_ts = 0.0
-        if fit_update_inflight:
-            return None
-        if (now_ts - last_fit_update_ts) < 0.03:
-            return None
-        fit_update_inflight = True
+        nonlocal alpha_sliders, include_checkboxes, center_sliders, sigma_sliders
+        nonlocal amplitude_sliders, center_window_sliders
+        nonlocal center_mode_toggles, sigma_mode_toggles, amplitude_mode_toggles
+        nonlocal status_html, fig, center_slider_peak_indices
+        nonlocal last_redchi_by_idx, last_result_by_idx
 
-
-        # Always show Cancel Fit button at fit start, regardless of mode
-        try:
-            _on_main_thread(_force_cancel_fit_shown)
-        except Exception:
+        # Local helper to ensure logging occurs even if DECONV_DEBUG False (to diagnose why nothing changes)
+        def _log_dbg(tag: str, msg: str):
             try:
-                _update_cancel_fit_visibility()
+                _debug_log(f"[{tag}] {msg}")
             except Exception:
                 pass
 
+        _log_dbg('FIT_START', 'Invoked _fit_and_update_plot')
+
+        # Guard reset helper (missing previously, causing NameError and hang)
         def _finish_fit_guard():
             nonlocal fit_update_inflight, last_fit_update_ts
             fit_update_inflight = False
             try:
                 last_fit_update_ts = time.time()
             except Exception:
-                last_fit_update_ts = now_ts
+                last_fit_update_ts = 0.0
 
-        idx = spectrum_sel.value
-        x_arr, y_arr = _get_xy(idx)
-        if x_arr is None:
-            _log_once("Selected spectrum missing normalized data.")
-            _finish_fit_guard()
-            return None
-
-        peaks_x, peaks_y = _get_visible_peaks(idx)
-        if not peaks_x:
-            _log_once("No peaks found in selected fit range.")
-            with fig.batch_update():
-                fig.data[0].x = x_arr.tolist()
-                fig.data[0].y = y_arr.tolist()
-                fig.data[1].x = []
-                fig.data[1].y = []
-                fig.layout.shapes = ()
-                while len(fig.data) > 2:
-                    fig.data = tuple(fig.data[:2])
-            _finish_fit_guard()
-            return None
-
-        # Determine which peaks are included (respect Fit X-range explicitly).
-        # Use persisted snapshot (per_spec_include) as source of truth to avoid any
-        # transient widget list misalignment; fall back to live checkboxes if needed.
+        # Debounce
         try:
-            saved_includes = per_spec_include.get(idx, [])
+            now_ts = time.time()
         except Exception:
-            saved_includes = []
-        num_widgets = len(include_checkboxes)
-        # Use snapshot only if it matches current widget count; else fall back to live state
-        use_snapshot = isinstance(saved_includes, (list, tuple)) and len(saved_includes) == num_widgets
-        if not use_snapshot and 'np' in globals():
+            now_ts = 0.0
+        if fit_update_inflight:
+            _log_dbg('GUARD_SKIP', f"fit_update_inflight True; last_ts={last_fit_update_ts:.4f}")
+            return
+        if (now_ts - last_fit_update_ts) < 0.03:
+            _log_dbg('DEBOUNCE_SKIP', f"delta={now_ts - last_fit_update_ts:.4f} < 0.03")
+            return
+        fit_update_inflight = True
+        _log_dbg('GUARD_SET', f"fit_update_inflight set True at ts={now_ts:.4f}")
+
+        # Snapshot current control state
+        try:
+            _snapshot_current_controls()
+        except Exception:
+            pass
+        try:
+            _on_main_thread(_force_cancel_fit_shown)
+        except Exception:
+            pass
+
+        # Resolve current spectrum
+        try:
+            idx = spectrum_sel.value
+        except Exception:
+            idx = None
+        _log_dbg('SPECTRUM_IDX', f"idx={idx}")
+        if idx is None:
             try:
-                if isinstance(saved_includes, np.ndarray) and saved_includes.ndim == 1 and saved_includes.size == num_widgets:
-                    saved_includes = list(saved_includes.tolist())
-                    use_snapshot = True
+                status_html.value = "<span style='color:#a00;'>Select a spectrum before fitting.</span>"
             except Exception:
-                use_snapshot = False
-        if use_snapshot:
-            included = [i for i, flag in enumerate(saved_includes) if bool(flag)]
-        else:
-            included = [i for i, cb in enumerate(include_checkboxes) if cb.value]
-        try:
-            active_ranges_chk = _current_fit_ranges()
-        except Exception:
-            active_ranges_chk = [(float("-inf"), float("inf"))]
-        # Auto-exclude any selected peaks whose centers fall outside the current range
-        try:
-            included_in_range = [
-                i for i in included
-                if any(lo <= float(peaks_x[i]) <= hi for lo, hi in active_ranges_chk)
-            ]
-        except Exception:
-            included_in_range = list(included)
-        if len(included_in_range) != len(included):
-            included = included_in_range
+                _log_once("Select a spectrum before fitting.")
+            _log_dbg('ERROR', 'No spectrum selected; aborting fit')
+            _finish_fit_guard()
+            return
+        x_arr, y_arr = _get_xy(idx)
+        _log_dbg('DATA_SHAPE', f"x_arr={getattr(x_arr,'size',None)} y_arr={getattr(y_arr,'size',None)}")
+        if x_arr is None or y_arr is None or x_arr.size == 0:
             try:
-                status_html.value = (
-                    "<span style='color:#555;'>Some peaks were auto-excluded by the Fit X-range.</span>"
-                )
+                status_html.value = "<span style='color:#a00;'>No spectral data available for this row.</span>"
+            except Exception:
+                _log_once("No spectral data available for this row.")
+            _log_dbg('ERROR', 'Spectrum has no data; aborting fit')
+            _finish_fit_guard()
+            return
+        peaks_x, peaks_y = _get_peaks(idx)
+        _log_dbg('PEAK_COUNTS', f"peaks_x_len={len(peaks_x)} peaks_y_len={len(peaks_y)}")
+        if not peaks_x:
+            try:
+                status_html.value = "<span style='color:#a00;'>No peaks found. Run peak-finding or add peaks.</span>"
+            except Exception:
+                _log_once("No peaks found. Run peak-finding or add peaks.")
+            # Clear component traces
+            try:
+                with fig.batch_update():
+                    if len(fig.data) >= 2:
+                        fig.data = tuple(fig.data[:2])
             except Exception:
                 pass
-        if len(included) == 0:
-            _log_once("No peaks selected in current range. Enable one or more to fit.")
-            with fig.batch_update():
-                fig.data[0].x = x_arr.tolist()
-                fig.data[0].y = y_arr.tolist()
-                fig.data[1].x = []
-                fig.data[1].y = []
-                while len(fig.data) > 2:
-                    fig.data = tuple(fig.data[:2])
             _finish_fit_guard()
-            return None
+            return
+        # Eager materialization fallback: if sliders/checkboxes not built yet (e.g., after Close),
+        # construct a minimal control set for all detected peaks using the full current span.
+        try:
+            if (not include_checkboxes) or (len(center_sliders) == 0):
+                # Clear any prior partial lists
+                include_checkboxes[:] = []
+                center_sliders[:] = []
+                sigma_sliders[:] = []
+                amplitude_sliders[:] = []
+                alpha_sliders[:] = []
+                center_window_sliders[:] = []
+                amplitude_mode_toggles[:] = []
+                center_mode_toggles[:] = []
+                sigma_mode_toggles[:] = []
+                center_slider_peak_indices[:] = []
+                # Derive default constants (fallbacks if not defined)
+                default_sigma = globals().get('PER_PEAK_DEFAULT_SIGMA', 5.0)
+                default_center_window = globals().get('PER_PEAK_DEFAULT_CENTER_WINDOW', 5.0)
+                # Build widgets
+                for pi, (px, py) in enumerate(zip(peaks_x, peaks_y)):
+                    try:
+                        pxv = float(px)
+                        pyv = float(py)
+                    except Exception:
+                        continue
+                    cb = widgets.Checkbox(value=True, description=f"Include {pi+1}")
+                    include_checkboxes.append(cb)
+                    center_slider = widgets.FloatSlider(value=pxv, min=pxv-abs(default_center_window), max=pxv+abs(default_center_window), step=max(abs(default_center_window)/200.0, 1e-3), description=f"Center {pi+1}", layout=widgets.Layout(width="48%"))
+                    center_sliders.append(center_slider)
+                    sigma_slider = widgets.FloatSlider(value=default_sigma, min=1e-3, max=1e3, step=default_sigma/200.0 if default_sigma>0 else 0.1, description=f"Sigma {pi+1}", layout=widgets.Layout(width="48%"))
+                    sigma_sliders.append(sigma_slider)
+                    amp_guess = abs(pyv) * max(1.0, float(default_sigma))
+                    amplitude_slider = widgets.FloatSlider(value=amp_guess, min=0.0, max=amp_guess * 10.0 if amp_guess>0 else 1.0, step=(amp_guess/200.0) if amp_guess>0 else 0.1, description=f"Amp {pi+1}", layout=widgets.Layout(width="48%"))
+                    amplitude_sliders.append(amplitude_slider)
+                    alpha_slider = widgets.FloatSlider(value=0.5, min=0.0, max=1.0, step=0.01, description=f"α {pi+1}", layout=widgets.Layout(width="48%"))
+                    alpha_sliders.append(alpha_slider)
+                    cwin_slider = widgets.FloatSlider(value=default_center_window, min=0.1, max=max(default_center_window*4.0, 1.0), step=max(default_center_window/200.0, 0.01), description=f"Win {pi+1}", layout=widgets.Layout(width="48%"))
+                    center_window_sliders.append(cwin_slider)
+                    amp_mode = widgets.Dropdown(options=['Auto','Manual'], value='Auto', description=f"A-mode {pi+1}")
+                    center_mode = widgets.Dropdown(options=['Auto','Manual'], value='Auto', description=f"C-mode {pi+1}")
+                    sigma_mode = widgets.Dropdown(options=['Auto','Manual'], value='Auto', description=f"S-mode {pi+1}")
+                    amplitude_mode_toggles.append(amp_mode)
+                    center_mode_toggles.append(center_mode)
+                    sigma_mode_toggles.append(sigma_mode)
+                    center_slider_peak_indices.append(pi)
+                    # Add to peak_controls_box if available
+                    try:
+                        peak_controls_box.children = tuple(list(peak_controls_box.children) + [widgets.HBox([cb, center_slider, sigma_slider, amplitude_slider, alpha_slider, cwin_slider, amp_mode, center_mode, sigma_mode])])
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        # Rebuild included list using ORIGINAL peak indices (preserve visible numbering)
+        try:
+            for _chk_idx, _cb in enumerate(include_checkboxes):
+                # Attach original index if missing; center_slider_peak_indices holds original mapping
+                try:
+                    if not hasattr(_cb, '_original_idx'):
+                        _cb._original_idx = center_slider_peak_indices[_chk_idx] if _chk_idx < len(center_slider_peak_indices) else _chk_idx
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        included = []
+        try:
+            for _cb in include_checkboxes:
+                try:
+                    if getattr(_cb, 'value', False):
+                        included.append(getattr(_cb, '_original_idx', None))
+                except Exception:
+                    pass
+            included = [i for i in included if i is not None]
+        except Exception:
+            pass
+        _log_dbg('INCLUDED', f"included_original_indices={included}")
+        # Diagnostic: enumerate peaks whose center falls within current fit ranges
+        try:
+            fit_ranges_current = []
+            try:
+                fit_ranges_current = list(locals().get('ranges', []) or globals().get('ranges', []) or [])
+            except Exception:
+                fit_ranges_current = []
+            in_range_lines = []
+            for orig_idx, cx in enumerate(peaks_x):
+                try:
+                    cxf = float(cx)
+                except Exception:
+                    continue
+                in_any = False
+                for rlo, rhi in fit_ranges_current:
+                    try:
+                        if rlo <= cxf <= rhi:
+                            in_any = True; break
+                    except Exception:
+                        pass
+                if in_any:
+                    try:
+                        mat_flag = peak_box_cache.get(orig_idx, {}).get('materialized') if 'peak_box_cache' in globals() else None
+                    except Exception:
+                        mat_flag = None
+                    in_range_lines.append(f"{orig_idx+1}:{cxf:.2f}:{'Y' if mat_flag else 'N'}")
+            if in_range_lines:
+                _debug_log(f"[IN_RANGE_PEAKS] {in_range_lines} (format originalIdx:center:materialized)")
+        except Exception:
+            pass
+        # Mapping no longer needed; included already carries original indices
+        if not included:
+            try:
+                status_html.value = "<span style='color:#a00;'>No peaks selected. Select peaks then Fit.</span>"
+            except Exception:
+                _log_once("No peaks selected. Select peaks then Fit.")
+            _log_dbg('ERROR', 'No included peaks; aborting')
+            _finish_fit_guard()
+            return
+
+        # (Moved) Param seed capture will occur AFTER re-sync & deep traversal.
+
+        # Re-sync slider references ONLY with fully materialized widgets.
+        # Previous logic overwrote real user-modified slider widgets with lazy placeholders,
+        # causing fits to ignore recent UI changes. We now preserve existing lists unless
+        # the cache entry is marked materialized (real ipywidgets object, not _LazyPlaceholder).
+        try:
+            if 'peak_box_cache' in globals() and isinstance(peak_box_cache, dict):
+                real_alpha = []
+                real_center = []
+                real_sigma = []
+                real_amp = []
+                real_center_window = []
+                # Also refresh mode toggles (previously omitted, causing stale 'Auto' captures)
+                real_amp_mode = []
+                real_center_mode = []
+                real_sigma_mode = []
+                replace_ok = True
+                for idx_slider, cb in enumerate(include_checkboxes):
+                    peak_idx = None
+                    try:
+                        for k, v in included_index_map.items():
+                            if v is cb:
+                                peak_idx = k
+                                break
+                    except Exception:
+                        peak_idx = None
+                    if peak_idx is None:
+                        peak_idx = idx_slider
+                    entry = peak_box_cache.get(peak_idx)
+                    if entry and entry.get('materialized'):
+                        # Only adopt if a real widget (heuristic: has .observe attribute AND not our placeholder class)
+                        def _use_or_fallback(key, fallback_list):
+                            # Support legacy 'amp_mode' key alongside 'amplitude_mode'
+                            w = entry.get(key)
+                            if w is None and key == 'amplitude_mode':
+                                w = entry.get('amp_mode')
+                            try:
+                                if w is None:
+                                    return fallback_list[idx_slider]
+                                cls_name = w.__class__.__name__
+                                if cls_name.startswith('_Lazy'):
+                                    # Placeholder; abort replacement for entire list
+                                    return fallback_list[idx_slider]
+                                return w
+                            except Exception:
+                                return fallback_list[idx_slider]
+                        real_alpha.append(_use_or_fallback('alpha', alpha_sliders))
+                        real_center.append(_use_or_fallback('center', center_sliders))
+                        real_sigma.append(_use_or_fallback('sigma', sigma_sliders))
+                        real_amp.append(_use_or_fallback('amplitude', amplitude_sliders))
+                        real_center_window.append(_use_or_fallback('center_window', center_window_sliders))
+                        # Mode widgets: adopt if materialized; keys match those stored in cache entries
+                        real_amp_mode.append(_use_or_fallback('amplitude_mode', amplitude_mode_toggles))
+                        real_center_mode.append(_use_or_fallback('center_mode', center_mode_toggles))
+                        real_sigma_mode.append(_use_or_fallback('sigma_mode', sigma_mode_toggles))
+                    else:
+                        # Keep the existing widget references
+                        real_alpha.append(alpha_sliders[idx_slider])
+                        real_center.append(center_sliders[idx_slider])
+                        real_sigma.append(sigma_sliders[idx_slider])
+                        real_amp.append(amplitude_sliders[idx_slider])
+                        real_center_window.append(center_window_sliders[idx_slider])
+                        try:
+                            real_amp_mode.append(amplitude_mode_toggles[idx_slider])
+                            real_center_mode.append(center_mode_toggles[idx_slider])
+                            real_sigma_mode.append(sigma_mode_toggles[idx_slider])
+                        except Exception:
+                            pass
+                # Replace only if sizes match; otherwise keep originals
+                if (
+                    len(real_alpha) == len(alpha_sliders)
+                    and len(real_center) == len(center_sliders)
+                    and len(real_amp_mode) == len(amplitude_mode_toggles)
+                    and len(real_center_mode) == len(center_mode_toggles)
+                    and len(real_sigma_mode) == len(sigma_mode_toggles)
+                ):
+                    alpha_sliders = real_alpha
+                    center_sliders = real_center
+                    sigma_sliders = real_sigma
+                    amplitude_sliders = real_amp
+                    center_window_sliders = real_center_window
+                    amplitude_mode_toggles = real_amp_mode
+                    center_mode_toggles = real_center_mode
+                    sigma_mode_toggles = real_sigma_mode
+                    try:
+                        _log_dbg('WIDGET_RESYNC', f"Resynced {len(center_sliders)} sliders & mode toggles from cache")
+                    except Exception:
+                        pass
+                # Final safeguard: force enumeration of actual displayed widgets in peak_controls_box
+                # Some user edits may occur on newly materialized widgets not yet reflected in cached lists.
+                try:
+                    force_alpha = []
+                    force_center = []
+                    force_sigma = []
+                    force_amp = []
+                    force_center_window = []
+                    force_amp_mode = []
+                    force_center_mode = []
+                    force_sigma_mode = []
+                    force_include = []
+                    # Each child HBox layout: [cb, center, sigma, amplitude, alpha, win, amp_mode, center_mode, sigma_mode]
+                    for child in getattr(peak_controls_box, 'children', []):
+                        try:
+                            widgets_list = list(getattr(child, 'children', []))
+                            if len(widgets_list) < 9:
+                                continue
+                            cb, c_sl, s_sl, a_sl, al_sl, w_sl, am_mode, c_mode, s_mode = widgets_list[:9]
+                            force_include.append(cb)
+                            force_center.append(c_sl)
+                            force_sigma.append(s_sl)
+                            force_amp.append(a_sl)
+                            force_alpha.append(al_sl)
+                            force_center_window.append(w_sl)
+                            force_amp_mode.append(am_mode)
+                            force_center_mode.append(c_mode)
+                            force_sigma_mode.append(s_mode)
+                        except Exception:
+                            continue
+                    if force_center and len(force_center) == len(center_sliders):
+                        include_checkboxes = force_include
+                        center_sliders = force_center
+                        sigma_sliders = force_sigma
+                        amplitude_sliders = force_amp
+                        alpha_sliders = force_alpha
+                        center_window_sliders = force_center_window
+                        amplitude_mode_toggles = force_amp_mode
+                        center_mode_toggles = force_center_mode
+                        sigma_mode_toggles = force_sigma_mode
+                        _log_dbg('WIDGET_FORCE_REFRESH', f"Forced refresh adopted {len(center_sliders)} live widget rows")
+                    # Deep traversal fallback: some layouts may nest widgets more than one level.
+                    try:
+                        def _walk(node, acc):
+                            try:
+                                kids = getattr(node, 'children', [])
+                            except Exception:
+                                kids = []
+                            for k in kids:
+                                acc.append(k)
+                                _walk(k, acc)
+                        all_widgets = []
+                        _walk(peak_controls_box, all_widgets)
+                        # Maps for peak index 1 (0-based) by description pattern
+                        desc_map = {
+                            'center': None,
+                            'sigma': None,
+                            'amp': None,
+                            'alpha': None,
+                            'win': None,
+                            'include': None,
+                            'A-mode': None,
+                            'C-mode': None,
+                            'S-mode': None,
+                        }
+                        for w in all_widgets:
+                            try:
+                                d = getattr(w, 'description', '')
+                            except Exception:
+                                continue
+                            if not isinstance(d, str):
+                                continue
+                            if d.startswith('Center 1') and desc_map['center'] is None:
+                                desc_map['center'] = w
+                            elif d.startswith('Sigma 1') and desc_map['sigma'] is None:
+                                desc_map['sigma'] = w
+                            elif d.startswith('Amp 1') and desc_map['amp'] is None:
+                                desc_map['amp'] = w
+                            elif d.startswith('α 1') and desc_map['alpha'] is None:
+                                desc_map['alpha'] = w
+                            elif d.startswith('Win 1') and desc_map['win'] is None:
+                                desc_map['win'] = w
+                            elif d.startswith('Include 1') and desc_map['include'] is None:
+                                desc_map['include'] = w
+                            elif d.startswith('A-mode 1') and desc_map['A-mode'] is None:
+                                desc_map['A-mode'] = w
+                            elif d.startswith('C-mode 1') and desc_map['C-mode'] is None:
+                                desc_map['C-mode'] = w
+                            elif d.startswith('S-mode 1') and desc_map['S-mode'] is None:
+                                desc_map['S-mode'] = w
+                        # If we found a center or sigma widget whose value differs from our current list, adopt full deep set for index 0 only.
+                        adopt = False
+                        try:
+                            if desc_map['center'] is not None and center_sliders and center_sliders[0] is not desc_map['center']:
+                                adopt = True
+                            if desc_map['sigma'] is not None and sigma_sliders and sigma_sliders[0] is not desc_map['sigma']:
+                                adopt = True
+                            # Value mismatch triggers adoption (user changed value on a different widget instance)
+                            if desc_map['win'] is not None and center_window_sliders and abs(float(center_window_sliders[0].value) - float(getattr(desc_map['win'],'value', center_window_sliders[0].value))) > 1e-9:
+                                adopt = True
+                        except Exception:
+                            pass
+                        if adopt:
+                            try:
+                                center_sliders[0] = desc_map['center'] or center_sliders[0]
+                                sigma_sliders[0] = desc_map['sigma'] or sigma_sliders[0]
+                                amplitude_sliders[0] = desc_map['amp'] or amplitude_sliders[0]
+                                alpha_sliders[0] = desc_map['alpha'] or alpha_sliders[0]
+                                center_window_sliders[0] = desc_map['win'] or center_window_sliders[0]
+                                amplitude_mode_toggles[0] = desc_map['A-mode'] or amplitude_mode_toggles[0]
+                                center_mode_toggles[0] = desc_map['C-mode'] or center_mode_toggles[0]
+                                sigma_mode_toggles[0] = desc_map['S-mode'] or sigma_mode_toggles[0]
+                                _log_dbg('WIDGET_DEEP_REFRESH', 'Adopted deep traversal widgets for Peak 1')
+                            except Exception:
+                                pass
+                        # Emit diagnostic snapshot of Peak 1 widget values right before parameter capture
+                        try:
+                            _log_dbg('PEAK1_WIDGET_VALUES', 'center={c} sigma={s} amp={a} win={w} modes center={mc} sigma={ms} amp={ma}'.format(
+                                c=(center_sliders[0].value if center_sliders else 'NA'),
+                                s=(sigma_sliders[0].value if sigma_sliders else 'NA'),
+                                a=(amplitude_sliders[0].value if amplitude_sliders else 'NA'),
+                                w=(center_window_sliders[0].value if center_window_sliders else 'NA'),
+                                mc=(center_mode_toggles[0].value if center_mode_toggles else 'NA'),
+                                ms=(sigma_mode_toggles[0].value if sigma_mode_toggles else 'NA'),
+                                ma=(amplitude_mode_toggles[0].value if amplitude_mode_toggles else 'NA'),
+                            ))
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # Re-capture current widget parameter values and modes AFTER any re-sync so Manual changes are used.
+        param_seed_map = {}
+        # New: ensure all INCLUDED peaks are materialized so user edits apply.
+        try:
+            if 'peak_box_cache' in globals():
+                auto_mat = []
+                for _inc_idx in included:
+                    try:
+                        entry = peak_box_cache.get(_inc_idx)
+                        if entry and not entry.get('materialized'):
+                            # Programmatically open the toggle to invoke existing materialization logic
+                            try:
+                                tg = entry.get('toggle')
+                                if tg is not None:
+                                    tg.value = True  # triggers observer to materialize
+                            except Exception:
+                                pass
+                            # Refresh entry state
+                            try:
+                                entry = peak_box_cache.get(_inc_idx)
+                            except Exception:
+                                pass
+                            if entry and entry.get('materialized'):
+                                auto_mat.append(_inc_idx+1)
+                    except Exception:
+                        pass
+                if auto_mat:
+                    _debug_log(f"[PEAK_AUTOMATERIALIZE] peaks={auto_mat} (forced materialization for included peaks)")
+                # Emit summary of included peaks materialization state
+                try:
+                    mat_states = []
+                    for _inc_idx in included:
+                        try:
+                            ms = peak_box_cache.get(_inc_idx, {}).get('materialized')
+                            mat_states.append(f"{_inc_idx+1}:{'Y' if ms else 'N'}")
+                        except Exception:
+                            mat_states.append(f"{_inc_idx+1}:?")
+                    _debug_log(f"[MATERIALIZATION_SUMMARY] included={ [i+1 for i in included] } states={mat_states}")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            # Optional mapping: if center_slider_peak_indices length matches center_sliders, use positional mapping.
+            use_mapping = False
+            try:
+                if center_slider_peak_indices and len(center_slider_peak_indices) == len(center_sliders):
+                    use_mapping = True
+            except Exception:
+                use_mapping = False
+            for peak_idx in included:
+                # Determine positional index into slider lists via center_slider_peak_indices mapping
+                pos = peak_idx
+                if center_slider_peak_indices:
+                    try:
+                        pos = center_slider_peak_indices.index(peak_idx)
+                    except Exception:
+                        pos = peak_idx
+                original_idx_for_cache = peak_idx
+                # Extract values with fallbacks
+                def _val(lst, fallback):
+                    try:
+                        return float(lst[pos].value)
+                    except Exception:
+                        return float(fallback)
+                c_val = _val(center_sliders, peaks_x[peak_idx] if peak_idx < len(peaks_x) else float('nan'))
+                s_val = _val(sigma_sliders, globals().get('PER_PEAK_DEFAULT_SIGMA', 5.0))
+                a_val = _val(amplitude_sliders, (abs(float(peaks_y[peak_idx])) * max(1.0, s_val)) if peak_idx < len(peaks_y) else 1.0)
+                alpha_val = _val(alpha_sliders, 0.5)
+                w_val = _val(center_window_sliders, globals().get('PER_PEAK_DEFAULT_CENTER_WINDOW', 5.0))
+                def _mode(lst, key):
+                    try:
+                        m = lst[pos].value
+                    except Exception:
+                        try:
+                            m = per_spec_modes.get(idx, {}).get(key, [])[peak_idx]
+                        except Exception:
+                            m = 'Auto'
+                    if m not in ('Auto','Manual'):
+                        m = 'Auto'
+                    return m
+                # Cache-first capture: if peak has been materialized, read directly from cache widgets.
+                source = 'list'
+                placeholder_flags = []
+                cache_entry = None
+                try:
+                    if 'peak_box_cache' in globals():
+                        cache_entry = peak_box_cache.get(original_idx_for_cache)
+                except Exception:
+                    cache_entry = None
+                if cache_entry and cache_entry.get('materialized'):
+                    try:
+                        c_val = float(getattr(cache_entry.get('center'), 'value', c_val))
+                        s_val = float(getattr(cache_entry.get('sigma'), 'value', s_val))
+                        a_val = float(getattr(cache_entry.get('amplitude'), 'value', a_val))
+                        alpha_val = float(getattr(cache_entry.get('alpha'), 'value', alpha_val))
+                        w_val = float(getattr(cache_entry.get('center_window'), 'value', w_val))
+                        mode_center = str(getattr(cache_entry.get('center_mode'), 'value', 'Auto'))
+                        mode_sigma = str(getattr(cache_entry.get('sigma_mode'), 'value', 'Auto'))
+                        mode_amp = str(getattr(cache_entry.get('amplitude_mode') or cache_entry.get('amp_mode'), 'value', 'Auto'))
+                        source = 'cache'
+                    except Exception:
+                        source = 'cache_partial'
+                        mode_center = _mode(center_mode_toggles, 'center')
+                        mode_sigma = _mode(sigma_mode_toggles, 'sigma')
+                        mode_amp = _mode(amplitude_mode_toggles, 'amplitude')
+                else:
+                    # Fallback to list-based modes
+                    mode_center = _mode(center_mode_toggles, 'center')
+                    mode_sigma = _mode(sigma_mode_toggles, 'sigma')
+                    mode_amp = _mode(amplitude_mode_toggles, 'amplitude')
+                    def _is_placeholder(lst):
+                        try:
+                            cls_name = lst[pos].__class__.__name__
+                            return cls_name.startswith('_Lazy')
+                        except Exception:
+                            return False
+                    for name,lst in [('center',center_sliders),('sigma',sigma_sliders),('amp',amplitude_sliders)]:
+                        if _is_placeholder(lst):
+                            placeholder_flags.append(name)
+                param_seed_map[original_idx_for_cache] = {
+                    'center': c_val,
+                    'sigma': s_val,
+                    'amplitude': a_val,
+                    'alpha': alpha_val,
+                    'center_window': w_val,
+                    'mode_center': mode_center,
+                    'mode_sigma': mode_sigma,
+                    'mode_amp': mode_amp,
+                    'placeholders': placeholder_flags,
+                    'source': source,
+                    'original_idx': original_idx_for_cache,
+                }
+                try:
+                    _debug_log(f"[PARAM_CAPTURE] peak={original_idx_for_cache+1} source={source} center={c_val} sigma={s_val} amp={a_val} win={w_val} modes c={mode_center} s={mode_sigma} a={mode_amp} placeholders={placeholder_flags}")
+                    # Additional per-peak detail: widget classes and materialized flag
+                    try:
+                        if cache_entry:
+                            cls_center = cache_entry.get('center').__class__.__name__ if cache_entry.get('center') is not None else 'None'
+                            cls_sigma = cache_entry.get('sigma').__class__.__name__ if cache_entry.get('sigma') is not None else 'None'
+                            cls_amp = cache_entry.get('amplitude').__class__.__name__ if cache_entry.get('amplitude') is not None else 'None'
+                            _debug_log(f"[PARAM_CAPTURE_DETAIL] peak={original_idx_for_cache+1} materialized={cache_entry.get('materialized')} classes center={cls_center} sigma={cls_sigma} amp={cls_amp}")
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+            # Emit diagnostic for first included peak (usually Peak 1)
+            first_original = included[0]
+            seed_first = param_seed_map.get(first_original, {})
+            _debug_log("[PARAM_SEED_CAPTURED] peak={} center={} sigma={} amp={} win={} modes c={} s={} a={} placeholders={}".format(
+                first_original+1,
+                seed_first.get('center','NA'),
+                seed_first.get('sigma','NA'),
+                seed_first.get('amplitude','NA'),
+                seed_first.get('center_window','NA'),
+                seed_first.get('mode_center','NA'),
+                seed_first.get('mode_sigma','NA'),
+                seed_first.get('mode_amp','NA'),
+                seed_first.get('placeholders','NA'),
+            ))
+            # Materialized peaks that are currently not part of this fit (user may have edited but range excludes them)
+            try:
+                if 'peak_box_cache' in globals():
+                    materialized_not_included = [i+1 for i,entry in peak_box_cache.items() if entry.get('materialized') and i not in included]
+                    if materialized_not_included:
+                        _debug_log(f"[OPEN_NOT_INCLUDED] peaks={materialized_not_included} (materialized but excluded by current fit range)")
+            except Exception:
+                pass
+        except Exception:
+            pass
 
         # Prepare component traces count on main thread for consistent layout
         comp_traces_needed = len(included)
@@ -10950,6 +11553,7 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         fit_cancel_token = local_cancel
 
         old_redchi = last_redchi_by_idx.get(idx, None)
+        _log_dbg('OLD_REDCHI', f"old_redchi={old_redchi}")
         # Update status label immediately on main thread
         if not iterating_in_progress:
             try:
@@ -10964,12 +11568,14 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         def _worker(local_cancel_token=local_cancel):
             nonlocal fit_thread
             try:
+                _log_dbg('WORKER_START', 'Background worker thread started')
                 # Use only the selected Fit X-range for fitting to prevent components
                 # going nearly flat when focusing on a small region.
                 try:
                     ranges = _current_fit_ranges()
                 except Exception:
                     ranges = [(float(np.nanmin(x_arr)), float(np.nanmax(x_arr)))]
+                _log_dbg('FIT_RANGES', f"ranges={ranges}")
                 # Union mask across ranges
                 try:
                     msk = np.zeros_like(x_arr, dtype=bool)
@@ -10981,6 +11587,7 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                     msk = np.ones_like(x_arr, dtype=bool)
                 x_sub = x_arr[msk]
                 y_sub = y_arr[msk]
+                _log_dbg('SUBSET_SHAPE', f"x_sub={x_sub.size} y_sub={y_sub.size}")
                 # If too few points in range, bail gracefully
                 if x_sub.size < max(10, 3 * max(1, len(included))):
                     _on_main_thread(
@@ -10992,67 +11599,50 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                     _finish_fit_guard()
                     return
 
-                # Build composite model
+                # Build composite model using captured param_seed_map snapshot
                 comp_model = None
                 params = None
+                param_pre_lines = []
                 for i in included:
                     try:
-                        cx_detected = peaks_x[i]
+                        seed = param_seed_map.get(i, {})
+                        mu_val = float(seed.get('center', peaks_x[i]))
+                        sg_val = float(seed.get('sigma', globals().get('PER_PEAK_DEFAULT_SIGMA', 5.0)))
+                        amp_val = float(seed.get('amplitude', abs(float(peaks_y[i])) * max(1.0, sg_val)))
+                        alpha_val = float(seed.get('alpha', 0.5))
+                        w = float(seed.get('center_window', globals().get('PER_PEAK_DEFAULT_CENTER_WINDOW', 5.0)))
+                        mode_center = seed.get('mode_center', 'Auto')
+                        mode_sigma = seed.get('mode_sigma', 'Auto')
+                        mode_amp = seed.get('mode_amp', 'Auto')
+                        if mode_center not in ('Auto','Manual'):
+                            mode_center = 'Auto'
+                        if mode_sigma not in ('Auto','Manual'):
+                            mode_sigma = 'Auto'
+                        if mode_amp not in ('Auto','Manual'):
+                            mode_amp = 'Auto'
                         m = PseudoVoigtModel(prefix=f"p{i}_")
                         p = m.make_params()
-                        # Center (μ)
-                        try:
-                            mu_val = float(center_sliders[i].value)
-                        except Exception:
-                            mu_val = float(cx_detected)
-                        try:
-                            mode_center = center_mode_toggles[i].value
-                        except Exception:
-                            mode_center = 'Auto'
-                        try:
-                            w = float(center_window_sliders[i].value)
-                        except Exception:
-                            w = float(PER_PEAK_DEFAULT_CENTER_WINDOW)
-                        # Manual center: previously constrained with min=max causing zero-width bounds.
-                        # This led to lmfit occasionally aborting the fit when any parameter was fixed.
-                        # Fix: set value and vary=False without degenerate bounds so other parameters can still vary.
+                        # Center
                         if mode_center == 'Manual':
                             p[f"p{i}_center"].set(value=mu_val, vary=False)
                         else:
                             p[f"p{i}_center"].set(value=mu_val, min=mu_val - abs(w), max=mu_val + abs(w), vary=True)
-                        # Sigma (σ)
-                        try:
-                            sg_val = float(sigma_sliders[i].value)
-                        except Exception:
-                            sg_val = float(PER_PEAK_DEFAULT_SIGMA)
-                        try:
-                            mode_sigma = sigma_mode_toggles[i].value
-                        except Exception:
-                            mode_sigma = 'Auto'
+                        # Sigma
                         if mode_sigma == 'Manual':
-                            # Same fix for sigma: remove min=max zero-width bounds when fixed.
                             p[f"p{i}_sigma"].set(value=sg_val, vary=False)
                         else:
                             p[f"p{i}_sigma"].set(value=sg_val, min=1e-3, max=1e3, vary=True)
-                        # Alpha (fraction) always Manual (fixed)
-                        alpha_val = (float(alpha_sliders[i].value) if i < len(alpha_sliders) else 0.5)
+                        # Alpha fixed
                         p[f"p{i}_fraction"].set(value=alpha_val, min=0.0, max=1.0, vary=False)
-                        # Amplitude (A)
-                        try:
-                            amp_val = float(amplitude_sliders[i].value)
-                        except Exception:
-                            amp_val = abs(float(peaks_y[i])) * max(1.0, float(sg_val))
-                        try:
-                            mode_amp = amplitude_mode_toggles[i].value
-                        except Exception:
-                            mode_amp = 'Auto'
+                        # Amplitude
                         if mode_amp == 'Manual':
-                            # Amplitude manual: do not force min=max; simply fix the value.
                             p[f"p{i}_amplitude"].set(value=amp_val, vary=False)
                         else:
-                            # Allow amplitude to vary upwards; keep lower bound at 0
                             p[f"p{i}_amplitude"].set(value=amp_val, min=0.0)
-
+                        # Snapshot line
+                        param_pre_lines.append(
+                            f"Peak {i+1} PRE  center={mu_val:.6g} mode={mode_center}  sigma={sg_val:.6g} mode={mode_sigma}  amp={amp_val:.6g} mode={mode_amp}  alpha={alpha_val:.6g} fixed  win={w:.6g}"
+                        )
                         if comp_model is None:
                             comp_model = m
                             params = p
@@ -11064,17 +11654,98 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                         _finish_fit_guard()
                         return
 
+                # Emit captured parameter snapshot (PRE) for debugging
+                if param_pre_lines:
+                    try:
+                        if DECONV_DEBUG:
+                            _debug_log("[DECONV_DEBUG] PRE-fit parameter snapshot (" + str(len(param_pre_lines)) + " peaks):")
+                            for line in param_pre_lines:
+                                _debug_log(line)
+                        else:
+                            _debug_log(f"[PRE_CAPTURE] Captured {len(param_pre_lines)} peak parameter lines (debug flag off)")
+                    except Exception:
+                        pass
+                else:
+                    _log_dbg('PRE_PARAMS_EMPTY', 'No param_pre_lines captured at all')
+
                 # iter_cb to allow cooperative cancellation
                 def _iter_cb(params_, iter_, resid_, *args, **kws):
                     if local_cancel_token.is_set():
                         raise KeyboardInterrupt("Fit cancelled by user")
 
+                _log_dbg('LMFIT_START', f"Starting lmfit with {len(included)} components")
                 result = comp_model.fit(y_sub, params, x=x_sub, iter_cb=_iter_cb)
+                _log_dbg('LMFIT_DONE', f"Fit result redchi={getattr(result,'redchi',None)}")
                 if local_cancel_token.is_set():
                     return
                 # Evaluate results for full x-array for plotting
                 y_fit = result.eval(x=x_arr)
                 comps = result.eval_components(x=x_arr)
+
+                # Post-fit parameter snapshot & mode/vary verification
+                # Post-fit snapshot (always capture; conditional detailed logging)
+                if True:
+                    try:
+                        param_post_lines = []
+                        vary_mismatches = []
+                        for i in included:
+                            prefix = f"p{i}_"
+                            def _pv(name):
+                                try:
+                                    par = result.params.get(prefix + name)
+                                    return float(getattr(par, 'value', par))
+                                except Exception:
+                                    return float('nan')
+                            c_val = _pv('center')
+                            s_val = _pv('sigma')
+                            a_val = _pv('amplitude')
+                            fr_val = _pv('fraction')
+                            try:
+                                mode_center = center_mode_toggles[i].value if i < len(center_mode_toggles) else 'Auto'
+                            except Exception:
+                                mode_center = 'Auto'
+                            try:
+                                mode_sigma = sigma_mode_toggles[i].value if i < len(sigma_mode_toggles) else 'Auto'
+                            except Exception:
+                                mode_sigma = 'Auto'
+                            try:
+                                mode_amp = amplitude_mode_toggles[i].value if i < len(amplitude_mode_toggles) else 'Auto'
+                            except Exception:
+                                mode_amp = 'Auto'
+                            def _vary(name):
+                                try:
+                                    par = result.params.get(prefix + name)
+                                    return bool(getattr(par, 'vary', False))
+                                except Exception:
+                                    return False
+                            vc = _vary('center')
+                            vs = _vary('sigma')
+                            va = _vary('amplitude')
+                            if (mode_center == 'Manual' and vc) or (mode_center == 'Auto' and not vc):
+                                vary_mismatches.append(f"Peak {i+1} center mode={mode_center} vary={vc}")
+                            if (mode_sigma == 'Manual' and vs) or (mode_sigma == 'Auto' and not vs):
+                                vary_mismatches.append(f"Peak {i+1} sigma mode={mode_sigma} vary={vs}")
+                            if (mode_amp == 'Manual' and va) or (mode_amp == 'Auto' and not va):
+                                vary_mismatches.append(f"Peak {i+1} amplitude mode={mode_amp} vary={va}")
+                            param_post_lines.append(
+                                f"Peak {i+1} POST center={c_val:.6g} vary={vc}  sigma={s_val:.6g} vary={vs}  amp={a_val:.6g} vary={va}  alpha={fr_val:.6g} fixed"
+                            )
+                        if DECONV_DEBUG:
+                            _debug_log("[DECONV_DEBUG] POST-fit parameter snapshot (" + str(len(param_post_lines)) + " peaks):")
+                            for line in param_post_lines:
+                                _debug_log(line)
+                            if vary_mismatches:
+                                _debug_log("[DECONV_DEBUG] VARY FLAG MISMATCHES: " + "; ".join(vary_mismatches))
+                            else:
+                                _debug_log("[DECONV_DEBUG] VARY FLAGS OK")
+                        else:
+                            _debug_log(f"[POST_CAPTURE] Captured {len(param_post_lines)} peak parameter lines (debug flag off)")
+                            if vary_mismatches:
+                                _debug_log("[POST_CAPTURE] VARY FLAG MISMATCHES: " + "; ".join(vary_mismatches))
+                            else:
+                                _debug_log("[POST_CAPTURE] VARY FLAGS OK")
+                    except Exception:
+                        pass
 
                 # Persist last successful result for this spectrum
                 try:
@@ -11117,11 +11788,11 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                                 else list(y_fit)
                             )
                             # Update component traces safely
-                            for comp_idx, i in enumerate(included):
-                                key = f"p{i}_"
+                            for comp_pos, orig_idx in enumerate(included):
+                                key = f"p{orig_idx}_"
                                 y_comp = comps.get(key, np.zeros_like(x_arr))
-                                fig.data[2 + comp_idx].x = x_arr.tolist()
-                                fig.data[2 + comp_idx].y = (
+                                fig.data[2 + comp_pos].x = x_arr.tolist()
+                                fig.data[2 + comp_pos].y = (
                                     y_comp.tolist()
                                     if hasattr(y_comp, "tolist")
                                     else list(y_comp)
@@ -11130,24 +11801,25 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                                 try:
                                     mu_display = None
                                     try:
-                                        par_obj = result.params.get(f"p{comp_idx}_center")
+                                        par_obj = result.params.get(f"p{orig_idx}_center")
                                         if par_obj is not None:
                                             mu_display = float(getattr(par_obj, 'value', par_obj))
                                     except Exception:
                                         mu_display = None
                                     if mu_display is None:
                                         try:
-                                            mu_display = float(center_sliders[i].value)
+                                            # orig_idx corresponds to slider index; use direct lookup
+                                            mu_display = float(center_sliders[orig_idx].value) if orig_idx < len(center_sliders) else float(peaks_x[orig_idx])
                                         except Exception:
-                                            mu_display = float(peaks_x[i]) if i < len(peaks_x) else float('nan')
+                                            mu_display = float(peaks_x[orig_idx]) if orig_idx < len(peaks_x) else float('nan')
                                     # Legend numbering uses original peak index (i+1) to match toggle titles
-                                    fig.data[2 + comp_idx].name = f"Peak {i+1} @ {mu_display:.1f} cm⁻¹"
+                                    fig.data[2 + comp_pos].name = f"Peak {orig_idx+1} @ {mu_display:.1f} cm⁻¹"
                                     # Update toggle description with latest fitted center
                                     try:
-                                        orig_mu = original_peak_centers[i] if i < len(original_peak_centers) else mu_display
-                                        toggle = included_index_map.get(i)
+                                        orig_mu = original_peak_centers[orig_idx] if orig_idx < len(original_peak_centers) else mu_display
+                                        toggle = included_index_map.get(orig_idx)
                                         if toggle is not None:
-                                            toggle.description = f"Peak {i+1} @ {orig_mu:.1f} → {mu_display:.1f} cm⁻¹"
+                                            toggle.description = f"Peak {orig_idx+1} @ {orig_mu:.1f} → {mu_display:.1f} cm⁻¹"
                                     except Exception:
                                         pass
                                 except Exception:
@@ -11262,6 +11934,11 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                     _on_main_thread(_force_cancel_fit_hidden)
                 except Exception:
                     pass
+                # Mark fit complete (successful path)
+                try:
+                    _finish_fit_guard()
+                except Exception:
+                    pass
             except KeyboardInterrupt:
                 # Cancellation requested
                 def _notify_cancel():
@@ -11289,6 +11966,11 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                     pass
                 try:
                     _on_main_thread(_update_cancel_fit_visibility)
+                except Exception:
+                    pass
+                # Mark fit completion after cancellation
+                try:
+                    _finish_fit_guard()
                 except Exception:
                     pass
             except Exception as e:
@@ -11320,10 +12002,16 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                     _on_main_thread(_update_cancel_fit_visibility)
                 except Exception:
                     pass
+                # Mark fit completion after error
+                try:
+                    _finish_fit_guard()
+                except Exception:
+                    pass
 
         fit_thread = threading.Thread(target=_worker, daemon=True)
         fit_thread.start()
-        # Show the Cancel Fit button immediately when a fit starts
+        # Show the Cancel Fit button immediately when a fit starts (guard will be
+        # cleared only when the worker actually finishes to prevent overlapping fits).
         try:
             _on_main_thread(_force_cancel_fit_shown)
         except Exception:
@@ -11331,7 +12019,6 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                 _update_cancel_fit_visibility()
             except Exception:
                 pass
-        _finish_fit_guard()
         return None
 
     # Track displayed spectrum independently for deconvolution
@@ -11569,6 +12256,34 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                 pass
             # Leave the log widget displayed so the last message remains visible
             fig.close()
+        except Exception:
+            pass
+        # Reset peak-related state so a fresh invocation reconstructs everything
+        try:
+            alpha_sliders[:] = []
+            center_sliders[:] = []
+            sigma_sliders[:] = []
+            amplitude_sliders[:] = []
+            center_window_sliders[:] = []
+            include_checkboxes[:] = []
+            amplitude_mode_toggles[:] = []
+            center_mode_toggles[:] = []
+            sigma_mode_toggles[:] = []
+            center_slider_peak_indices[:] = []
+        except Exception:
+            pass
+        try:
+            if isinstance(peak_box_cache, dict):
+                peak_box_cache.clear()
+        except Exception:
+            pass
+        try:
+            last_result_by_idx.pop(spectrum_sel.value, None)
+        except Exception:
+            pass
+        # Clear fit guard so next session can start fitting
+        try:
+            fit_update_inflight = False
         except Exception:
             pass
 
@@ -11983,9 +12698,22 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                 pass
             unlocked_center_idxs = []
             try:
-                unlocked_center_idxs = [i for i in included_idxs if not (i < len(lock_center_checkboxes) and bool(lock_center_checkboxes[i].value))]
+                unlocked_center_idxs = [
+                    i for i in included_idxs
+                    if not (i < len(lock_center_checkboxes) and bool(lock_center_checkboxes[i].value))
+                    and not (
+                        i < len(center_mode_toggles)
+                        and str(getattr(center_mode_toggles[i], 'value', 'Auto')) == 'Manual'
+                    )
+                ]
             except Exception:
-                unlocked_center_idxs = included_idxs
+                unlocked_center_idxs = [
+                    i for i in included_idxs
+                    if not (
+                        i < len(center_mode_toggles)
+                        and str(getattr(center_mode_toggles[i], 'value', 'Auto')) == 'Manual'
+                    )
+                ]
             for i in unlocked_center_idxs:
                 try:
                     if cancel_event.is_set():
@@ -12038,9 +12766,22 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                 pass
             unlocked_sigma_idxs = []
             try:
-                unlocked_sigma_idxs = [i for i in included_idxs if not (i < len(lock_sigma_checkboxes) and bool(lock_sigma_checkboxes[i].value))]
+                unlocked_sigma_idxs = [
+                    i for i in included_idxs
+                    if not (i < len(lock_sigma_checkboxes) and bool(lock_sigma_checkboxes[i].value))
+                    and not (
+                        i < len(sigma_mode_toggles)
+                        and str(getattr(sigma_mode_toggles[i], 'value', 'Auto')) == 'Manual'
+                    )
+                ]
             except Exception:
-                unlocked_sigma_idxs = included_idxs
+                unlocked_sigma_idxs = [
+                    i for i in included_idxs
+                    if not (
+                        i < len(sigma_mode_toggles)
+                        and str(getattr(sigma_mode_toggles[i], 'value', 'Auto')) == 'Manual'
+                    )
+                ]
             for i in unlocked_sigma_idxs:
                 try:
                     if cancel_event.is_set():
