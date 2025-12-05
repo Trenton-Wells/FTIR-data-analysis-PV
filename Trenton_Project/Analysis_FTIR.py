@@ -1741,6 +1741,89 @@ def _filter_spectra_dataframe(
     return result
 
 
+# ---------------------- Shared Palette Helpers ---------------------- #
+def _time_gradient_color(times_unique, val):
+    """Return an RGB string color for a given time value using a shared
+    blue→purple→red gradient consistent across time-series plotting functions.
+
+    Equal-step mapping: color steps are based on the ordinal position
+    in the unique time list (index 0..N-1), not absolute time magnitude,
+    so consecutive distinct times are visually separated evenly.
+
+    - times_unique: list of sorted unique time values (numeric preferred)
+    - val: time value to map (exact match preferred; nearest used otherwise)
+    """
+    # Anchor colors (approximate to plot_spectra gradient)
+    _blue = (50, 100, 220)
+    _purple = (160, 80, 200)
+    _red = (220, 60, 60)
+
+    try:
+        if not times_unique:
+            r, g, b = _blue
+            return f"rgb({r},{g},{b})"
+
+        # Normalize times_unique to numeric when possible, preserving order
+        tu = []
+        for t in times_unique:
+            try:
+                tu.append(float(t))
+            except Exception:
+                # fallback: keep as-is (string)
+                tu.append(t)
+
+        # Build an index map for exact matches where possible
+        index_map = {}
+        for i, t in enumerate(tu):
+            # Use float key for numeric values; else use string key
+            key = t if isinstance(t, (int, float)) else str(t)
+            if key not in index_map:
+                index_map[key] = i
+
+        # Resolve val to an index: exact match first, else nearest by numeric distance
+        idx = 0
+        try:
+            # attempt numeric compare
+            vnum = float(val)
+            if vnum in tu:
+                idx = tu.index(vnum)
+            else:
+                # nearest by absolute numeric difference
+                diffs = []
+                for t in tu:
+                    try:
+                        diffs.append(abs(vnum - float(t)))
+                    except Exception:
+                        # non-numeric: treat as large diff
+                        diffs.append(float('inf'))
+                idx = int(diffs.index(min(diffs))) if diffs else 0
+        except Exception:
+            # non-numeric val: try exact string match
+            sval = str(val)
+            if sval in index_map:
+                idx = index_map[sval]
+            else:
+                idx = 0
+
+        n = max(1, len(tu) - 1)
+        pos = float(idx) / float(n)
+
+        def _blend(c1, c2, w):
+            return (
+                int(c1[0] + (c2[0] - c1[0]) * w),
+                int(c1[1] + (c2[1] - c1[1]) * w),
+                int(c1[2] + (c2[2] - c1[2]) * w),
+            )
+
+        if pos <= 0.5:
+            r, g, b = _blend(_blue, _purple, pos / 0.5)
+        else:
+            r, g, b = _blend(_purple, _red, (pos - 0.5) / 0.5)
+        return f"rgb({r},{g},{b})"
+    except Exception:
+        return "rgb(50,100,220)"
+
+
 def _parse_seq(val):
     """Parse a value into a 1D list/array of floats, or return None if invalid.
 
@@ -2091,6 +2174,7 @@ def plot_spectra(
     baseline=False,
     baseline_corrected=False,
     normalized=False,
+    deconv_fit=False,
     downsample=False,
     separate_plots=False,
     include_replicates=True,
@@ -2133,6 +2217,9 @@ def plot_spectra(
         'Normalized and Corrected Data' (default is False).
     separate_plots : bool, optional
         Whether to create separate plots for each spectrum (default is False).
+    deconv_fit : bool, optional
+        When True, overlay the stored deconvolution fit reconstructed from
+        'Deconvolution Results' (default False).
     downsample : bool, optional
         When True, adaptively decimate x/y to reduce points per trace (default False).
     include_replicates : bool, optional
@@ -2280,6 +2367,11 @@ def plot_spectra(
                 description="Normalized",
                 layout=widgets.Layout(width="auto"),
             )
+            deconv_cb = widgets.Checkbox(
+                value=False if materials is None else bool(deconv_fit),
+                description="Deconvolution fit",
+                layout=widgets.Layout(width="auto"),
+            )
             downsample_cb = widgets.Checkbox(
                 value=False if materials is None else bool(downsample),
                 description="Downsample spectra",
@@ -2293,6 +2385,7 @@ def plot_spectra(
                     base_cb,
                     blc_cb,
                     norm_cb,
+                    deconv_cb,
                 ],
                 layout=widgets.Layout(
                     border="1px solid #ddd",
@@ -2354,6 +2447,7 @@ def plot_spectra(
                         tr_base = bool(base_cb.value)
                         tr_blc = bool(blc_cb.value)
                         tr_norm = bool(norm_cb.value)
+                        tr_deconv = bool(deconv_cb.value)
                         tr_down = bool(downsample_cb.value)
                         # --- Validate requested trace types within the CURRENT FILTERED SUBSET ---
                         def _valid_mask_for_col(df, col):
@@ -2488,6 +2582,10 @@ def plot_spectra(
                                 validation_errors.append(
                                     "You need to normalize the spectra before this will be available for plotting."
                                 )
+                            if tr_deconv and not _valid_mask_for_col(filtered_val, "Deconvolution Results").any():
+                                validation_errors.append(
+                                    "You need to deconvolute peaks before the deconvolution fit will be available for plotting."
+                                )
                         except Exception:
                             validation_errors = []  # fail open on unexpected issues
 
@@ -2510,6 +2608,7 @@ def plot_spectra(
                                     baseline=tr_base,
                                     baseline_corrected=tr_blc,
                                     normalized=tr_norm,
+                                    deconv_fit=tr_deconv,
                                     downsample=tr_down,
                                     separate_plots=separate_plots_chk.value,
                                     include_replicates=include_replicates_chk.value,
@@ -2963,6 +3062,10 @@ def plot_spectra(
             noninteractive_validation_errors.append(
                 "You need to normalize the spectra before this will be available for plotting."
             )
+        if deconv_fit and not _valid_mask_for_col(filtered_data, "Deconvolution Results").any():
+            noninteractive_validation_errors.append(
+                "You need to deconvolute peaks before the deconvolution fit will be available for plotting."
+            )
     except Exception:
         noninteractive_validation_errors = []
 
@@ -3219,6 +3322,88 @@ def plot_spectra(
                             f"Row {idx} error while adding '{name_suffix}' trace: {e}"
                         )
 
+            def _add_deconv_fit():
+                try:
+                    res = spectrum_row.get("Deconvolution Results")
+                    if isinstance(res, str):
+                        try:
+                            res = ast.literal_eval(res)
+                        except Exception:
+                            res = None
+                    if not isinstance(res, list) or len(res) == 0:
+                        _row_plot_warnings.append(
+                            f"Row {idx} missing 'Deconvolution Results' for deconvolution fit."
+                        )
+                        return
+                    # Build composite pseudo-Voigt model from stored parameters
+                    y_fit = None
+                    x_arr = np.asarray(list(x_axis), dtype=float)
+                    y_fit = np.zeros_like(x_arr, dtype=float)
+                    for j, p in enumerate(res):
+                        try:
+                            amp = float(p.get("amplitude", 0.0))
+                        except Exception:
+                            amp = 0.0
+                        try:
+                            cen = float(p.get("center", float("nan")))
+                        except Exception:
+                            cen = float("nan")
+                        # Prefer unified sigma; fallback to sigma_l or sigma_g
+                        try:
+                            sig = p.get("sigma", None)
+                            if sig is None:
+                                sig = p.get("sigma_l", p.get("sigma_g", None))
+                            sig = float(sig) if sig is not None else float("nan")
+                        except Exception:
+                            sig = float("nan")
+                        try:
+                            frac = p.get("alpha", p.get("fraction", 0.5))
+                            frac = float(frac)
+                        except Exception:
+                            frac = 0.5
+                        # Skip invalid components
+                        if not (np.isfinite(amp) and np.isfinite(cen) and np.isfinite(sig)):
+                            continue
+                        try:
+                            mdl = PseudoVoigtModel(prefix=f"p{j}_")
+                            params = mdl.make_params(
+                                amplitude=max(0.0, amp), center=cen, sigma=max(1e-9, sig), fraction=min(max(frac, 0.0), 1.0)
+                            )
+                            y_fit = y_fit + mdl.eval(params, x=x_arr)
+                        except Exception:
+                            # Fallback manual PV evaluation if lmfit model fails
+                            try:
+                                g = np.exp(-((x_arr - cen) ** 2) / (2.0 * (sig ** 2)))
+                                l = (sig ** 2) / (((x_arr - cen) ** 2) + (sig ** 2))
+                                pv = frac * l + (1.0 - frac) * g
+                                # Scale pv to amplitude approximately (peak area vs height ambiguity); use height scaling
+                                pv = amp * pv / (np.max(pv) if np.max(pv) > 0 else 1.0)
+                                y_fit = y_fit + pv
+                            except Exception:
+                                continue
+                    # Add trace
+                    x_list = list(x_arr)
+                    y_list = list(y_fit)
+                    if downsample:
+                        s = _stride_for(len(x_list))
+                        if s > 1:
+                            x_list = x_list[::s]
+                            y_list = y_list[::s]
+                    # Style: thicker line and same color
+                    line_style = dict(_row_line.get(idx)) if isinstance(_row_line.get(idx), dict) else {}
+                    line_style.update({"width": 2})
+                    fig_group.add_scatter(
+                        x=x_list,
+                        y=y_list,
+                        mode="lines",
+                        name=f"Deconv fit: {spectrum_label}",
+                        line=line_style,
+                    )
+                except Exception as e:
+                    _row_plot_warnings.append(
+                        f"Row {idx} error while adding deconvolution fit: {e}"
+                    )
+
             if raw_data and ("Raw Data" in spectrum_row):
                 _add_series(spectrum_row.get("Raw Data"), "Raw")
             if baseline and (spectrum_row.get("Baseline") is not None):
@@ -3236,6 +3421,8 @@ def plot_spectra(
                     spectrum_row.get("Normalized and Corrected Data"),
                     "Normalized and Corrected",
                 )
+            if deconv_fit:
+                _add_deconv_fit()
         except Exception as e:
             _row_plot_warnings.append(
                 f"Row {idx} skipped entirely due to unexpected error: {e}"
@@ -3410,6 +3597,74 @@ def plot_spectra(
                 _add_series_i(
                     row.get("Normalized and Corrected Data"), "Normalized and Corrected"
                 )
+            # Deconvolution fit per-spectrum
+            if deconv_fit:
+                try:
+                    res = row.get("Deconvolution Results")
+                    if isinstance(res, str):
+                        try:
+                            res = ast.literal_eval(res)
+                        except Exception:
+                            res = None
+                    if isinstance(res, list) and len(res) > 0:
+                        x_arr = np.asarray(list(x_axis), dtype=float)
+                        y_fit = np.zeros_like(x_arr, dtype=float)
+                        for j, p in enumerate(res):
+                            try:
+                                amp = float(p.get("amplitude", 0.0))
+                            except Exception:
+                                amp = 0.0
+                            try:
+                                cen = float(p.get("center", float("nan")))
+                            except Exception:
+                                cen = float("nan")
+                            try:
+                                sig = p.get("sigma", None)
+                                if sig is None:
+                                    sig = p.get("sigma_l", p.get("sigma_g", None))
+                                sig = float(sig) if sig is not None else float("nan")
+                            except Exception:
+                                sig = float("nan")
+                            try:
+                                frac = p.get("alpha", p.get("fraction", 0.5))
+                                frac = float(frac)
+                            except Exception:
+                                frac = 0.5
+                            if not (np.isfinite(amp) and np.isfinite(cen) and np.isfinite(sig)):
+                                continue
+                            try:
+                                mdl = PseudoVoigtModel(prefix=f"p{j}_")
+                                params = mdl.make_params(
+                                    amplitude=max(0.0, amp), center=cen, sigma=max(1e-9, sig), fraction=min(max(frac, 0.0), 1.0)
+                                )
+                                y_fit = y_fit + mdl.eval(params, x=x_arr)
+                            except Exception:
+                                try:
+                                    g = np.exp(-((x_arr - cen) ** 2) / (2.0 * (sig ** 2)))
+                                    l = (sig ** 2) / (((x_arr - cen) ** 2) + (sig ** 2))
+                                    pv = frac * l + (1.0 - frac) * g
+                                    pv = amp * pv / (np.max(pv) if np.max(pv) > 0 else 1.0)
+                                    y_fit = y_fit + pv
+                                except Exception:
+                                    continue
+                        x_list = list(x_arr)
+                        y_list = list(y_fit)
+                        if downsample:
+                            s = _stride_for(len(x_list))
+                            if s > 1:
+                                x_list = x_list[::s]
+                                y_list = y_list[::s]
+                        fig_i.add_scatter(
+                            x=x_list,
+                            y=y_list,
+                            mode="lines",
+                            name="Deconvolution fit",
+                            line=dict(width=2, color=_row_line.get(idx, {}).get("color", "#000000")),
+                        )
+                    else:
+                        pass
+                except Exception:
+                    pass
             material_val = row.get("Material", "")
             condition_val = row.get("Conditions", row.get("Condition", ""))
             time_val = row.get("Time", "")
@@ -14931,42 +15186,28 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
     return FTIR_DataFrame
 
 
-def fit_time_series(FTIR_DataFrame):
-    if FTIR_DataFrame is None or not isinstance(FTIR_DataFrame, pd.DataFrame):
-        raise ValueError("Error: FTIR_DataFrame not defined. Load or Create DataFrame first.")
-    """Interactive time-series fitting and visualization.
+def fit_material(FTIR_DataFrame):
 
-    - Computes time-series fits where peak centers/shapes are shared within a series
-      (Material + Conditions including 'unexposed'), and amplitudes vary per spectrum.
-    - Provides a UI with Material and Conditions dropdowns and a 'Fit Time-Series'
-      button, then plots the selected series by Time (ascending) and overlays fits.
+    """
+    Fit deconvoluted spectra of selected material to a unified set of peaks.
 
-    Parameters
+    Parameters:
     ----------
     FTIR_DataFrame : pd.DataFrame
-        DataFrame containing FTIR spectral data and metadata.
+        DataFrame containing FTIR spectral data and prior analysis results.
 
-    Returns
+    Returns:
     -------
     pd.DataFrame
-        Updated DataFrame with time-series fitting results.
+        Updated DataFrame with fit-results stored.
     """
-    # --- Validation and setup (shared for compute + UI) ---
+    if FTIR_DataFrame is None or not isinstance(FTIR_DataFrame, pd.DataFrame):
+        raise ValueError("Error: FTIR_DataFrame not defined. Load or Create DataFrame first.")
     if FTIR_DataFrame is None or len(FTIR_DataFrame) == 0:
         raise ValueError("FTIR_DataFrame must be loaded and non-empty.")
 
-    # Identify condition column name and required columns
-    cond_col = (
-        "Conditions"
-        if "Conditions" in FTIR_DataFrame.columns
-        else ("Condition" if "Condition" in FTIR_DataFrame.columns else None)
-    )
-    if cond_col is None:
-        raise KeyError("Missing 'Conditions' (or 'Condition') column in DataFrame.")
-
     required_cols = [
         "Material",
-        cond_col,
         "Time",
         "Deconvolution Results",
         "X-Axis",
@@ -14976,17 +15217,158 @@ def fit_time_series(FTIR_DataFrame):
     missing = [c for c in required_cols if c not in FTIR_DataFrame.columns]
     if missing:
         raise KeyError(
-            f"Missing required column(s): {missing}. Ensure your DataFrame is prepared "
-            f"with prior steps."
+            f"Missing required column(s): {missing}. Ensure your DataFrame is prepared with prior steps."
         )
 
-    # Ensure destination column can hold arbitrary Python objects
     try:
         FTIR_DataFrame["Time-Series Fit Results"] = FTIR_DataFrame[
             "Time-Series Fit Results"
         ].astype(object)
     except Exception:
         pass
+
+    # --- New behavior: fit across all spectra of selected material ---
+    import json, ast, os, numpy as np
+
+    def _parse_deconv(val):
+        if val is None:
+            return None
+        v = val
+        if isinstance(v, str):
+            try:
+                v = ast.literal_eval(v)
+            except Exception:
+                return None
+        if isinstance(v, list):
+            try:
+                items = [dict(d) for d in v if isinstance(d, dict)]
+            except Exception:
+                return None
+            try:
+                items = sorted(items, key=lambda d: float(d.get("center", float("nan"))))
+            except Exception:
+                pass
+            return items
+        return None
+
+    def _parse_xy(row):
+        x = row.get("X-Axis")
+        y = row.get("Normalized and Corrected Data")
+        if isinstance(x, str):
+            try:
+                x = ast.literal_eval(x)
+            except Exception:
+                return None, None
+        if isinstance(y, str):
+            try:
+                y = ast.literal_eval(y)
+            except Exception:
+                return None, None
+        try:
+            xa = np.asarray(x, dtype=float)
+            ya = np.asarray(y, dtype=float)
+            if xa.ndim != 1 or ya.ndim != 1 or xa.size != ya.size:
+                return None, None
+            return xa, ya
+        except Exception:
+            return None, None
+
+    # Selected material from session; if 'any', process all materials
+    try:
+        target_mat = str((_SESSION_SELECTIONS.get("material") or "any")).strip()
+    except Exception:
+        target_mat = "any"
+
+    mats = sorted({str(m) for m in FTIR_DataFrame.get("Material", []).astype(str).dropna().unique().tolist()})
+    materials_to_run = mats if target_mat.lower() == "any" else [target_mat]
+
+    results_by_material = {}
+    for mat in materials_to_run:
+        try:
+            sub = FTIR_DataFrame[FTIR_DataFrame["Material"].astype(str) == str(mat)].copy()
+        except Exception:
+            sub = FTIR_DataFrame.copy()
+        # require normalized and deconvolution present
+        try:
+            sub = sub[sub["Normalized and Corrected Data"].notna()]
+        except Exception:
+            pass
+        peak_lists = []
+        entries = []
+        for idx, row in sub.iterrows():
+            peaks = _parse_deconv(row.get("Deconvolution Results"))
+            if peaks:
+                peak_lists.append(peaks)
+                entries.append((idx, row, peaks))
+        if not peak_lists:
+            continue
+        # Use first spectrum as reference; align by nearest centers
+        ref = peak_lists[0]
+        k = len(ref)
+        mat_res = {"peaks": []}
+        for j in range(k):
+            ref_c = float(ref[j].get("center") or ref[j].get("center_wavenumber") or 0.0)
+            centers, alphas, sigmas, times = [], [], [], []
+            for idx, row, peaks in entries:
+                # choose closest center
+                try:
+                    ci_list = [float(p.get("center", p.get("center_wavenumber", float("nan")))) for p in peaks]
+                    sel = int(np.argmin([abs(c - ref_c) for c in ci_list]))
+                except Exception:
+                    continue
+                p = peaks[sel]
+                try:
+                    centers.append(float(p.get("center", p.get("center_wavenumber"))))
+                except Exception:
+                    centers.append(float("nan"))
+                try:
+                    alphas.append(float(p.get("alpha", p.get("fraction", float("nan")))))
+                except Exception:
+                    alphas.append(float("nan"))
+                try:
+                    sigmas.append(float(p.get("sigma", p.get("σ", float("nan")))))
+                except Exception:
+                    sigmas.append(float("nan"))
+                times.append(row.get("Time"))
+            mat_res["peaks"].append({
+                "center_wavenumber": centers,
+                "α": alphas,
+                "σ": sigmas,
+                "time": times,
+            })
+        results_by_material[mat] = mat_res
+
+        # Persist per-row simplified fit results back to DataFrame
+        for idx, row, peaks in entries:
+            cleaned = []
+            for p in peaks:
+                try:
+                    cen = float(p.get("center", p.get("center_wavenumber", float("nan"))))
+                except Exception:
+                    cen = float("nan")
+                try:
+                    alpha = float(p.get("alpha", p.get("fraction", float("nan"))))
+                except Exception:
+                    alpha = float("nan")
+                try:
+                    sigma = float(p.get("sigma", p.get("σ", float("nan"))))
+                except Exception:
+                    sigma = float("nan")
+                # Keep amplitude if available for later export
+                try:
+                    amp = float(p.get("amplitude", float("nan")))
+                except Exception:
+                    amp = float("nan")
+                cleaned.append({
+                    "amplitude": amp,
+                    "center": cen,
+                    "alpha": alpha,
+                    "sigma": sigma,
+                })
+            try:
+                FTIR_DataFrame.at[idx, "Time-Series Fit Results"] = cleaned
+            except Exception:
+                pass
 
     # -------------------------- Backend helpers --------------------------- #
     def _parse_deconv(val):
@@ -15056,14 +15438,13 @@ def fit_time_series(FTIR_DataFrame):
         except Exception:
             return False
 
-    # Compute only for the currently selected series (Material + Condition incl. unexposed)
-    def _compute_for_selection(material, condition, include_bad=False):
-        # Build the series subset
-        series_mask = (FTIR_DataFrame["Material"].astype(str) == str(material)) & (
-            (FTIR_DataFrame[cond_col].astype(str) == str(condition))
-            | FTIR_DataFrame[cond_col].apply(_is_unexposed)
-        )
-        series_df = FTIR_DataFrame[series_mask].copy()
+    # Compute only for the currently selected Material
+    def _compute_for_selection(material, include_bad=False):
+        # Build the series subset for the selected material
+        try:
+            series_df = FTIR_DataFrame[FTIR_DataFrame["Material"].astype(str) == str(material)].copy()
+        except Exception:
+            series_df = FTIR_DataFrame.copy()
         # Optionally exclude rows marked as bad quality
         if not include_bad:
             try:
@@ -15071,8 +15452,9 @@ def fit_time_series(FTIR_DataFrame):
             except Exception:
                 pass
         if series_df.empty:
-            print("No spectra found for the selected Material/Conditions.")
+            print("No spectra found for the selected material.")
             return
+
         # Collect deconvolution peak lists for this series
         peak_lists = []
         peak_lists_by_idx = {}
@@ -15081,156 +15463,274 @@ def fit_time_series(FTIR_DataFrame):
             if peaks is not None and len(peaks) > 0:
                 peak_lists.append(peaks)
                 peak_lists_by_idx[idx] = peaks
-        k = _mode_peak_count(peak_lists)
-        if k <= 0:
-            print("Selected series has no usable deconvolution results.")
-            return
-        centers = []
-        sigmas_l = []  # model sigma (Lorentzian width in lmfit PseudoVoigt)
-        fracs = []  # fraction (Lorentzian fraction) from lmfit
+
+        # Build canonical centers by clustering all peak centers across spectra
+        sigma_samples = []
+        all_centers = []
         for peaks in peak_lists:
-            if len(peaks) != k:
+            for p in peaks:
+                try:
+                    sval = float(p.get("sigma", np.nan))
+                    if np.isfinite(sval):
+                        sigma_samples.append(sval)
+                except Exception:
+                    pass
+                try:
+                    cval = float(p.get("center", p.get("center_wavenumber", np.nan)))
+                    if np.isfinite(cval):
+                        all_centers.append(cval)
+                except Exception:
+                    pass
+        try:
+            tol = float(np.nanmedian(sigma_samples)) if np.isfinite(np.nanmedian(sigma_samples)) else 8.0
+        except Exception:
+            tol = 8.0
+        try:
+            centers_sorted = sorted(set([float(c) for c in all_centers if np.isfinite(c)]))
+        except Exception:
+            centers_sorted = []
+        canonical_centers = []
+        for c in centers_sorted:
+            if not canonical_centers:
+                canonical_centers.append(c)
                 continue
+            if abs(c - canonical_centers[-1]) <= tol:
+                canonical_centers[-1] = (canonical_centers[-1] + c) / 2.0
+            else:
+                canonical_centers.append(c)
+        k = len(canonical_centers)
+        if k <= 0:
+            print("Could not establish canonical peaks for the series.")
+            return
+
+        # Align each spectrum to the canonical centers; add missing peaks with amplitude 0
+        aligned_by_idx = {}
+        for idx, peaks in peak_lists_by_idx.items():
+            aligned = [None] * k
+            used = set()
+            for i, ccan in enumerate(canonical_centers):
+                best_j = None
+                best_d = float("inf")
+                for j, p in enumerate(peaks):
+                    if j in used:
+                        continue
+                    try:
+                        cval = float(p.get("center", p.get("center_wavenumber", np.nan)))
+                    except Exception:
+                        cval = float("nan")
+                    if not np.isfinite(cval):
+                        continue
+                    d = abs(cval - ccan)
+                    if d < best_d:
+                        best_d = d
+                        best_j = j
+                if best_j is not None and best_d <= tol:
+                    aligned[i] = dict(peaks[best_j])
+                    used.add(best_j)
+                else:
+                    aligned[i] = {
+                        "amplitude": 0.0,
+                        "center": float(ccan),
+                        "alpha": 0.5,
+                        "sigma": float(np.nanmedian(sigma_samples)) if np.isfinite(np.nanmedian(sigma_samples)) else 10.0,
+                    }
+            aligned_by_idx[idx] = aligned
+
+        # Compute averages over aligned peaks
+        centers, sigmas, alphas = [], [], []
+        for idx, aligned in aligned_by_idx.items():
             try:
-                centers.append([float(p.get("center", np.nan)) for p in peaks])
-                sigmas_l.append([float(p.get("sigma", np.nan)) for p in peaks])
-                fracs.append([float(p.get("fraction", np.nan)) for p in peaks])
+                centers.append([float(p.get("center", p.get("center_wavenumber", np.nan))) for p in aligned])
+                sigmas.append([float(p.get("sigma", np.nan)) for p in aligned])
+                alphas.append([float(p.get("alpha", p.get("fraction", np.nan))) for p in aligned])
             except Exception:
                 continue
-        if not centers:
-            print("Selected series has inconsistent peak counts; cannot average.")
-            return
         centers = np.asarray(centers, dtype=float)
-        sigmas_l = np.asarray(sigmas_l, dtype=float)
-        fracs = np.asarray(fracs, dtype=float)
+        sigmas = np.asarray(sigmas, dtype=float)
+        alphas = np.asarray(alphas, dtype=float)
         with np.errstate(all="ignore"):
             avg_center = np.nanmean(centers, axis=0)
-            avg_sigma_l = np.nanmean(sigmas_l, axis=0)
-            avg_frac = np.nanmean(fracs, axis=0)
+            avg_sigma = np.nanmean(sigmas, axis=0)
+            avg_alpha = np.nanmean(alphas, axis=0)
         for i in range(k):
             if not np.isfinite(avg_center[i]):
                 vals = centers[:, i]
-                avg_center[i] = (
-                    np.nanmedian(vals) if np.isfinite(np.nanmedian(vals)) else 0.0
-                )
-            if not np.isfinite(avg_sigma_l[i]):
-                vals = sigmas_l[:, i]
-                avg_sigma_l[i] = (
-                    np.nanmedian(vals) if np.isfinite(np.nanmedian(vals)) else 10.0
-                )
-            if not np.isfinite(avg_frac[i]):
-                vals = fracs[:, i]
-                avg_frac[i] = (
-                    np.nanmedian(vals) if np.isfinite(np.nanmedian(vals)) else 0.5
-                )
-        # Optional average amplitude (for initial guesses only)
-        amps = []
-        for peaks in peak_lists:
-            if len(peaks) != k:
-                continue
-            try:
-                amps.append([float(p.get("amplitude", np.nan)) for p in peaks])
-            except Exception:
-                continue
-        avg_amp = None
-        if amps:
-            amps = np.asarray(amps, dtype=float)
-            with np.errstate(all="ignore"):
-                avg_amp = np.nanmean(amps, axis=0)
+                avg_center[i] = np.nanmedian(vals) if np.isfinite(np.nanmedian(vals)) else 0.0
+            if not np.isfinite(avg_sigma[i]):
+                vals = sigmas[:, i]
+                avg_sigma[i] = np.nanmedian(vals) if np.isfinite(np.nanmedian(vals)) else 10.0
+            if not np.isfinite(avg_alpha[i]):
+                vals = alphas[:, i]
+                avg_alpha[i] = np.nanmedian(vals) if np.isfinite(np.nanmedian(vals)) else 0.5
 
-        # Build fixed-parameter composite template for this series (center/sigma/fraction fixed)
-        def _build_model_with_fixed_params():
+        # Using averaged parameters, refit amplitudes per spectrum with lmfit.
+        assigned = 0
+        refit_logs = []  # collect per-spectrum status messages
+        for idx, aligned in aligned_by_idx.items():
+            try:
+                x_arr, y_arr = _parse_xy(series_df.loc[idx])
+            except Exception:
+                x_arr, y_arr = None, None
+            if (
+                x_arr is None
+                or y_arr is None
+                or np.asarray(x_arr).size == 0
+                or np.asarray(y_arr).size == 0
+            ):
+                # Fall back to preserving amplitudes when data unavailable
+                try:
+                    refit_logs.append(f"Row {idx}: no data available; preserved amplitudes.")
+                except Exception:
+                    pass
+                out = []
+                for i in range(k):
+                    try:
+                        amp = float(aligned[i].get("amplitude", 0.0))
+                    except Exception:
+                        amp = 0.0
+                    out.append({
+                        "amplitude": amp,
+                        "center": float(avg_center[i]),
+                        "alpha": float(avg_alpha[i]),
+                        "sigma_l": float(avg_sigma[i]),
+                        "sigma_g": float(avg_sigma[i]) / float(np.sqrt(2.0 * np.log(2.0))),
+                    })
+                try:
+                    FTIR_DataFrame.at[idx, "Time-Series Fit Results"] = out
+                    assigned += 1
+                except Exception:
+                    pass
+                continue
+
+            # Build composite model with fixed center/sigma/fraction and variable amplitudes
             comp_model = None
             params = None
             for i in range(k):
                 m = PseudoVoigtModel(prefix=f"p{i}_")
                 p = m.make_params()
                 p[f"p{i}_center"].set(value=float(avg_center[i]), vary=False)
-                # sigma in lmfit PseudoVoigt is Lorentzian width; store avg_sigma_l
-                p[f"p{i}_sigma"].set(
-                    value=float(avg_sigma_l[i]), min=1e-3, max=1e4, vary=False
-                )
-                p[f"p{i}_fraction"].set(
-                    value=float(avg_frac[i]), min=0.0, max=1.0, vary=False
-                )
-                p[f"p{i}_amplitude"].set(
-                    min=0.0,
-                    value=(
-                        float(avg_amp[i]) if isinstance(avg_amp, np.ndarray) else 1.0
-                    ),
-                )
+                p[f"p{i}_sigma"].set(value=float(avg_sigma[i]), min=1e-3, max=1e4, vary=False)
+                p[f"p{i}_fraction"].set(value=float(np.clip(avg_alpha[i], 0.0, 1.0)), min=0.0, max=1.0, vary=False)
+                # Seed amplitude from aligned peak or a heuristic
+                try:
+                    amp0 = float(aligned[i].get("amplitude", 1.0))
+                    if not np.isfinite(amp0):
+                        raise ValueError()
+                except Exception:
+                    # heuristic: local y at center times sigma scale
+                    try:
+                        ci = float(avg_center[i])
+                        nearest = int(np.argmin(np.abs(np.asarray(x_arr, dtype=float) - ci)))
+                        amp0 = max(0.0, float(np.asarray(y_arr, dtype=float)[nearest]) * max(1.0, float(avg_sigma[i])))
+                    except Exception:
+                        amp0 = 1.0
+                p[f"p{i}_amplitude"].set(value=max(0.0, amp0), min=0.0)
                 if comp_model is None:
                     comp_model = m
                     params = p
                 else:
                     comp_model = comp_model + m
                     params.update(p)
-            return comp_model, params
 
-        # Fit only amplitudes per spectrum in this selected series
-        fits_done = 0
-        for idx, row in series_df.iterrows():
-            x_arr, y_arr = _parse_xy(row)
-            if x_arr is None or y_arr is None or x_arr.size == 0:
-                continue
-            comp_model, params = _build_model_with_fixed_params()
-            peaks_row = _parse_deconv(row.get("Deconvolution Results"))
-            if isinstance(peaks_row, list) and len(peaks_row) == k:
-                for i in range(k):
-                    try:
-                        ai = float(
-                            peaks_row[i].get(
-                                "amplitude", params[f"p{i}_amplitude"].value
-                            )
-                        )
-                        params[f"p{i}_amplitude"].set(value=max(0.0, ai))
-                    except Exception:
-                        pass
-            else:
+            # Sanitize input arrays: drop non-finite points and ensure matching lengths
+            try:
+                x_np = np.asarray(x_arr, dtype=float)
+                y_np = np.asarray(y_arr, dtype=float)
+                n = min(x_np.size, y_np.size)
+                if n <= 1:
+                    raise ValueError("Insufficient data points for fitting")
+                x_np = x_np[:n]
+                y_np = y_np[:n]
+                mask = np.isfinite(x_np) & np.isfinite(y_np)
+                if not np.any(mask):
+                    raise ValueError("No finite data points for fitting")
+                x_np = x_np[mask]
+                y_np = y_np[mask]
+                # Log heavy sanitization
                 try:
-                    for i in range(k):
-                        ci = float(avg_center[i])
-                        nearest = int(np.argmin(np.abs(x_arr - ci)))
-                        ai0 = max(
-                            0.0, float(y_arr[nearest]) * max(1.0, float(avg_sigma_l[i]))
-                        )
-                        params[f"p{i}_amplitude"].set(value=ai0)
+                    removed = int(n - x_np.size)
+                    if removed > 0:
+                        refit_logs.append(f"Row {idx}: removed {removed} non-finite point(s) before fitting.")
                 except Exception:
                     pass
-            try:
-                result = comp_model.fit(y_arr, params, x=x_arr)
-            except Exception:
-                continue
-            out = []
-            try:
+                # Guard: centers outside x-range -> fix amplitude to 0 and do not vary
+                try:
+                    x_min_loc = float(np.nanmin(x_np))
+                    x_max_loc = float(np.nanmax(x_np))
+                except Exception:
+                    x_min_loc, x_max_loc = None, None
+                if x_min_loc is not None and x_max_loc is not None and np.isfinite(x_min_loc) and np.isfinite(x_max_loc):
+                    for i in range(k):
+                        try:
+                            ci = float(avg_center[i])
+                            if not (x_min_loc <= ci <= x_max_loc):
+                                # freeze amplitude to 0 for out-of-range peak
+                                params[f"p{i}_amplitude"].set(value=0.0, min=0.0, vary=False)
+                                refit_logs.append(
+                                    f"Row {idx}: center {ci:.6g} outside x-range [{x_min_loc:.6g}, {x_max_loc:.6g}] for Peak {i+1}; amplitude fixed to 0."
+                                )
+                        except Exception:
+                            pass
+                # Optional scale guard: clip extreme magnitudes to reduce numeric issues
+                y_range = float(np.nanmax(y_np) - np.nanmin(y_np)) if y_np.size else 0.0
+                if np.isfinite(y_range) and y_range > 0:
+                    y_np = np.clip(y_np, np.nanmin(y_np) - 10*y_range, np.nanmax(y_np) + 10*y_range)
+                res = comp_model.fit(y_np, params, x=x_np)
+                fit_list = []
                 for i in range(k):
-                    amp = float(result.params.get(f"p{i}_amplitude").value)
-                    sigma_l_val = float(avg_sigma_l[i])
-                    # alpha is the Lorentzian fraction (lmfit 'fraction')
-                    alpha_lorentz = float(avg_frac[i])
-                    # Compute Gaussian width from Lorentzian width: σg = σl / sqrt(2 ln 2)
                     try:
-                        sigma_g_val = sigma_l_val / float(np.sqrt(2.0 * np.log(2.0)))
+                        amp = float(res.params.get(f"p{i}_amplitude").value)
+                        if not np.isfinite(amp):
+                            amp = 0.0
                     except Exception:
-                        sigma_g_val = sigma_l_val
-                    out.append(
-                        {
-                            "amplitude": amp,  # A
-                            "center": float(avg_center[i]),
-                            "alpha": alpha_lorentz,  # Lorentzian fraction (same as lmfit 'fraction')
-                            "sigma_l": sigma_l_val,  # Lorentzian width
-                            "sigma_g": sigma_g_val,  # Derived Gaussian width
-                        }
-                    )
-                FTIR_DataFrame.at[idx, "Time-Series Fit Results"] = out
-                fits_done += 1
-            except Exception:
-                pass
-        print(
-            f"Time-series fit complete for selection (Material={material}, Condition={condition}). Fitted {fits_done} spectra."
-        )
+                        amp = 0.0
+                    fit_list.append({
+                        "amplitude": amp,
+                        "center": float(avg_center[i]),
+                        "alpha": float(avg_alpha[i]),
+                        "sigma_l": float(avg_sigma[i]),
+                        "sigma_g": float(avg_sigma[i]) / float(np.sqrt(2.0 * np.log(2.0)))
+                    })
+                FTIR_DataFrame.at[idx, "Time-Series Fit Results"] = fit_list
+                assigned += 1
+            except Exception as _fit_err:
+                # If fit fails, preserve amplitudes
+                try:
+                    refit_logs.append(f"Row {idx}: fit failed ({_fit_err}); preserved amplitudes.")
+                except Exception:
+                    pass
+                out = []
+                for i in range(k):
+                    try:
+                        amp = float(aligned[i].get("amplitude", 0.0))
+                    except Exception:
+                        amp = 0.0
+                    out.append({
+                        "amplitude": amp,
+                        "center": float(avg_center[i]),
+                        "alpha": float(avg_alpha[i]),
+                        "sigma_l": float(avg_sigma[i]),
+                        "sigma_g": float(avg_sigma[i]) / float(np.sqrt(2.0 * np.log(2.0)))
+                    })
+                try:
+                    FTIR_DataFrame.at[idx, "Time-Series Fit Results"] = out
+                    assigned += 1
+                except Exception:
+                    pass
 
-    def _optimize_centers_for_selection(material, condition, include_bad=False):
+        print(f"Averaged parameters applied and amplitudes refit for Material={material}. Updated {assigned} spectra.")
+        # Surface logs in the UI if available
+        try:
+            if refit_logs:
+                log_html = "<br/>".join([widgets.HTML.escape(str(m)) if hasattr(widgets.HTML, 'escape') else str(m) for m in refit_logs])
+                optimize_status_html.value = (
+                    "<div style='margin-top:6px'><b>Refit Status</b></div>"
+                    + f"<div style='color:#555'>{log_html}</div>"
+                )
+        except Exception:
+            pass
+
+    def _optimize_centers_for_selection(material, include_bad=False):
         """Iteratively optimize shared centers and per-spectrum amplitudes to reduce SSE.
 
         Approach:
@@ -15243,11 +15743,10 @@ def fit_time_series(FTIR_DataFrame):
         Returns a status message and the optimized centers list (or None on failure).
         """
         # Build series subset (Material matches; Conditions match or are 'unexposed')
-        series_mask = (FTIR_DataFrame["Material"].astype(str) == str(material)) & (
-            (FTIR_DataFrame[cond_col].astype(str) == str(condition))
-            | FTIR_DataFrame[cond_col].apply(_is_unexposed)
-        )
-        series_df = FTIR_DataFrame[series_mask].copy()
+        try:
+            series_df = FTIR_DataFrame[FTIR_DataFrame["Material"].astype(str) == str(material)].copy()
+        except Exception:
+            series_df = FTIR_DataFrame.copy()
         # Optionally exclude rows marked as bad quality
         if not include_bad:
             try:
@@ -15255,7 +15754,7 @@ def fit_time_series(FTIR_DataFrame):
             except Exception:
                 pass
         if series_df.empty:
-            return "No spectra found for the selected Material/Conditions.", None
+            return "No spectra found for the selected material.", None
 
         # Seed shared parameters from deconvolution results
         peak_lists = []
@@ -15579,7 +16078,7 @@ def fit_time_series(FTIR_DataFrame):
         return msg, cen_curr.tolist(), summary
 
     # ---------------------------- UI helpers ----------------------------- #
-    def _series_df(material_val, condition_val, include_bad=False):
+    def _series_df(material_val, include_bad=False):
         df = FTIR_DataFrame.copy()
         # Optionally exclude rows marked as bad quality
         if not include_bad:
@@ -15602,13 +16101,7 @@ def fit_time_series(FTIR_DataFrame):
             except Exception:
                 return False
 
-        try:
-            mask = (df[cond_col].astype(str) == str(condition_val)) | df[
-                cond_col
-            ].apply(_is_unexp)
-            df = df[mask]
-        except Exception:
-            pass
+        # No condition filtering; include all spectra of the material
         try:
             df = df.copy()
             df["_sort_time"] = pd.to_numeric(df.get("Time", np.nan), errors="coerce")
@@ -15768,28 +16261,6 @@ def fit_time_series(FTIR_DataFrame):
         dfm = dfm[dfm["Normalized and Corrected Data"].notna()]
     except Exception:
         pass
-    cond_vals = [
-        str(c)
-        for c in dfm.get(cond_col, pd.Series([], dtype=object))
-        .dropna()
-        .astype(str)
-        .unique()
-        .tolist()
-        if str(c).strip().lower() != "unexposed"
-    ]
-    cond_vals = sorted(cond_vals)
-    # Choose initial conditions from session defaults when available
-    default_condition = cond_vals[0] if cond_vals else None
-    try:
-        _sess_cond = str(_sess_defaults.get("conditions", "any"))  # reuse if set
-    except Exception:
-        _sess_cond = "any"
-    if _sess_cond in cond_vals:
-        default_condition = _sess_cond
-    if not cond_vals:
-        raise ValueError(
-            f"No non-unexposed {cond_col} values found for material '{default_material}'."
-        )
 
     material_dd = widgets.Dropdown(
         options=unique_materials,
@@ -15797,21 +16268,11 @@ def fit_time_series(FTIR_DataFrame):
         description="Material",
         layout=widgets.Layout(width="40%"),
     )
-    conditions_dd = widgets.Dropdown(
-        options=cond_vals,
-        value=(
-            default_condition
-            if default_condition is not None
-            else (cond_vals[0] if cond_vals else None)
-        ),
-        description="Conditions",
-        layout=widgets.Layout(width="40%"),
-    )
     fit_btn = widgets.Button(
-        description="Fit Time-Series",
+        description="Fit Material",
         button_style="primary",
         layout=widgets.Layout(width="180px"),
-        tooltip="Run time-series deconvolution for the selected Material/Conditions",
+        tooltip="Find parameter averages (preserving existing amplitudes) for the selected Material",
     )
     opt_btn = widgets.Button(
         description="Optimize",
@@ -15832,29 +16293,19 @@ def fit_time_series(FTIR_DataFrame):
     last_table_df = None  # areas
     last_centers_list = None  # wavenumbers (list[float])
 
-    fig = go.FigureWidget()
-    fig.update_layout(
-        title="Time-Series Fit",
-        xaxis_title="Wavenumber (cm⁻¹)",
-        yaxis_title="Absorbance (AU)",
-        legend_title_text="Series",
-    )
+    # Plotting removed per request; keep tables and controls only
 
     def _plot_series(
         material_val=None, condition_val=None, with_fits=False, include_bad=None
     ):
         nonlocal last_table_df, last_centers_list
-        try:
-            fig.data = ()
-        except Exception:
-            pass
+        # No plotting; only build tables and status
         if material_val is None:
             material_val = material_dd.value
-        if condition_val is None:
-            condition_val = conditions_dd.value
         if include_bad is None:
             include_bad = include_bad_cb.value
-        df_series = _series_df(material_val, condition_val, include_bad=include_bad)
+        # _series_df accepts (material_val, include_bad) — no conditions argument
+        df_series = _series_df(material_val, include_bad=include_bad)
         if df_series.empty:
             try:
                 status_html.value = (
@@ -15871,6 +16322,26 @@ def fit_time_series(FTIR_DataFrame):
             except Exception:
                 pass
             return
+        # Build a consistent color palette (blue → purple → red) based on time values,
+        # matching the gradient used in plot_spectra
+        time_values = []
+        try:
+            time_values = [
+                t for t in df_series.get("Time", pd.Series([], dtype=object)) if pd.notna(t)
+            ]
+        except Exception:
+            time_values = []
+        try:
+            time_values_unique = sorted(
+                {float(t) for t in time_values if str(t).strip() not in ("", "nan")}
+            )
+        except Exception:
+            # Fallback to string sorting
+            time_values_unique = sorted({str(t) for t in time_values})
+
+        def _time_to_color(val):
+            return _time_gradient_color(time_values_unique, val)
+
         # Only show final time-series fits (no raw data traces)
         has_any_fit = False
         for idx, row in df_series.iterrows():
@@ -15882,16 +16353,7 @@ def fit_time_series(FTIR_DataFrame):
             has_any_fit = True
             t_val = row.get("Time")
             name = f"T={t_val}"
-            try:
-                fig.add_scatter(
-                    x=x_f.tolist(),
-                    y=(y_fit.tolist() if hasattr(y_fit, "tolist") else list(y_fit)),
-                    mode="lines",
-                    name=f"Fit {name}",
-                    line=dict(width=2),
-                )
-            except Exception:
-                pass
+            # Plotting removed
         # Build/update wavenumbers (shared centers), sigmas, alphas table and amplitude table
         try:
             if with_fits and has_any_fit:
@@ -16053,9 +16515,17 @@ def fit_time_series(FTIR_DataFrame):
 
                 # Determine max number of peaks across available fits for areas table
                 k_max = 0
-                series_rows = []  # (label, amplitudes | None)
+                # Collect per-spectrum info for areas table: (time, conditions, amplitudes | None, notes)
+                series_rows = []
                 for _idx, _row in df_series.iterrows():
-                    label = f"T={_row.get('Time')}"
+                    t_val = _row.get("Time")
+                    # Prefer 'Conditions' else fallback to 'Condition'
+                    try:
+                        cond_val = _row.get("Conditions")
+                        if cond_val is None and "Condition" in _row.index:
+                            cond_val = _row.get("Condition")
+                    except Exception:
+                        cond_val = None
                     res = _row.get("Time-Series Fit Results")
                     if isinstance(res, str):
                         try:
@@ -16068,29 +16538,54 @@ def fit_time_series(FTIR_DataFrame):
                                 float(p.get("amplitude", float("nan"))) for p in res
                             ]
                             k_max = max(k_max, len(amps))
+                            # Notes: if all amplitudes are zero or non-finite, flag likely guard/sanitization
+                            try:
+                                finite_amps = [a for a in amps if np.isfinite(a)]
+                                if len(finite_amps) == 0:
+                                    notes = "no usable fit amplitudes; padded"
+                                elif all(abs(a) == 0.0 for a in finite_amps):
+                                    notes = "all amplitudes zero (guarded/sanitized)"
+                                else:
+                                    notes = ""
+                            except Exception:
+                                notes = ""
                         except Exception:
                             amps = None
                     else:
                         amps = None
-                    series_rows.append((label, amps))
+                        # If no fit list, row will be padded; add explanatory note
+                        notes = "no fit results; padded"
+                    series_rows.append((t_val, cond_val, amps, notes))
 
                 if k_max > 0:
                     try:
                         import pandas as pd  # local import safe here
 
                         table_records = []
-                        for label, amps in series_rows:
-                            rec = {"Series": label}
+                        for t_val, cond_val, amps, notes in series_rows:
+                            # Build record with Time, Conditions, Peaks..., Notes
+                            rec = {"Time": t_val if t_val is not None else ""}
+                            rec["Conditions"] = cond_val if cond_val is not None else ""
+                            # Pad missing amplitudes with zeros to keep table dense
+                            padded = []
+                            try:
+                                if isinstance(amps, list):
+                                    padded = amps[:k_max] + [0.0] * max(0, k_max - len(amps))
+                                else:
+                                    padded = [0.0] * k_max
+                            except Exception:
+                                padded = [0.0] * k_max
                             for i in range(k_max):
                                 val = ""
                                 try:
-                                    if amps is not None and i < len(amps):
-                                        a = amps[i]
-                                        if np.isfinite(a):
-                                            val = f"{a:.6g}"
+                                    a = float(padded[i])
+                                    if np.isfinite(a):
+                                        val = f"{a:.6g}"
                                 except Exception:
-                                    pass
+                                    val = ""
                                 rec[f"Peak {i+1}"] = val
+                            # Append Notes last to explain zero rows
+                            rec["Notes"] = notes if isinstance(notes, str) else ""
                             table_records.append(rec)
                         df_table = pd.DataFrame(table_records)
                         html = df_table.to_html(index=False, escape=False)
@@ -16106,12 +16601,13 @@ def fit_time_series(FTIR_DataFrame):
                     except Exception:
                         # Fallback manual HTML
                         header_cells = "".join(
-                            [f"<th>Series</th>"]
+                            ["<th>Time</th>", "<th>Conditions</th>"]
                             + [f"<th>Peak {i+1}</th>" for i in range(k_max)]
+                            + ["<th>Notes</th>"]
                         )
                         body_rows = []
-                        for label, amps in series_rows:
-                            cells = [f"<td>{label}</td>"]
+                        for t_val, cond_val, amps, notes in series_rows:
+                            cells = [f"<td>{t_val}</td>", f"<td>{cond_val if cond_val is not None else ''}</td>"]
                             for i in range(k_max):
                                 try:
                                     if (
@@ -16124,6 +16620,11 @@ def fit_time_series(FTIR_DataFrame):
                                         cells.append("<td></td>")
                                 except Exception:
                                     cells.append("<td></td>")
+                            # Notes cell
+                            try:
+                                cells.append(f"<td>{notes}</td>")
+                            except Exception:
+                                cells.append("<td></td>")
                             body_rows.append(f"<tr>{''.join(cells)}</tr>")
                         A_table_html.value = (
                             "<div style='margin-top:8px'><b>Peak Areas</b></div>"
@@ -16134,15 +16635,15 @@ def fit_time_series(FTIR_DataFrame):
                 else:
                     A_table_html.value = "<span style='color:#555;'>No fitted peaks available to tabulate for this selection.</span>"
             else:
-                A_table_html.value = "<span style='color:#555;'>Run 'Fit Time-Series' to populate the peak areas table.</span>"
-                WN_table_html.value = "<span style='color:#555;'>Run 'Fit Time-Series' to populate the peak parameters table.</span>"
+                A_table_html.value = "<span style='color:#555;'>Run 'Fit Material' to populate the peak areas table.</span>"
+                WN_table_html.value = "<span style='color:#555;'>Run 'Fit Material' to populate the peak parameters table.</span>"
         except Exception:
             pass
         try:
             status_html.value = (
-                "<span style='color:#555;'>Click 'Fit Time-Series' to compute and display fits for this selection.</span>"
+                "<span style='color:#555;'>Click 'Fit Material' to compute and display fits for this selection.</span>"
                 if not with_fits
-                else "<span style='color:#000;'>Displayed time-series fits (amplitudes vary; centers/σ/α shared).</span>"
+                else "<span style='color:#000;'>Displayed material fits (amplitudes vary; centers/σ/α shared).</span>"
             )
         except Exception:
             pass
@@ -16162,32 +16663,11 @@ def fit_time_series(FTIR_DataFrame):
             dfm2 = dfm2[dfm2["Normalized and Corrected Data"].notna()]
         except Exception:
             pass
-        new_conds = [
-            str(c)
-            for c in dfm2.get(cond_col, pd.Series([], dtype=object))
-            .dropna()
-            .astype(str)
-            .unique()
-            .tolist()
-            if str(c).strip().lower() != "unexposed"
-        ]
-        new_conds = sorted(new_conds)
         try:
-            conditions_dd.options = new_conds
-            if new_conds:
-                if conditions_dd.value not in new_conds:
-                    conditions_dd.value = new_conds[0]
-            _plot_series(
-                mat,
-                conditions_dd.value,
-                with_fits=False,
-                include_bad=include_bad_cb.value,
-            )
+            _plot_series(mat, with_fits=False, include_bad=include_bad_cb.value)
         except Exception:
             pass
-
-    def _on_conditions_change(*_):
-        _plot_series(with_fits=False)
+    
 
     def _on_fit_click(_b=None):
         try:
@@ -16197,9 +16677,7 @@ def fit_time_series(FTIR_DataFrame):
         except Exception:
             pass
         try:
-            _compute_for_selection(
-                material_dd.value, conditions_dd.value, include_bad=include_bad_cb.value
-            )
+            _compute_for_selection(material_dd.value, include_bad=include_bad_cb.value)
         except Exception as e:
             try:
                 status_html.value = f"<span style='color:#a00;'>Fit failed: {e}</span>"
@@ -16215,11 +16693,9 @@ def fit_time_series(FTIR_DataFrame):
             pass
 
         # Compute SSE for the current selection BEFORE optimization using current stored fits
-        def _series_sse(material_val, condition_val):
+        def _series_sse(material_val):
             try:
-                df_sel = _series_df(
-                    material_val, condition_val, include_bad=include_bad_cb.value
-                )
+                df_sel = _series_df(material_val, include_bad=include_bad_cb.value)
             except Exception:
                 return float("nan")
             total = 0.0
@@ -16249,12 +16725,12 @@ def fit_time_series(FTIR_DataFrame):
             return total if any_added else float("nan")
 
         try:
-            sse_before_calc = _series_sse(material_dd.value, conditions_dd.value)
+            sse_before_calc = _series_sse(material_dd.value)
         except Exception:
             sse_before_calc = float("nan")
         try:
             result = _optimize_centers_for_selection(
-                material_dd.value, conditions_dd.value, include_bad=include_bad_cb.value
+                material_dd.value, include_bad=include_bad_cb.value
             )
             # Backward compatibility if tuple size differs
             if isinstance(result, tuple) and len(result) == 3:
@@ -16278,9 +16754,7 @@ def fit_time_series(FTIR_DataFrame):
                 try:
                     # Compute SSE AFTER optimization using updated fits stored in the DataFrame
                     try:
-                        sse_after_calc = _series_sse(
-                            material_dd.value, conditions_dd.value
-                        )
+                        sse_after_calc = _series_sse(material_dd.value)
                     except Exception:
                         sse_after_calc = float("nan")
                     if summary is None:
@@ -16408,12 +16882,12 @@ def fit_time_series(FTIR_DataFrame):
         """Save per-row peak wavenumbers (centers), alphas (fractions), sigmas, and areas (amplitudes) into 'Time-Series Fit Results'."""
         try:
             mat = str(material_dd.value)
-            cond = str(conditions_dd.value)
+            cond = None
         except Exception:
             mat = "material"
             cond = "condition"
         # Build a fresh table to ensure we capture latest fits, independent of UI
-        df_series = _series_df(mat, cond, include_bad=include_bad_cb.value)
+        df_series = _series_df(mat, include_bad=include_bad_cb.value)
         if df_series.empty:
             try:
                 status_html.value = "<span style='color:#a00;'>Nothing to save for this selection.</span>"
@@ -16607,7 +17081,7 @@ def fit_time_series(FTIR_DataFrame):
                 status_html.value = f"<span style='color:#0a0;'>Saved per-row peak parameters to '{dest_col}' for {updated} row(s).</span>"
             except Exception:
                 pass
-            # --- JSON augmentation: add/update peak entries + unexposed A values --- #
+            # --- JSON update: save minimal peak info (center_wavenumber, σ, α) --- #
             try:
                 base_dir_js = os.path.dirname(__file__)
                 materials_json_path = os.path.join(base_dir_js, "materials.json")
@@ -16632,185 +17106,33 @@ def fit_time_series(FTIR_DataFrame):
                 code_key = _lookup_code(mat)
                 if code_key is not None:
                     mat_payload = _top.get(code_key, {})
-                    peaks_payload = mat_payload.get("peaks", {})
-                    # --- Derive unexposed peak amplitudes (average across any unexposed rows) ---
-                    unexposed_peak_amps = (
-                        []
-                    )  # length k_max; each entry corresponds to peak index
-                    try:
-                        # Build subset containing unexposed rows for this material present in the current df_series
-                        unexp_rows = (
-                            df_series[
-                                df_series[cond_col].astype(str).str.strip().str.lower()
-                                == "unexposed"
-                            ]
-                            if cond_col in df_series.columns
-                            else pd.DataFrame([])
-                        )
-                        amp_accum = (
-                            []
-                        )  # list of lists; each inner list amplitudes for a row (length k_max)
-                        for _u_idx, _u_row in unexp_rows.iterrows():
-                            _u_res = _u_row.get("Time-Series Fit Results")
-                            if isinstance(_u_res, str):
-                                try:
-                                    _u_res = ast.literal_eval(_u_res)
-                                except Exception:
-                                    _u_res = None
-                            if isinstance(_u_res, list) and len(_u_res) == k_max:
-                                try:
-                                    amp_list = [
-                                        float(p.get("amplitude", float("nan")))
-                                        for p in _u_res
-                                    ]
-                                except Exception:
-                                    amp_list = []
-                                if len(amp_list) == k_max:
-                                    amp_accum.append(amp_list)
-                        if amp_accum:
-                            # Average across rows, ignoring NaNs
-                            try:
-                                arr = np.asarray(amp_accum, dtype=float)
-                                with np.errstate(all="ignore"):
-                                    unexposed_peak_amps = [
-                                        (
-                                            float(np.nanmean(arr[:, i]))
-                                            if arr.shape[1] > i
-                                            and np.isfinite(np.nanmean(arr[:, i]))
-                                            else 0.0
-                                        )
-                                        for i in range(k_max)
-                                    ]
-                            except Exception:
-                                unexposed_peak_amps = [0.0] * k_max
-                        else:
-                            unexposed_peak_amps = [0.0] * k_max
-                    except Exception:
-                        unexposed_peak_amps = [0.0] * k_max
-                    # Determine how many peaks the time-series fit produced (k_max)
-                    # Ensure peak entries 1..k_max exist
+                    peaks_payload = {}
+                    # Build minimal peaks using centers_list, sigmas_list, fracs_list
                     for p_idx in range(1, k_max + 1):
-                        pk_key = str(p_idx)
-                        pk_entry = peaks_payload.get(pk_key)
-                        if not isinstance(pk_entry, dict):
-                            pk_entry = {}
-                        pk_entry.setdefault("name", "")
-                        # Preserve existing center_wavenumber if present; otherwise derive from first centers_list if available
                         try:
-                            if (
-                                "center_wavenumber" not in pk_entry
-                                and centers_list
-                                and p_idx - 1 < len(centers_list)
-                            ):
-                                pk_entry["center_wavenumber"] = float(
-                                    centers_list[p_idx - 1]
-                                )
+                            center = (
+                                float(centers_list[p_idx - 1])
+                                if centers_list and p_idx - 1 < len(centers_list)
+                                else 0.0
+                            )
+                            sigma = (
+                                float(sigmas_list[p_idx - 1])
+                                if sigmas_list and p_idx - 1 < len(sigmas_list)
+                                else 0.0
+                            )
+                            alpha = (
+                                float(fracs_list[p_idx - 1])
+                                if fracs_list and p_idx - 1 < len(fracs_list)
+                                else 0.0
+                            )
                         except Exception:
-                            pk_entry.setdefault("center_wavenumber", 0)
-                        # Maintain legacy keys for shape factors if already present
-                        pk_entry.setdefault("sg", 0)
-                        pk_entry.setdefault("sl", 0)
-                        pk_entry.setdefault("f", 0)
-                        # Ensure conditions mapping exists
-                        conds_entry = pk_entry.get("conditions")
-                        if not isinstance(conds_entry, dict):
-                            conds_entry = {}
-                        # Build or merge standard exposure conditions from cond_map-like info (use current DF selection rows)
-                        # Gather all condition names (excluding unexposed) present for this material in DF (filtered by normalized data availability)
-                        try:
-                            mat_rows = FTIR_DataFrame[
-                                FTIR_DataFrame["Material"].astype(str) == mat
-                            ]
-                        except Exception:
-                            mat_rows = FTIR_DataFrame
-                        try:
-                            mat_rows = mat_rows[
-                                mat_rows["Normalized and Corrected Data"].notna()
-                            ]
-                        except Exception:
-                            pass
-                        cond_names_all = sorted(
-                            {
-                                str(v)
-                                for v in mat_rows.get(
-                                    cond_col, pd.Series([], dtype=object)
-                                )
-                                .dropna()
-                                .astype(str)
-                                .unique()
-                                .tolist()
-                                if str(v).strip().lower() != "unexposed"
-                            }
-                        )
-                        # Merge each exposure condition: ensure it has time list & A list
-                        for c_name in cond_names_all:
-                            c_block = conds_entry.get(c_name)
-                            if not isinstance(c_block, dict):
-                                # Build times from DF subset
-                                try:
-                                    times_c = (
-                                        mat_rows[
-                                            mat_rows[cond_col].astype(str) == c_name
-                                        ]["Time"]
-                                        .dropna()
-                                        .astype(float)
-                                        .astype(int)
-                                        .sort_values()
-                                        .unique()
-                                        .tolist()
-                                    )
-                                except Exception:
-                                    times_c = []
-                                conds_entry[c_name] = {"time": times_c, "A": []}
-                            else:
-                                # Ensure keys exist
-                                c_block.setdefault("time", [])
-                                c_block.setdefault("A", [])
-                        # Update 'unexposed' structure (per-condition A values) using latest per-condition exposures
-                        unexp = conds_entry.get("unexposed")
-                        if not isinstance(unexp, dict):
-                            unexp = {"per-condition": {}, "final": {"A": []}}
-                        per_cond = unexp.get("per-condition")
-                        if not isinstance(per_cond, dict):
-                            per_cond = {}
-                        # Populate per-condition A values for this peak using derived unexposed amplitudes
-                        # Only update the currently selected condition; leave others as defaults/preserved values
-                        for c_name in cond_names_all:
-                            pc_entry = per_cond.get(c_name)
-                            if not isinstance(pc_entry, dict):
-                                per_cond[c_name] = {"A": []}
-                                pc_entry = per_cond[c_name]
-                            else:
-                                # Coerce legacy scalar to list
-                                if "A" not in pc_entry:
-                                    pc_entry["A"] = []
-                                elif not isinstance(pc_entry["A"], list):
-                                    pc_entry["A"] = (
-                                        [pc_entry["A"]]
-                                        if pc_entry["A"] is not None
-                                        else []
-                                    )
-                            if c_name == cond:
-                                amp_val = (
-                                    unexposed_peak_amps[p_idx - 1]
-                                    if (p_idx - 1) < len(unexposed_peak_amps)
-                                    else 0.0
-                                )
-                                # Always append latest amplitude value
-                                try:
-                                    pc_entry["A"].append(amp_val)
-                                except Exception:
-                                    pc_entry["A"] = [amp_val]
-                        # Preserve existing 'final' block but do not modify it here; a later function will populate it.
-                        final_block = unexp.get("final")
-                        if not isinstance(final_block, dict):
-                            final_block = {"A": []}
-                        # Intentionally do not append to 'final'["A"] in fit_time_series; handled by a later aggregation step.
-                        unexp["per-condition"] = per_cond
-                        unexp["final"] = final_block
-                        conds_entry["unexposed"] = unexp
-                        pk_entry["conditions"] = conds_entry
-                        peaks_payload[pk_key] = pk_entry
+                            center, sigma, alpha = 0.0, 0.0, 0.0
+                        peaks_payload[str(p_idx)] = {
+                            "name": "",
+                            "center_wavenumber": center,
+                            "σ": sigma,
+                            "α": alpha,
+                        }
                     mat_payload["peaks"] = peaks_payload
                     _top[code_key] = mat_payload
                     # Write back JSON
@@ -16841,18 +17163,17 @@ def fit_time_series(FTIR_DataFrame):
     def _on_close(_b=None):
         try:
             material_dd.close()
-            conditions_dd.close()
             fit_btn.close()
             close_btn.close()
             status_html.close()
             optimize_status_html.close()
             ui.close()
-            fig.close()
+            # No figure to close
         except Exception:
             pass
 
     def _refresh_materials_and_conditions():
-        """Recompute material and condition options based on include_bad toggle and current data."""
+        """Recompute material options based on include_bad toggle and current data."""
         try:
             df_opts_local = FTIR_DataFrame.copy()
             if not include_bad_cb.value:
@@ -16898,43 +17219,6 @@ def fit_time_series(FTIR_DataFrame):
                 material_dd.value = new_materials[0]
         except Exception:
             pass
-        # Update conditions based on current material
-        try:
-            mat = material_dd.value
-            dfm2 = FTIR_DataFrame[FTIR_DataFrame["Material"].astype(str) == str(mat)]
-        except Exception:
-            dfm2 = FTIR_DataFrame
-        if not include_bad_cb.value:
-            try:
-                dfm2 = dfm2[_quality_good_mask(dfm2)]
-            except Exception:
-                pass
-        try:
-            dfm2 = dfm2[dfm2["Normalized and Corrected Data"].notna()]
-        except Exception:
-            pass
-        new_conds = [
-            str(c)
-            for c in dfm2.get(cond_col, pd.Series([], dtype=object))
-            .dropna()
-            .astype(str)
-            .unique()
-            .tolist()
-            if str(c).strip().lower() != "unexposed"
-        ]
-        new_conds = sorted(new_conds)
-        try:
-            cur_cond = (
-                conditions_dd.value
-                if conditions_dd.value in getattr(conditions_dd, "options", [])
-                else None
-            )
-            conditions_dd.options = new_conds
-            if new_conds:
-                if cur_cond not in new_conds:
-                    conditions_dd.value = new_conds[0]
-        except Exception:
-            pass
         # Re-plot
         _plot_series(with_fits=False, include_bad=include_bad_cb.value)
 
@@ -16942,19 +17226,15 @@ def fit_time_series(FTIR_DataFrame):
         _refresh_materials_and_conditions()
 
     material_dd.observe(_on_material_change, names="value")
-    conditions_dd.observe(_on_conditions_change, names="value")
 
     # Persist Material/Conditions selections to session
     def _persist_ts_filters(_=None):
         try:
-            _set_session_selection(
-                material=material_dd.value, conditions=conditions_dd.value
-            )
+            _set_session_selection(material=material_dd.value)
         except Exception:
             pass
 
     material_dd.observe(_persist_ts_filters, names="value")
-    conditions_dd.observe(_persist_ts_filters, names="value")
     fit_btn.on_click(_on_fit_click)
     opt_btn.on_click(_on_optimize_click)
     include_bad_cb.observe(_on_include_bad_toggle, names="value")
@@ -16969,10 +17249,10 @@ def fit_time_series(FTIR_DataFrame):
     close_btn.on_click(_on_close)
 
     # Keep dropdowns/checkbox in one row; buttons in a separate row
-    controls = widgets.HBox([material_dd, conditions_dd, include_bad_cb])
+    controls = widgets.HBox([material_dd, include_bad_cb])
     buttons = widgets.HBox([fit_btn, opt_btn, save_btn, close_btn])
     ui = widgets.VBox([controls, buttons, status_html, optimize_status_html])
-    display(ui, fig, WN_table_html, A_table_html)
+    display(ui, WN_table_html, A_table_html)
     # Ensure options reflect current include_bad state
     _refresh_materials_and_conditions()
     _plot_series(with_fits=False, include_bad=include_bad_cb.value)
@@ -17262,621 +17542,4 @@ def display_DataFrame(FTIR_DataFrame, height: int = 500):
     display(ui)
     _render()
 
-    return FTIR_DataFrame
-
-
-# Inline DataFrame display removed. Use display_DataFrame(FTIR_DataFrame) to view the
-# table with scroll and filters inside a notebook environment.
-
-
-def fit_material(FTIR_DataFrame, materials_json_path=None):
-    if FTIR_DataFrame is None or not isinstance(FTIR_DataFrame, pd.DataFrame):
-        raise ValueError("Error: FTIR_DataFrame not defined. Load or Create DataFrame first.")
-    """
-    Aggregate time-series parameters across conditions for a selected material,
-    compute average alpha and center per peak, and plot the selected material/condition
-    time-series using these averaged parameters. Optionally overlay error (RMSE vs
-    normalized-and-corrected spectra) in red on a secondary y-axis.
-
-    Inputs
-    - FTIR_DataFrame: pd.DataFrame with columns:
-        - 'Material', 'Conditions' or 'Condition', 'Time'
-        - 'X-Axis', 'Normalized and Corrected Data'
-        - 'Time-Series Fit Results' (list[dict] per row with keys like 'amplitude', 'alpha', 'center')
-    - materials_json_path: Optional path to materials.json. If None, attempts to locate
-        Trenton_Project/materials.json relative to this file, else './materials.json'.
-
-    Outputs
-    - Displays interactive widgets and a plotly FigureWidget with:
-        - Primary y: peak area (A) vs time for each peak (uses per-row amplitudes)
-        - Secondary y: RMSE residual vs time (red), comparing aggregate model vs normalized data
-    """
-
-    # --- Helpers --- #
-    def _cond_col(df):
-        try:
-            if "Conditions" in df.columns:
-                return "Conditions"
-            if "Condition" in df.columns:
-                return "Condition"
-        except Exception:
-            pass
-        return None
-
-    def _safe_eval_list(val):
-        if isinstance(val, str):
-            try:
-                return ast.literal_eval(val)
-            except Exception:
-                return None
-        return val if isinstance(val, (list, tuple)) else None
-
-    def _get_json_path():
-        if materials_json_path and os.path.isfile(materials_json_path):
-            return materials_json_path
-        # Try alongside this file under Trenton_Project/materials.json
-        try:
-            here = os.path.dirname(__file__)
-            candidate = os.path.join(here, "materials.json")
-            if os.path.isfile(candidate):
-                return candidate
-        except Exception:
-            pass
-        # Fallback current working dir
-        if os.path.isfile("materials.json"):
-            return "materials.json"
-        return None
-
-    def _load_materials_json():
-        path = _get_json_path()
-        if not path:
-            return None, None
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                content = json.load(f)
-            return content, path
-        except Exception:
-            return None, path
-
-    def _map_material_name_to_code(json_content, name):
-        """Return (code_key, mat_payload) by matching 'name' or 'alias' to provided name."""
-        if json_content is None:
-            return None, None
-        # materials.json structure appears to be a list with a dict containing M001, M002, ...
-        try:
-            top = json_content
-            if isinstance(top, list) and top:
-                top = top[0]
-            if isinstance(top, dict):
-                for code_key, mat_payload in top.items():
-                    try:
-                        if not isinstance(mat_payload, dict):
-                            continue
-                        n = str(mat_payload.get("name", "")).strip()
-                        a = str(mat_payload.get("alias", "")).strip()
-                        if name.strip() in (n, a):
-                            return code_key, mat_payload
-                    except Exception:
-                        continue
-        except Exception:
-            pass
-        return None, None
-
-    def _get_json_peak_sigma(json_mat_payload, peak_idx):
-        """Return Gaussian sigma (σg) default for a peak index from JSON if available.
-        Looks for legacy 'sg' or unicode 'σg'. Fallback 10.0.
-        """
-        sigma = 10.0
-        try:
-            peaks = json_mat_payload.get("peaks", {})
-            pe = peaks.get(str(peak_idx), {})
-            sigma = float(pe.get("sg", pe.get("σg", sigma)))
-        except Exception:
-            pass
-        return sigma
-
-    def _get_json_peak_sigma_l(json_mat_payload, peak_idx):
-        """Return Lorentzian sigma (σl) for a peak from JSON if available.
-        Preference order: explicit 'sl' or 'σl'; else derive from 'sg'/'σg' via σl = σg * sqrt(2 ln 2).
-        Fallback 10.0.
-        """
-        sig_l = None
-        try:
-            peaks = json_mat_payload.get("peaks", {})
-            pe = peaks.get(str(peak_idx), {})
-            # Prefer explicit sigma_l
-            if "sl" in pe:
-                sig_l = float(pe.get("sl"))
-            elif "σl" in pe:
-                sig_l = float(pe.get("σl"))
-            else:
-                # Derive from sigma_g
-                if "sg" in pe or "σg" in pe:
-                    sg = float(pe.get("sg", pe.get("σg")))
-                    sig_l = float(sg * np.sqrt(2.0 * np.log(2.0)))
-        except Exception:
-            sig_l = None
-        if sig_l is None or not np.isfinite(sig_l):
-            return 10.0
-        return float(sig_l)
-
-    def _parse_tsf(row):
-        v = row.get("Time-Series Fit Results")
-        if isinstance(v, str):
-            try:
-                v = ast.literal_eval(v)
-            except Exception:
-                v = None
-        return v if isinstance(v, list) else None
-
-    def _avg_params(df_rows):
-        """Average alpha (Lorentz frac), center, sigma_g, sigma_l per peak index across provided rows.
-
-        Returns
-        -------
-        k_max : int
-            Maximum peak count across rows.
-        alpha_avg : list[float]
-            Averaged Gaussian fraction (alpha) per peak.
-        center_avg : list[float]
-            Averaged center wavenumber per peak.
-        sigma_g_avg : list[float]
-            Averaged Gaussian width per peak (sigma_g).
-        sigma_l_avg : list[float]
-            Averaged Lorentzian width per peak (sigma_l).
-        """
-        # Determine k_max as max length present
-        k_max = 0
-        parsed = []
-        for r in df_rows:
-            lst = _parse_tsf(r)
-            if isinstance(lst, list):
-                parsed.append(lst)
-                k_max = max(k_max, len(lst))
-        if k_max == 0:
-            return 0, [], [], [], []
-        alphas = [[] for _ in range(k_max)]
-        centers = [[] for _ in range(k_max)]
-        sigmas_g = [[] for _ in range(k_max)]
-        sigmas_l = [[] for _ in range(k_max)]
-        for lst in parsed:
-            for i in range(min(k_max, len(lst))):
-                p = lst[i] if isinstance(lst[i], dict) else {}
-                try:
-                    # Accept multiple spellings/keys; fit_time_series stores 'fraction'
-                    a = p.get("alpha")
-                    if a is None:
-                        a = p.get("α")
-                    if a is None:
-                        a = p.get("fraction")
-                    if a is None:
-                        a = p.get("f")
-                except Exception:
-                    a = None
-                try:
-                    c = p.get("center")
-                    if c is None:
-                        c = p.get("center_wavenumber")
-                except Exception:
-                    c = None
-                # Collect sigma_g / sigma_l (preferred) else derive from single width (sigma_l)
-                try:
-                    sg_val = p.get("sigma_g")
-                except Exception:
-                    sg_val = None
-                try:
-                    sl_val = p.get("sigma_l")
-                except Exception:
-                    sl_val = None
-                # Fallback: derive from single 'sigma' (Lorentzian) if component-specific widths missing
-                if sg_val is None or sl_val is None:
-                    try:
-                        base_sig = p.get("sigma")
-                        if base_sig is not None:
-                            base_sig = float(base_sig)
-                            if sl_val is None:
-                                sl_val = base_sig
-                            if sg_val is None:
-                                sg_val = base_sig / float(np.sqrt(2.0 * np.log(2.0)))
-                    except Exception:
-                        pass
-                if a is not None:
-                    try:
-                        aval = float(a)
-                        # Clamp to [0,1] just in case
-                        if aval < 0.0:
-                            aval = 0.0
-                        elif aval > 1.0:
-                            aval = 1.0
-                        alphas[i].append(aval)
-                    except Exception:
-                        pass
-                if c is not None:
-                    try:
-                        centers[i].append(float(c))
-                    except Exception:
-                        pass
-                if sg_val is not None:
-                    try:
-                        sigmas_g[i].append(float(sg_val))
-                    except Exception:
-                        pass
-                if sl_val is not None:
-                    try:
-                        sigmas_l[i].append(float(sl_val))
-                    except Exception:
-                        pass
-        alpha_avg = [float(np.nanmean(v)) if v else 0.5 for v in alphas]
-        center_avg = [float(np.nanmean(v)) if v else 0.0 for v in centers]
-        sigma_g_avg = [float(np.nanmean(v)) if v else float("nan") for v in sigmas_g]
-        sigma_l_avg = [float(np.nanmean(v)) if v else float("nan") for v in sigmas_l]
-        return k_max, alpha_avg, center_avg, sigma_g_avg, sigma_l_avg
-
-    def _get_unexposed_A_from_json(json_content, material_name, condition_name, k_max):
-        """Return list of unexposed A values per peak for selected material and condition.
-        Picks the last entry per A list; returns list length k_max (missing -> 0.0)."""
-        if json_content is None:
-            return [0.0] * k_max
-        code_key, mat_payload = _map_material_name_to_code(json_content, material_name)
-        if mat_payload is None:
-            return [0.0] * k_max
-        peaks = mat_payload.get("peaks", {})
-        out = []
-        for i in range(1, k_max + 1):
-            pk = peaks.get(str(i), {})
-            conds = pk.get("conditions", {})
-            unexp = conds.get("unexposed", {})
-            per_cond = unexp.get("per-condition", {}) if isinstance(unexp, dict) else {}
-            a_list = []
-            try:
-                ent = per_cond.get(str(condition_name), {})
-                a_list = ent.get("A", []) if isinstance(ent, dict) else []
-                if not isinstance(a_list, list):
-                    a_list = [a_list]
-            except Exception:
-                a_list = []
-            out.append(float(a_list[-1]) if a_list else 0.0)
-        return out
-
-    def _build_model_y(
-        x, amps, alpha_avg, center_avg, json_mat_payload, sigma_l_avg=None
-    ):
-        """
-        Sum of pseudo-Voigt components using per-time amplitudes and averaged alpha/center.
-        - alpha parameter is Lorentzian fraction (same as lmfit PseudoVoigt 'fraction')
-        - sigma uses averaged σl (Lorentzian) when available; else derive from JSON
-          (prefer σl if present; else compute from σg via σl = σg * sqrt(2 ln 2)); fallback 10.0
-        Returns array y_pred (same length as x) or None if x invalid.
-        """
-        if x is None or len(x) == 0:
-            return None
-        x_arr = np.asarray(x, dtype=float)
-        y_sum = np.zeros_like(x_arr, dtype=float)
-        k_max_local = min(len(amps or []), len(alpha_avg), len(center_avg))
-        for i in range(k_max_local):
-            try:
-                amp = float(amps[i]) if i < len(amps) else 0.0
-            except Exception:
-                amp = 0.0
-            if not np.isfinite(amp) or amp == 0:
-                continue
-            # Determine sigma preference: averaged sigma_l else JSON-derived σl fallback
-            if (
-                isinstance(sigma_l_avg, (list, tuple))
-                and i < len(sigma_l_avg)
-                and np.isfinite(sigma_l_avg[i])
-            ):
-                sigma = float(sigma_l_avg[i])
-            else:
-                sigma = (
-                    _get_json_peak_sigma_l(json_mat_payload, i + 1)
-                    if json_mat_payload
-                    else 10.0
-                )
-            # Lorentzian fraction is alpha
-            frac_lorentz = float(alpha_avg[i] if i < len(alpha_avg) else 0.5)
-            center = float(center_avg[i] if i < len(center_avg) else 0.0)
-            try:
-                m = PseudoVoigtModel(prefix=f"p{i}_")
-                pars = m.make_params()
-                pars[f"p{i}_amplitude"].set(value=amp, min=0)
-                pars[f"p{i}_center"].set(value=center)
-                pars[f"p{i}_sigma"].set(value=max(sigma, 1e-6), min=1e-6)
-                pars[f"p{i}_fraction"].set(value=np.clip(frac_lorentz, 0.0, 1.0))
-                y_sum = y_sum + m.eval(pars, x=x_arr)
-            except Exception:
-                # Fallback simple Gaussian
-                try:
-                    gauss = amp * np.exp(
-                        -0.5 * ((x_arr - center) / max(sigma, 1e-6)) ** 2
-                    )
-                    y_sum = y_sum + gauss
-                except Exception:
-                    pass
-        return y_sum
-
-    # --- UI setup --- #
-    cond_col = _cond_col(FTIR_DataFrame)
-    if cond_col is None:
-        raise KeyError("Conditions/Condition column not found in DataFrame")
-
-    # Materials and conditions lists
-    try:
-        materials = sorted(
-            [
-                str(v)
-                for v in FTIR_DataFrame["Material"]
-                .dropna()
-                .astype(str)
-                .unique()
-                .tolist()
-            ]
-        )
-    except Exception:
-        materials = []
-    mat_dd = widgets.Dropdown(options=materials or [""], description="Material:")
-
-    def _condition_options(mat):
-        try:
-            dfm = FTIR_DataFrame[FTIR_DataFrame["Material"].astype(str) == str(mat)]
-            conds = [
-                str(v)
-                for v in dfm.get(cond_col, pd.Series([], dtype=object))
-                .dropna()
-                .astype(str)
-                .unique()
-                .tolist()
-            ]
-            conds = sorted([c for c in conds if c.strip().lower() != "unexposed"])
-            return conds or [""]
-        except Exception:
-            return [""]
-
-    cond_dd = widgets.Dropdown(
-        options=_condition_options(materials[0] if materials else ""),
-        description="Condition:",
-    )
-    show_err_cb = widgets.Checkbox(value=False, description="Show error")
-    status_html = widgets.HTML(value="")
-
-    fig = make_subplots(specs=[[{"secondary_y": True}]])
-    fig.update_layout(height=500, margin=dict(l=40, r=40, t=40, b=40))
-    figw = go.FigureWidget(fig)
-    # Table output for averaged parameters (updates on each replot)
-    avg_params_out = widgets.Output(
-        layout=widgets.Layout(
-            border="1px solid #ccc", padding="4px", max_height="220px", overflow="auto"
-        )
-    )
-
-    json_content, json_path = _load_materials_json()
-
-    def _replot(*_):
-        mat = str(mat_dd.value)
-        cond = str(cond_dd.value)
-        if not mat or not cond:
-            status_html.value = (
-                "<span style='color:#a00;'>Select a material and condition.</span>"
-            )
-            with figw.batch_update():
-                figw.data = []
-            with avg_params_out:
-                avg_params_out.clear_output()
-                print("No selection.")
-            return
-
-        # Filter rows for selection and valid normalized data + TSF results
-        try:
-            subset = FTIR_DataFrame[
-                (FTIR_DataFrame["Material"].astype(str) == mat)
-                & (FTIR_DataFrame[cond_col].astype(str) == cond)
-            ].copy()
-        except Exception:
-            subset = FTIR_DataFrame.iloc[0:0].copy()
-
-        try:
-            subset = subset.dropna(
-                subset=["Normalized and Corrected Data"]
-            )  # require y
-        except Exception:
-            pass
-        if subset.empty:
-            status_html.value = f"<span style='color:#a00;'>No rows found for {mat} / {cond} with normalized data.</span>"
-            with figw.batch_update():
-                figw.data = []
-            return
-
-        subset = subset.sort_values(by="Time", kind="mergesort")
-
-        # Compute averaged parameters across ALL conditions for this material
-        try:
-            mat_rows_all = FTIR_DataFrame[FTIR_DataFrame["Material"].astype(str) == mat]
-        except Exception:
-            mat_rows_all = subset
-        k_max, alpha_avg, center_avg, sigma_g_avg, sigma_l_avg = _avg_params(
-            [r for _, r in mat_rows_all.iterrows()]
-        )
-        if k_max == 0:
-            status_html.value = "<span style='color:#a00;'>No time-series fit results found to average.</span>"
-            with figw.batch_update():
-                figw.data = []
-            with avg_params_out:
-                avg_params_out.clear_output()
-                print("No averaged parameters available.")
-            return
-
-        # Get JSON material payload (for sigma, and unexposed As)
-        json_mat_code, json_mat_payload = _map_material_name_to_code(json_content, mat)
-
-        # Build amplitude vs time for each peak; include unexposed A at t=0 from JSON if available
-        times = subset.get("Time", pd.Series([], dtype=float)).astype(float).tolist()
-        tsf_parsed = [_parse_tsf(r) for _, r in subset.iterrows()]
-        amps_by_peak = [[] for _ in range(k_max)]
-        for lst in tsf_parsed:
-            if not isinstance(lst, list) or not lst:
-                for i in range(k_max):
-                    amps_by_peak[i].append(0.0)
-                continue
-            for i in range(k_max):
-                v = 0.0
-                if i < len(lst) and isinstance(lst[i], dict):
-                    try:
-                        v = float(lst[i].get("amplitude", 0.0))
-                    except Exception:
-                        v = 0.0
-                amps_by_peak[i].append(v)
-
-        # Prepend unexposed point at t=0
-        unexp_As = _get_unexposed_A_from_json(json_content, mat, cond, k_max)
-        times_with_unexp = [0.0] + times
-        amps_with_unexp = [[unexp_As[i]] + amps_by_peak[i] for i in range(k_max)]
-
-        # Compute error (RMSE across wavenumber) per time using averaged params
-        err_times = []
-        err_vals = []
-        if show_err_cb.value:
-            for (idx, row), lst in zip(subset.iterrows(), tsf_parsed):
-                x = _safe_eval_list(row.get("X-Axis"))
-                y = _safe_eval_list(row.get("Normalized and Corrected Data"))
-                if x is None or y is None:
-                    continue
-                # Per-time amplitudes for peaks
-                amps = []
-                if isinstance(lst, list):
-                    for i in range(k_max):
-                        try:
-                            amps.append(
-                                float(lst[i].get("amplitude", 0.0))
-                                if i < len(lst)
-                                else 0.0
-                            )
-                        except Exception:
-                            amps.append(0.0)
-                y_pred = _build_model_y(
-                    np.asarray(x, dtype=float),
-                    amps,
-                    alpha_avg,
-                    center_avg,
-                    json_mat_payload or {},
-                    sigma_l_avg,
-                )
-                if y_pred is None:
-                    continue
-                try:
-                    resid = np.asarray(y, dtype=float) - np.asarray(y_pred, dtype=float)
-                    rmse = float(np.sqrt(np.nanmean(resid**2)))
-                    err_times.append(float(row.get("Time", np.nan)))
-                    err_vals.append(rmse)
-                except Exception:
-                    pass
-
-        # Build averaged parameter table (Peak, Center, α (Lorentz), σl(avg), σg(avg), σl(JSON fallback))
-        try:
-            # Fetch JSON material payload once (already computed above)
-            rows_df = []
-            for i in range(k_max):
-                try:
-                    sigma_json_l = (
-                        _get_json_peak_sigma_l(json_mat_payload, i + 1)
-                        if json_mat_payload
-                        else 10.0
-                    )
-                except Exception:
-                    sigma_json_l = 10.0
-                a_val = float(alpha_avg[i]) if i < len(alpha_avg) else 0.5
-                c_val = float(center_avg[i]) if i < len(center_avg) else 0.0
-                sg_avg = sigma_g_avg[i] if i < len(sigma_g_avg) else float("nan")
-                sl_avg = sigma_l_avg[i] if i < len(sigma_l_avg) else float("nan")
-                rows_df.append(
-                    {
-                        "Peak": i + 1,
-                        "Center (cm⁻¹)": round(c_val, 4),
-                        "α (Lorentz frac)": round(a_val, 4),
-                        "σl (avg)": (
-                            round(float(sl_avg), 4) if np.isfinite(sl_avg) else ""
-                        ),
-                        "σg (avg)": (
-                            round(float(sg_avg), 4) if np.isfinite(sg_avg) else ""
-                        ),
-                        "σl (JSON fallback)": round(float(sigma_json_l), 4),
-                    }
-                )
-            df_avg = pd.DataFrame(rows_df)
-        except Exception:
-            df_avg = None
-        with avg_params_out:
-            avg_params_out.clear_output()
-            if df_avg is not None and not df_avg.empty:
-                display(df_avg)
-            else:
-                print("Averaged parameter table unavailable.")
-
-        # Plot
-        with figw.batch_update():
-            figw.data = []
-            # Amplitude traces (primary y)
-            for i in range(k_max):
-                figw.add_trace(
-                    go.Scatter(
-                        x=times_with_unexp,
-                        y=amps_with_unexp[i],
-                        mode="lines+markers",
-                        name=f"Peak {i+1} A",
-                    ),
-                    secondary_y=False,
-                )
-            # Error trace (secondary y)
-            if show_err_cb.value and err_times and err_vals:
-                figw.add_trace(
-                    go.Scatter(
-                        x=err_times,
-                        y=err_vals,
-                        mode="lines+markers",
-                        name="RMSE (model vs normalized)",
-                        line=dict(color="red"),
-                        marker=dict(color="red"),
-                    ),
-                    secondary_y=True,
-                )
-            figw.update_layout(
-                title=f"Material: {mat} | Condition: {cond} | Averaged α & centers applied",
-                xaxis_title="Time (h)",
-                yaxis_title="Area (A)",
-            )
-            figw.update_yaxes(title_text="Area (A)", secondary_y=False)
-            figw.update_yaxes(title_text="RMSE", secondary_y=True)
-
-        try:
-            nrows = mat_rows_all.shape[0]
-        except Exception:
-            nrows = 0
-        status_html.value = (
-            f"<span style='color:#060;'>Averaged across {nrows} rows; k={k_max} peaks. "
-            + (
-                f"materials.json: {json_path}"
-                if json_path
-                else "materials.json not found; used defaults."
-            )
-            + "</span>"
-        )
-
-    def _on_material_change(change):
-        cond_dd.options = (
-            _condition_options(change["new"])
-            if isinstance(change, dict)
-            else _condition_options(mat_dd.value)
-        )
-        if cond_dd.options:
-            cond_dd.value = cond_dd.options[0]
-        _replot()
-
-    mat_dd.observe(lambda ch: _on_material_change(ch), names="value")
-    cond_dd.observe(lambda ch: _replot(), names="value")
-    show_err_cb.observe(lambda ch: _replot(), names="value")
-
-    controls = widgets.HBox([mat_dd, cond_dd, show_err_cb])
-    ui = widgets.VBox([controls, avg_params_out, figw, status_html])
-    display(ui)
-    # Initial draw
-    _replot()
     return FTIR_DataFrame
