@@ -44,27 +44,39 @@ def _debug_log(msg: str):
         try:
             msg = str(msg)
         except Exception:
-            return
-    try:
-        _DECONV_DEBUG_LOG.append(msg)
-        if len(_DECONV_DEBUG_LOG) > 10000:
-            _DECONV_DEBUG_LOG[:] = _DECONV_DEBUG_LOG[-8000:]
-    except Exception:
-        pass
-    if DECONV_DEBUG:
-        try:
-            print(msg)
-        except Exception:
-            pass
-
-def enable_deconv_debug(flag: bool = True, *, verbose: bool = True):
-    global DECONV_DEBUG
-    try:
-        DECONV_DEBUG = bool(flag)
-        if verbose:
+            if (
+                y_fit is None
+                or y is None
+                or x is None
+                or len(y) != len(x)
+                or len(y_fit) != len(x)
+            ):
+                if tsfr in (None, "", [], {}):
+                    note = note or "Fit not ran"
+                else:
+                    note = note or "unusable fit"
+                err = np.inf
+            else:
+                arr_y = np.array(y, dtype=float)
+                arr_fit = np.array(y_fit, dtype=float)
+                dif = arr_y - arr_fit
+                # Reduced Chi-Square: chi2 / dof, where dof = N - m
+                N = float(arr_y.size)
+                # Estimate m as parameters used per component (amplitude, center, sigma, fraction)
+                try:
+                    m = 0.0
+                    if isinstance(tsfr, list):
+                        m = float(sum(1 for comp in tsfr if isinstance(comp, dict)) * 4)
+                    elif isinstance(tsfr, dict):
+                        # If direct fit vector provided, assume minimal parameters
+                        m = 1.0
+                except Exception:
+                    m = 0.0
+                dof = max(N - m, 1.0)
+                chi2 = float(np.sum(dif ** 2))
+                err = chi2 / dof
             print(f"Deconvolution debug {'ENABLED' if DECONV_DEBUG else 'DISABLED'}")
-    except Exception:
-        pass
+    pass
 
 def _lazy_debug(msg: str):
     try:
@@ -91,6 +103,26 @@ class _LazyModePlaceholder(_LazyPlaceholder):
 # same references during a deconvolution session.
 peak_box_cache = {}
 peak_accordion = None
+
+def migrate_fit_results_column(FTIR_DataFrame):
+    """Rename the old 'Time-Series Fit Results' column to 'Material Fit Results'.
+
+    - Creates the new column if the old exists; preserves data.
+    - Removes the old column if present after migration.
+    - Returns the updated DataFrame.
+    """
+    if FTIR_DataFrame is None or not isinstance(FTIR_DataFrame, pd.DataFrame):
+        raise ValueError("FTIR_DataFrame must be a pandas DataFrame.")
+    old = "Time-Series Fit Results"
+    new = "Material Fit Results"
+    try:
+        if old in FTIR_DataFrame.columns and new not in FTIR_DataFrame.columns:
+            FTIR_DataFrame[new] = FTIR_DataFrame[old]
+        if old in FTIR_DataFrame.columns:
+            FTIR_DataFrame.drop(columns=[old], inplace=True)
+    except Exception:
+        pass
+    return FTIR_DataFrame
 
 def _ensure_cache_from_accordion(idx: int):
     """Module-level fallback to sync a peak's cache entry from accordion widgets.
@@ -740,7 +772,7 @@ def extract_file_info(
         "Peak Wavenumbers",
         "Peak Absorbances",
         "Deconvolution Results",
-        "Time-Series Fit Results",
+        "Material Fit Results",
     ]
     for column in required_columns:
         if column not in FTIR_DataFrame.columns:
@@ -833,7 +865,7 @@ def extract_file_info(
         FTIR_DataFrame["Deconvolution Results"] = FTIR_DataFrame[
             "Deconvolution Results"
         ].apply(_to_dict)
-    if "Time-Series Fit Results" in FTIR_DataFrame.columns:
+    if "Material Fit Results" in FTIR_DataFrame.columns:
 
         def _to_dict(val):
             if isinstance(val, dict) or pd.isnull(val):
@@ -847,8 +879,8 @@ def extract_file_info(
                     pass
             return val
 
-        FTIR_DataFrame["Time-Series Fit Results"] = FTIR_DataFrame[
-            "Time-Series Fit Results"
+        FTIR_DataFrame["Material Fit Results"] = FTIR_DataFrame[
+            "Material Fit Results"
         ].apply(_to_dict)
     # Float columns
     if "Normalization Peak Wavenumber" in FTIR_DataFrame.columns:
@@ -1039,7 +1071,7 @@ def extract_file_info(
             "Peak Wavenumbers",
             "Peak Absorbances",
             "Deconvolution Results",
-            "Time-Series Fit Results",
+            "Material Fit Results",
         ]
         ordered = [c for c in desired_order if c in existing_cols]
         others = [c for c in existing_cols if c not in ordered]
@@ -1388,6 +1420,11 @@ def _emit_session_summary(target, lines, *, title: str = "Session Summary"):
         pass
 
 
+# Alias to match universal helper naming used across tools
+def _emit_function_summary(target, lines, *, title: str = "Session Summary"):
+    return _emit_session_summary(target, lines, title=title)
+
+
 # ----------------------- Session selection persistence ----------------------- #
 # Persist last-used selections across interactive tools within this module.
 _SESSION_SELECTIONS = {"material": "any", "conditions": "any", "time": "any"}
@@ -1423,7 +1460,7 @@ _PLOT_SPECTRA_SESSION_CHANGES = None  # type: ignore[var-annotated]
 
 
 # ----------------------- Reusable Quality Button Helper ----------------------- #
-def _make_quality_controls(df, row_getter, *, margin="10px 10px 0 0"):
+def _make_quality_controls(df, row_getter, *, margin="10px 10px 0 0", status_out=None):
     """Return mutually exclusive quality buttons ("Mark spectrum as bad" / "Mark spectrum as good").
 
     Parameters
@@ -1505,6 +1542,14 @@ def _make_quality_controls(df, row_getter, *, margin="10px 10px 0 0"):
                 return
             qcol = _quality_col()
             df.at[row.name, qcol] = status
+        except Exception:
+            pass
+        # Optional persistent status output
+        try:
+            if status_out is not None:
+                from IPython.display import display as _ipd  # noqa: F401
+                with status_out:
+                    print(f"Marked index {getattr(row, 'name', 'row')} as {status}.")
         except Exception:
             pass
         refresh()
@@ -2495,6 +2540,25 @@ def plot_spectra(
                                     valid.append(False)
                             return pd.Series(valid, index=vals.index)
 
+                        def _valid_mask_for_deconv(df):
+                            # Specialized validation for 'Deconvolution Results': expect a non-empty list
+                            if df is None or len(df) == 0:
+                                return pd.Series([False] * (0 if df is None else len(df)))
+                            if "Deconvolution Results" not in df.columns:
+                                return pd.Series([False] * len(df), index=df.index)
+                            vals = df["Deconvolution Results"]
+                            valid = []
+                            for v in vals:
+                                obj = v
+                                if isinstance(obj, str):
+                                    try:
+                                        obj = ast.literal_eval(obj)
+                                    except Exception:
+                                        obj = None
+                                ok = isinstance(obj, list) and len(obj) > 0
+                                valid.append(bool(ok))
+                            return pd.Series(valid, index=vals.index)
+
                         # Build filtered subset for validation using current UI selections
                         try:
                             m_val = _materials_value()
@@ -2582,7 +2646,7 @@ def plot_spectra(
                                 validation_errors.append(
                                     "You need to normalize the spectra before this will be available for plotting."
                                 )
-                            if tr_deconv and not _valid_mask_for_col(filtered_val, "Deconvolution Results").any():
+                            if tr_deconv and not _valid_mask_for_deconv(filtered_val).any():
                                 validation_errors.append(
                                     "You need to deconvolute peaks before the deconvolution fit will be available for plotting."
                                 )
@@ -3048,6 +3112,25 @@ def plot_spectra(
                 valid.append(False)
         return pd.Series(valid, index=vals.index)
 
+    def _valid_mask_for_deconv(df):
+        # Specialized validation for 'Deconvolution Results': expect a non-empty list
+        if df is None or len(df) == 0:
+            return pd.Series([False] * (0 if df is None else len(df)))
+        if "Deconvolution Results" not in df.columns:
+            return pd.Series([False] * len(df), index=df.index)
+        vals = df["Deconvolution Results"]
+        valid = []
+        for v in vals:
+            obj = v
+            if isinstance(obj, str):
+                try:
+                    obj = ast.literal_eval(obj)
+                except Exception:
+                    obj = None
+            ok = isinstance(obj, list) and len(obj) > 0
+            valid.append(bool(ok))
+        return pd.Series(valid, index=vals.index)
+
     noninteractive_validation_errors = []
     try:
         if baseline and not _valid_mask_for_col(filtered_data, "Baseline").any():
@@ -3062,7 +3145,7 @@ def plot_spectra(
             noninteractive_validation_errors.append(
                 "You need to normalize the spectra before this will be available for plotting."
             )
-        if deconv_fit and not _valid_mask_for_col(filtered_data, "Deconvolution Results").any():
+        if deconv_fit and not _valid_mask_for_deconv(filtered_data).any():
             noninteractive_validation_errors.append(
                 "You need to deconvolute peaks before the deconvolution fit will be available for plotting."
             )
@@ -11945,8 +12028,6 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                 _finish_fit_guard()
                 return
 
-        # (Moved) Param seed capture will occur AFTER re-sync & deep traversal.
-
         # Re-sync slider references ONLY with fully materialized widgets.
         # Previous logic overwrote real user-modified slider widgets with lazy placeholders,
         # causing fits to ignore recent UI changes. We now preserve existing lists unless
@@ -15212,7 +15293,7 @@ def fit_material(FTIR_DataFrame):
         "Deconvolution Results",
         "X-Axis",
         "Normalized and Corrected Data",
-        "Time-Series Fit Results",
+        "Material Fit Results",
     ]
     missing = [c for c in required_cols if c not in FTIR_DataFrame.columns]
     if missing:
@@ -15221,8 +15302,8 @@ def fit_material(FTIR_DataFrame):
         )
 
     try:
-        FTIR_DataFrame["Time-Series Fit Results"] = FTIR_DataFrame[
-            "Time-Series Fit Results"
+        FTIR_DataFrame["Material Fit Results"] = FTIR_DataFrame[
+            "Material Fit Results"
         ].astype(object)
     except Exception:
         pass
@@ -15366,7 +15447,7 @@ def fit_material(FTIR_DataFrame):
                     "sigma": sigma,
                 })
             try:
-                FTIR_DataFrame.at[idx, "Time-Series Fit Results"] = cleaned
+                FTIR_DataFrame.at[idx, "Material Fit Results"] = cleaned
             except Exception:
                 pass
 
@@ -15596,7 +15677,7 @@ def fit_material(FTIR_DataFrame):
                         "sigma_g": float(avg_sigma[i]) / float(np.sqrt(2.0 * np.log(2.0))),
                     })
                 try:
-                    FTIR_DataFrame.at[idx, "Time-Series Fit Results"] = out
+                    FTIR_DataFrame.at[idx, "Material Fit Results"] = out
                     assigned += 1
                 except Exception:
                     pass
@@ -15691,7 +15772,7 @@ def fit_material(FTIR_DataFrame):
                         "sigma_l": float(avg_sigma[i]),
                         "sigma_g": float(avg_sigma[i]) / float(np.sqrt(2.0 * np.log(2.0)))
                     })
-                FTIR_DataFrame.at[idx, "Time-Series Fit Results"] = fit_list
+                FTIR_DataFrame.at[idx, "Material Fit Results"] = fit_list
                 assigned += 1
             except Exception as _fit_err:
                 # If fit fails, preserve amplitudes
@@ -15713,7 +15794,7 @@ def fit_material(FTIR_DataFrame):
                         "sigma_g": float(avg_sigma[i]) / float(np.sqrt(2.0 * np.log(2.0)))
                     })
                 try:
-                    FTIR_DataFrame.at[idx, "Time-Series Fit Results"] = out
+                    FTIR_DataFrame.at[idx, "Material Fit Results"] = out
                     assigned += 1
                 except Exception:
                     pass
@@ -15913,7 +15994,7 @@ def fit_material(FTIR_DataFrame):
             if assign:
                 for _idx, fit_list in cache.items():
                     try:
-                        FTIR_DataFrame.at[_idx, "Time-Series Fit Results"] = fit_list
+                        FTIR_DataFrame.at[_idx, "Material Fit Results"] = fit_list
                     except Exception:
                         pass
                 if capture is not None:
@@ -16133,7 +16214,7 @@ def fit_material(FTIR_DataFrame):
             y_arr = np.asarray(y, dtype=float)
         except Exception:
             return None, None, None
-        res = row.get("Time-Series Fit Results")
+        res = row.get("Material Fit Results")
         if isinstance(res, dict):
             return x_arr, y_arr, None
         if isinstance(res, str):
@@ -16362,7 +16443,7 @@ def fit_material(FTIR_DataFrame):
                 sigmas_list = None
                 fracs_list = None
                 for _idx, _row in df_series.iterrows():
-                    res0 = _row.get("Time-Series Fit Results")
+                    res0 = _row.get("Material Fit Results")
                     if isinstance(res0, str):
                         try:
                             res0 = ast.literal_eval(res0)
@@ -16526,7 +16607,7 @@ def fit_material(FTIR_DataFrame):
                             cond_val = _row.get("Condition")
                     except Exception:
                         cond_val = None
-                    res = _row.get("Time-Series Fit Results")
+                    res = _row.get("Material Fit Results")
                     if isinstance(res, str):
                         try:
                             res = ast.literal_eval(res)
@@ -16879,7 +16960,7 @@ def fit_material(FTIR_DataFrame):
     _plot_series(with_fits=True, include_bad=include_bad_cb.value)
 
     def _on_save_click(_b=None):
-        """Save per-row peak wavenumbers (centers), alphas (fractions), sigmas, and areas (amplitudes) into 'Time-Series Fit Results'."""
+        """Save per-row peak wavenumbers (centers), alphas (fractions), sigmas, and areas (amplitudes) into 'Material Fit Results'."""
         try:
             mat = str(material_dd.value)
             cond = None
@@ -16902,7 +16983,7 @@ def fit_material(FTIR_DataFrame):
         fracs_list = None
         for _idx, _row in df_series.iterrows():
             t_val = _row.get("Time")
-            res = _row.get("Time-Series Fit Results")
+            res = _row.get("Material Fit Results")
             if isinstance(res, str):
                 try:
                     res = ast.literal_eval(res)
@@ -16937,9 +17018,9 @@ def fit_material(FTIR_DataFrame):
                 pass
             return
         # Persist results to DataFrame as before (existing code below) AND update materials.json
-        # Normalize and persist per-row results back into 'Time-Series Fit Results'
+        # Normalize and persist per-row results back into 'Material Fit Results'
         try:
-            dest_col = "Time-Series Fit Results"
+            dest_col = "Material Fit Results"
             if dest_col not in FTIR_DataFrame.columns:
                 try:
                     FTIR_DataFrame[dest_col] = None
@@ -17238,12 +17319,12 @@ def fit_material(FTIR_DataFrame):
     fit_btn.on_click(_on_fit_click)
     opt_btn.on_click(_on_optimize_click)
     include_bad_cb.observe(_on_include_bad_toggle, names="value")
-    # Add Save button to save per-row results (wavenumbers + areas) back into 'Time-Series Fit Results'
+    # Add Save button to save per-row results (wavenumbers + areas) back into 'Material Fit Results'
     save_btn = widgets.Button(
         description="Save",
         button_style="success",
         layout=widgets.Layout(width="120px"),
-        tooltip="Save per-row peak parameters to 'Time-Series Fit Results'",
+        tooltip="Save per-row peak parameters to 'Material Fit Results'",
     )
     save_btn.on_click(_on_save_click)
     close_btn.on_click(_on_close)
@@ -17258,6 +17339,548 @@ def fit_material(FTIR_DataFrame):
     _plot_series(with_fits=False, include_bad=include_bad_cb.value)
 
     return FTIR_DataFrame
+
+
+def check_fit_quality(FTIR_DataFrame):
+    """Interactive review of material fit quality.
+
+    - Presents a dropdown to select a material.
+    - When selected, checks if the material has entries in the
+      'Material Fit Results' column.
+      - If none, shows a message prompting to run 'fit_material' first.
+      - If present, computes error between the stored Fit and the
+        'Normalized and Corrected Data' for each spectrum, and displays
+        a list sorted by ascending error to quickly identify poor fits.
+
+    Returns the DataFrame unchanged.
+    """
+    try:
+        import ipywidgets as widgets  # type: ignore
+    except Exception:
+        widgets = None  # type: ignore
+
+    _require_columns(
+        FTIR_DataFrame,
+        [
+            "Material",
+            "X-Axis",
+            "Normalized and Corrected Data",
+            "Material Fit Results",
+            "File Name",
+            "Conditions",
+            "Time",
+        ],
+        context="check_fit_quality",
+    )
+
+    try:
+        materials, _conds = _extract_material_condition_lists(FTIR_DataFrame)
+    except Exception:
+        materials = []
+
+    from IPython.display import display, clear_output  # type: ignore
+    if widgets is None:
+        if not materials:
+            print("No materials found. Populate the DataFrame first.")
+            return FTIR_DataFrame
+        print("Widgets not available; showing per-material fit quality summary:")
+        for mat in materials:
+            _check_fit_quality_material(FTIR_DataFrame, mat, _print_only=True)
+        return FTIR_DataFrame
+
+    material_options = ["Select material..."] + (materials or [])
+    dropdown = widgets.Dropdown(options=material_options, description="Material:", layout=widgets.Layout(width="400px"))
+    out = widgets.Output()
+    # Persistent status/output area that must remain after Close
+    top_status_out = widgets.Output()
+        # Track per-session changes to emit a meaningful summary on Close
+    session_changes = {"quality": []}
+    # Show brief instructions initially (will be replaced with session summary on Close)
+    try:
+        _emit_function_summary(
+            top_status_out,
+            [
+                "Choose a material to review fit quality.",
+                "Click Close to end and view session summary.",
+            ],
+            title="Quality Check",
+        )
+    except Exception:
+        with top_status_out:
+            print("Quality Check: choose a material, or Close to hide the UI.")
+    close_top_btn = widgets.Button(description="Close", button_style="danger", layout=widgets.Layout(width="100px"))
+    ui = widgets.VBox([widgets.HBox([close_top_btn, dropdown]), out])
+
+    def on_material_change(change):
+        if change.get("name") != "value":
+            return
+        sel = change.get("new")
+        # Ensure only material-level messages are shown; clear the top status
+        try:
+            with top_status_out:
+                clear_output()
+        except Exception:
+            pass
+        with out:
+            clear_output()
+            if not sel or str(sel).strip() == "Select material...":
+                print("Select a material from the dropdown.")
+                return
+            _check_fit_quality_material(FTIR_DataFrame, sel, _print_only=False, _changes=session_changes)
+
+    def _on_top_close(_b=None):
+        try:
+            dropdown.close()
+        except Exception:
+            pass
+        try:
+            out.clear_output()
+            out.close()
+        except Exception:
+            pass
+        try:
+            close_top_btn.close()
+        except Exception:
+            pass
+        try:
+            ui.close()
+        except Exception:
+            pass
+        # Leave top_status_out visible but replace its content with a session summary
+        # Build and emit session summary based on collected changes
+        try:
+            with top_status_out:
+                clear_output()
+        except Exception:
+            pass
+        try:
+            lines = _session_summary_lines(session_changes, context="Quality Check")
+        except Exception:
+            lines = [
+                "Quality Check session closed.",
+            ]
+        try:
+            _emit_function_summary(
+                top_status_out,
+                lines,
+                title="Session Summary (Quality Check)",
+            )
+        except Exception:
+            # Fallback to plain print if helpers are unavailable
+            try:
+                with top_status_out:
+                    print("Quality Check session closed.")
+            except Exception:
+                pass
+
+    close_top_btn.on_click(_on_top_close)
+    dropdown.observe(on_material_change, names="value")
+    display(ui, top_status_out)
+    return FTIR_DataFrame
+
+
+def _check_fit_quality_material(FTIR_DataFrame, material: str, _print_only: bool = False, _changes: dict | None = None):
+    """Compute and display per-spectrum fit errors for a single material.
+
+    - If no usable fit data exists for the material, prints a clear message.
+    - Otherwise, displays a sorted table of spectra by RMSE between Fit and
+      'Normalized and Corrected Data'.
+    - When _print_only is True, prints textual summary instead of a table.
+    """
+    import numpy as np  # type: ignore
+    import pandas as pd  # type: ignore
+    from IPython.display import display  # type: ignore
+
+    try:
+        mat_mask = (
+            FTIR_DataFrame["Material"].astype(str).str.lower()
+            == str(material).strip().lower()
+        )
+    except Exception:
+        mat_mask = []
+    subset = FTIR_DataFrame.loc[mat_mask] if len(getattr(FTIR_DataFrame, "index", [])) > 0 else FTIR_DataFrame
+    if subset is None or len(subset) == 0:
+        print(f"No spectra found for material '{material}'.")
+        return
+
+    errors = []
+    any_fit_present = False
+
+    def _fit_cell_is_empty(val) -> bool:
+        """Return True when the Material Fit Results cell should be treated as empty.
+
+        Handles None, NaN, blank strings, empty literals ("[]", "{}"), and common
+        textual placeholders like "none", "null", "nan" (case-insensitive).
+        """
+        try:
+            import pandas as _pd  # local to avoid top-level dependency changes
+            if val is None or (isinstance(val, float) and math.isnan(val)):
+                return True
+            if isinstance(val, str):
+                s = val.strip().lower()
+                if s in {"", "none", "null", "nan"}:
+                    return True
+                if s in {"[]", "{}"}:
+                    return True
+            if isinstance(val, (list, tuple, dict)) and len(val) == 0:
+                return True
+            if '_pd' in locals() and _pd.isna(val):
+                return True
+        except Exception:
+            pass
+        return False
+
+    for idx, row in subset.iterrows():
+        x = _parse_seq(row.get("X-Axis"))
+        y = _parse_seq(row.get("Normalized and Corrected Data"))
+        mfr_raw = row.get("Material Fit Results")
+        mfr = _safe_literal_eval(mfr_raw, value_name="Material Fit Results")
+
+        note = ""
+        err = np.inf
+        y_fit = None
+
+        if not _fit_cell_is_empty(mfr_raw):
+            any_fit_present = True
+
+        try:
+            if isinstance(mfr, dict):
+                for key in ("fit_y", "y_fit", "fit", "y"):
+                    if key in mfr:
+                        y_fit = _parse_seq(mfr[key])
+                        break
+            elif isinstance(mfr, list):
+                # Reconstruct composite using lmfit's PseudoVoigtModel components
+                components = []
+                for comp in mfr:
+                    if not isinstance(comp, dict):
+                        continue
+                    try:
+                        A = float(comp.get("amplitude", comp.get("A", 0)) or 0.0)
+                        c = float(comp.get("center", comp.get("c", np.nan)) or np.nan)
+                        s_val = comp.get("sigma", comp.get("sigma_g", comp.get("sigma_l", None)))
+                        s = float(s_val) if s_val is not None else np.nan
+                        frac_val = comp.get("alpha", comp.get("fraction", comp.get("f", None)))
+                        frac = float(frac_val) if frac_val is not None else 0.5
+                    except Exception:
+                        continue
+                    if np.isfinite(A) and np.isfinite(c) and np.isfinite(s) and s > 0 and np.isfinite(frac):
+                        components.append((A, c, s, frac))
+
+                if x is not None and y is not None and components:
+                    try:
+                        xx = np.array(x, dtype=float)
+                        # Build composite model and parameters
+                        model = None
+                        params = None
+                        for i, (A, c, s, frac) in enumerate(components, start=1):
+                            pv = PseudoVoigtModel(prefix=f"p{i}_")
+                            model = pv if model is None else model + pv
+                            p = pv.make_params()
+                            p[f"p{i}_amplitude"].set(value=max(A, 0.0), min=0.0)
+                            p[f"p{i}_center"].set(value=c)
+                            p[f"p{i}_sigma"].set(value=max(s, 1e-9), min=1e-12)
+                            # alpha in [0,1]
+                            alpha_val = min(max(frac, 0.0), 1.0)
+                            p[f"p{i}_fraction"].set(value=alpha_val, min=0.0, max=1.0)
+                            params = p if params is None else params.update(p)
+                        yy = model.eval(params=params, x=xx)
+                        y_fit = yy.tolist()
+                    except Exception:
+                        # Fall back to None so error handling notes it as unusable
+                        y_fit = None
+        except Exception:
+            note = "fit data parse error"
+
+        if (
+            y_fit is None
+            or y is None
+            or x is None
+            or len(y) != len(x)
+            or len(y_fit) != len(x)
+        ):
+            if _fit_cell_is_empty(mfr_raw):
+                note = note or "fit not ran"
+            else:
+                note = note or "unusable fit"
+            err = np.inf
+        else:
+            arr_y = np.array(y, dtype=float)
+            arr_fit = np.array(y_fit, dtype=float)
+            dif = arr_y - arr_fit
+            err = float(np.sqrt(np.mean(dif ** 2)))
+
+        errors.append(
+            {
+                "Index": idx,
+                "File Name": row.get("File Name", ""),
+                "Conditions": row.get("Conditions", ""),
+                "Time": row.get("Time", ""),
+                "Error": err,
+                "Note": note,
+            }
+        )
+
+    if not any_fit_present:
+        print(
+            f"No Material Fit Results found for material '{material}'. Please run 'fit_material' first."
+        )
+        return
+
+    df_sorted = pd.DataFrame(errors)
+    # Split into usable (finite error) and excluded (infinite or missing)
+    finite_mask = np.isfinite(df_sorted["Error"].to_numpy()) if not df_sorted.empty else np.array([])
+    df_finite = df_sorted[finite_mask] if finite_mask.size else df_sorted.iloc[0:0]
+    df_excluded = df_sorted[~finite_mask] if finite_mask.size else df_sorted
+    if df_sorted.empty or df_finite.empty:
+        print(
+            f"Fit results exist but are unusable for material '{material}'. Please re-run 'fit_material' or inspect deconvolution parameters."
+        )
+        return
+
+    # Sort the usable rows by ascending error
+    df_sorted = df_finite.sort_values(by="Error", ascending=True)
+
+    if _print_only:
+        print(f"Material: {material}")
+        print("Worst-fitting spectra (ascending RMSE):")
+        for _, r in df_sorted.iterrows():
+            print(
+                f"  idx={r['Index']} | time={r['Time']} | cond={r['Conditions']} | err={r['Error']:.6f} | file='{r['File Name']}'"
+            )
+    else:
+        # Build an interactive list with Plot buttons for rows having finite error
+        try:
+            import ipywidgets as widgets  # local import for notebook UI
+            from IPython.display import display
+        except Exception:
+            display(df_sorted)
+            return
+
+        # Output areas: plotting overlays and persistent status messages
+        plot_out = widgets.Output()
+        status_out = widgets.Output()  # persistent session summary / status
+        excluded_out = widgets.Output()  # separate area for excluded list (toggle)
+        # Seed initial instruction using universal emit helper
+        _emit_function_summary(
+            status_out,
+            [
+                "Select a row and click Plot to view overlay.",
+                "Use Mark buttons to set quality.",
+            ],
+            title="Session Summary (Quality Check)",
+        )
+        # Track currently plotted row index for quality marking
+        current_plot_idx = {"idx": None}
+        # Quality controls bound to the currently plotted row
+        mark_bad_btn, mark_good_btn, refresh_quality = _make_quality_controls(
+            FTIR_DataFrame,
+            row_getter=lambda: (
+                FTIR_DataFrame.loc[current_plot_idx["idx"]]
+                if current_plot_idx["idx"] is not None
+                else None
+            ),
+            margin="8px 10px 0 0",
+            status_out=status_out,
+        )
+        # Record quality mark changes into session changes for summary on Close
+        def _record_mark(status: str):
+            try:
+                idx = current_plot_idx.get("idx")
+            except Exception:
+                idx = None
+            if _changes is not None and idx is not None:
+                try:
+                    lst = _changes.setdefault("quality", [])
+                    lst.append((idx, status))
+                except Exception:
+                    pass
+
+        mark_bad_btn.on_click(lambda _b=None: _record_mark("bad"))
+        mark_good_btn.on_click(lambda _b=None: _record_mark("good"))
+
+        def _get_xy_and_fit(row_idx):
+            try:
+                row = FTIR_DataFrame.loc[row_idx]
+            except Exception:
+                return None, None, None, None
+            # Parse x and y
+            x = _parse_seq(row.get("X-Axis"))
+            y = _parse_seq(row.get("Normalized and Corrected Data"))
+            # Parse fit cell
+            mfr_raw = row.get("Material Fit Results")
+            mfr = _safe_literal_eval(mfr_raw, value_name="Material Fit Results")
+            y_fit = None
+            try:
+                if isinstance(mfr, dict):
+                    for key in ("fit_y", "y_fit", "fit", "y"):
+                        if key in mfr:
+                            y_fit = _parse_seq(mfr[key])
+                            break
+                elif isinstance(mfr, list):
+                    # Reconstruct composite fit using lmfit PseudoVoigtModel
+                    comps = []
+                    for comp in mfr:
+                        if not isinstance(comp, dict):
+                            continue
+                        try:
+                            A = float(comp.get("amplitude", comp.get("A", 0)) or 0.0)
+                            c = float(comp.get("center", comp.get("c", np.nan)) or np.nan)
+                            s_val = comp.get("sigma", comp.get("sigma_g", comp.get("sigma_l", None)))
+                            s = float(s_val) if s_val is not None else np.nan
+                            frac_val = comp.get("alpha", comp.get("fraction", comp.get("f", None)))
+                            frac = float(frac_val) if frac_val is not None else 0.5
+                        except Exception:
+                            continue
+                        if np.isfinite(A) and np.isfinite(c) and np.isfinite(s) and s > 0 and np.isfinite(frac):
+                            comps.append((A, c, s, frac))
+                    if x is not None and comps:
+                        try:
+                            xx = np.array(x, dtype=float)
+                            model = None
+                            params = None
+                            for i, (A, c, s, frac) in enumerate(comps, start=1):
+                                pv = PseudoVoigtModel(prefix=f"p{i}_")
+                                model = pv if model is None else model + pv
+                                p = pv.make_params()
+                                p[f"p{i}_amplitude"].set(value=max(A, 0.0), min=0.0)
+                                p[f"p{i}_center"].set(value=c)
+                                p[f"p{i}_sigma"].set(value=max(s, 1e-9), min=1e-12)
+                                alpha_val = min(max(frac, 0.0), 1.0)
+                                p[f"p{i}_fraction"].set(value=alpha_val, min=0.0, max=1.0)
+                                params = p if params is None else params.update(p)
+                            yy = model.eval(params=params, x=xx)
+                            y_fit = yy.tolist()
+                        except Exception:
+                            y_fit = None
+            except Exception:
+                y_fit = None
+            return x, y, y_fit, row
+
+        # Build interactive rows
+        items = []
+        for _, r in df_sorted.iterrows():
+            idx = r.get("Index")
+            fname = r.get("File Name", "")
+            cond = r.get("Conditions", "")
+            tval = r.get("Time", "")
+            err_val = r.get("Error", np.inf)
+            note = r.get("Note", "")
+
+            label_text = f"time={tval} | cond={cond} | err={err_val:.6g} | file={fname}"
+            # Ensure readable black text (some notebook themes style <code> tan)
+            label = widgets.HTML(value=f"<div style='color:#000;font-family:mono'>{html.escape(label_text)}</div>")
+
+            if np.isfinite(err_val):
+                btn = widgets.Button(description="Plot", tooltip="Plot Fit vs Normalized data", layout=widgets.Layout(width="80px"))
+
+                def _make_onclick(row_index):
+                    def _handler(_b=None):
+                        with plot_out:
+                            plot_out.clear_output()
+                            x, y, y_fit, row_obj = _get_xy_and_fit(row_index)
+                            if x is None or y is None or y_fit is None:
+                                print("Plot unavailable: missing or invalid Fit/Normalized data for this row.")
+                                # Also note in status via session summary helper
+                                _emit_function_summary(
+                                    status_out,
+                                    [f"Plot unavailable for index {row_index}."],
+                                    title="Session Summary (Quality Check)",
+                                )
+                                return
+                            try:
+                                xx = np.asarray(x, dtype=float)
+                                yy = np.asarray(y, dtype=float)
+                                ff = np.asarray(y_fit, dtype=float)
+                                # Align lengths if needed
+                                n = min(xx.size, yy.size, ff.size)
+                                xx, yy, ff = xx[:n], yy[:n], ff[:n]
+                            except Exception:
+                                print("Plot unavailable: data conversion error.")
+                                _emit_function_summary(
+                                    status_out,
+                                    [f"Data conversion error for index {row_index}."],
+                                    title="Session Summary (Quality Check)",
+                                )
+                                return
+                            # Update the current plotted index for quality controls
+                            try:
+                                current_plot_idx["idx"] = row_index
+                                refresh_quality()
+                            except Exception:
+                                pass
+                            fig = go.FigureWidget()
+                            fig.add_scatter(x=xx, y=yy, mode="lines", name="Normalized", line=dict(color="#1f77b4"))
+                            fig.add_scatter(x=xx, y=ff, mode="lines", name="Fit", line=dict(color="#d62728"))
+                            try:
+                                title = f"Fit vs Normalized | {row_obj.get('File Name','')} (T={row_obj.get('Time','')}, {row_obj.get('Conditions','')})"
+                            except Exception:
+                                title = "Fit vs Normalized"
+                            fig.update_layout(title=title, xaxis_title="Wavenumber (cm⁻¹)", yaxis_title="Intensity (a.u.)", legend=dict(orientation="h"))
+                            # Container: plot with "Mark spectrum as bad/good" buttons beneath
+                            display(widgets.VBox([fig, widgets.HBox([mark_bad_btn, mark_good_btn])]))
+                    return _handler
+
+                btn.on_click(_make_onclick(idx))
+            items.append(widgets.HBox([btn, label]))
+
+        # If there are excluded spectra, add a button to display their details
+        excluded_btn = None
+        excluded_visible = {"on": False}
+        if df_excluded is not None and not df_excluded.empty:
+            excluded_btn = widgets.Button(
+                description=f"Show excluded ({len(df_excluded)})",
+                button_style="warning",
+                tooltip="List spectra excluded due to missing/unusable fits",
+                layout=widgets.Layout(width="220px")
+            )
+
+            def _show_excluded(_b=None):
+                # Toggle: show list on first click, hide on second
+                if not excluded_visible["on"]:
+                    lines = []
+                    try:
+                        for _, rr in df_excluded.iterrows():
+                            lines.append(
+                                f"idx={rr.get('Index')} | time={rr.get('Time')} | cond={rr.get('Conditions')} | note={rr.get('Note','unusable')} | file='{rr.get('File Name','')}'"
+                            )
+                    except Exception:
+                        lines = ["Excluded spectra list unavailable."]
+                    # Emit excluded list in a separate output so session summary persists
+                    _emit_function_summary(
+                        excluded_out,
+                        lines,
+                        title="Excluded Spectra (Unusable)",
+                    )
+                    excluded_visible["on"] = True
+                    try:
+                        excluded_btn.description = f"Hide excluded ({len(df_excluded)})"
+                        excluded_btn.button_style = "warning"
+                    except Exception:
+                        pass
+                else:
+                    # Hide by clearing the excluded area only (session summary persists)
+                    try:
+                        with excluded_out:
+                            clear_output()
+                    except Exception:
+                        pass
+                    excluded_visible["on"] = False
+                    try:
+                        excluded_btn.description = f"Show excluded ({len(df_excluded)})"
+                        excluded_btn.button_style = "warning"
+                    except Exception:
+                        pass
+
+            excluded_btn.on_click(_show_excluded)
+
+        header = widgets.HTML(value=f"<b>Material:</b> {html.escape(str(material))} &nbsp; <span style='color:#555'>(click Plot to overlay)</span>")
+        # Only keep the top-level Close button from check_fit_quality; no per-material Close here
+        list_children = items
+        if excluded_btn is not None:
+            list_children = [widgets.HBox([excluded_btn])] + list_children
+        list_box = widgets.VBox(list_children)
+        display(widgets.VBox([header, list_box, plot_out, status_out, excluded_out]))
 
 
 def display_DataFrame(FTIR_DataFrame, height: int = 500):
