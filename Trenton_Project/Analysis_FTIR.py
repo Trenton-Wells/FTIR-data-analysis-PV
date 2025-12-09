@@ -9235,12 +9235,12 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
     )
     add_peaks_btn = widgets.Button(
         description="Add peaks",
-        tooltip="Click, then click on the plot to add one or more peaks",
+        tooltip="Add new peak(s)",
         button_style="info",
         layout=widgets.Layout(width="110px"),
     )
     accept_new_peaks_btn = widgets.Button(
-        description="Accept new peaks",
+        description="Accept new peak(s)",
         button_style="success",
         layout=widgets.Layout(width="150px"),
     )
@@ -9250,7 +9250,7 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         button_style="info",
         layout=widgets.Layout(width="185px"),
         tooltip=(
-            "Iteratively adjust included peaks' α values to reduce reduced chi-square."
+            "Iteratively adjust included peaks' α values to minimize error."
         ),
     )
     cancel_fit_btn = widgets.Button(
@@ -9269,7 +9269,11 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         button_style="danger",
         layout=widgets.Layout(width="190px"),
     )
-    save_btn = widgets.Button(description="Save for spectrum", button_style="success")
+    save_btn = widgets.Button(
+        description="Save for spectrum",
+        button_style="success",
+        tooltip="Save deconvolution results for the current spectrum",
+    )
     close_btn = widgets.Button(description="Close", button_style="danger")
     # Dedicated status label to avoid Output-widget buffering issues
     status_html = widgets.HTML(value="")
@@ -9315,6 +9319,33 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                     pass
             last_msg_text = msg_norm
             last_msg_ts = now
+
+    def _append_status(message: str):
+        """Append a status line (monospace) without clearing previous messages.
+
+        Keeps a running log in the log_html widget so multiple actions are visible.
+        """
+        try:
+            msg_norm = html.escape(str(message).rstrip())
+        except Exception:
+            msg_norm = str(message)
+        try:
+            prev = str(getattr(log_html, 'value', ''))
+            # Ensure container div exists; append a new line
+            if not prev:
+                log_html.value = f"<div style='font-family:monospace; white-space:pre-wrap;'>{msg_norm}</div>"
+            else:
+                # Insert before closing div tag when present
+                if prev.endswith("</div>"):
+                    log_html.value = prev[:-6] + "\n" + msg_norm + "</div>"
+                else:
+                    log_html.value = prev + "\n" + msg_norm
+        except Exception:
+            # Fallback to print if HTML update fails
+            try:
+                print(message)
+            except Exception:
+                pass
 
     # Reset buttons for globals and all
     reset_all_btn = widgets.Button(
@@ -10050,15 +10081,22 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         return x_arr, y_arr
 
     def _get_peaks(row_idx):
-        r = FTIR_DataFrame.loc[row_idx]
-        xs = _parse_seq(r.get("Peak Wavenumbers"))
-        ys = _parse_seq(r.get("Peak Absorbances"))
+        # Prefer live per-spectrum working copies so deletions/additions are reflected immediately
+        xs = list(per_spec_center.get(row_idx, []) or [])
+        ys = list(per_spec_amplitude.get(row_idx, []) or [])
+        # Fallback to DataFrame if working copies are empty
+        if not xs or not ys:
+            r = FTIR_DataFrame.loc[row_idx]
+            xs = _parse_seq(r.get("Peak Wavenumbers"))
+            ys = _parse_seq(r.get("Peak Absorbances"))
         # Overlay staged (unsaved) additions if present for this spectrum index
         try:
             if row_idx in _STAGED_PEAK_ADDITIONS:
                 staged = _STAGED_PEAK_ADDITIONS.get(row_idx) or {}
-                xs = list(staged.get('centers')) if staged.get('centers') is not None else xs
-                ys = list(staged.get('amplitude')) if staged.get('amplitude') is not None else ys
+                if staged.get('centers') is not None:
+                    xs = list(staged.get('centers'))
+                if staged.get('amplitude') is not None:
+                    ys = list(staged.get('amplitude'))
         except Exception:
             pass
         if xs is None or ys is None:
@@ -11678,6 +11716,38 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                 )
             except Exception:
                 _log_once("Fitting...")
+        # Hide controls while a Fit is running
+        try:
+            _hide(fit_btn)
+        except Exception:
+            pass
+        try:
+            _hide(add_peaks_btn)
+        except Exception:
+            pass
+        try:
+            if delete_peaks_btn is not None:
+                delete_peaks_btn.layout.display = "none"
+            else:
+                buttons_row.children[2].layout.display = "none"
+        except Exception:
+            pass
+        try:
+            _hide(iter_btn)
+        except Exception:
+            pass
+        try:
+            _hide(reset_all_row)
+        except Exception:
+            pass
+        try:
+            _hide(save_btn)
+        except Exception:
+            pass
+        try:
+            _hide(fit_range_row)
+        except Exception:
+            pass
 
         # Snapshot current control state
         try:
@@ -12608,6 +12678,35 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                     _finish_fit_guard()
                     return
 
+                # Pre-fit sanity: ensure included indices are within bounds
+                try:
+                    valid_included = []
+                    dropped = []
+                    px_len = int(len(peaks_x))
+                    py_len = int(len(peaks_y))
+                    for i in included:
+                        try:
+                            if isinstance(i, (int, float)):
+                                ii = int(i)
+                            else:
+                                ii = int(i)
+                        except Exception:
+                            dropped.append(i)
+                            continue
+                        if ii < 0 or ii >= px_len or ii >= py_len:
+                            dropped.append(ii)
+                        else:
+                            valid_included.append(ii)
+                    if dropped:
+                        _on_main_thread(lambda: _log_once(f"Dropped invalid peaks: {', '.join('Peak '+str(di+1) for di in dropped if isinstance(di,int))}"))
+                    included[:] = valid_included
+                except Exception:
+                    pass
+                if not included:
+                    _on_main_thread(lambda: _log_once("No valid peaks remain after deletion; nothing to fit."))
+                    _finish_fit_guard()
+                    return
+
                 # Build composite model using captured param_seed_map snapshot
                 comp_model = None
                 params = None
@@ -13015,6 +13114,38 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                         _update_cancel_fit_visibility()
                     except Exception:
                         pass
+                    # Restore controls hidden during Fit
+                    try:
+                        _show(fit_btn)
+                    except Exception:
+                        pass
+                    try:
+                        _show(add_peaks_btn)
+                    except Exception:
+                        pass
+                    try:
+                        if delete_peaks_btn is not None:
+                            delete_peaks_btn.layout.display = ""
+                        else:
+                            buttons_row.children[2].layout.display = ""
+                    except Exception:
+                        pass
+                    try:
+                        _show(iter_btn)
+                    except Exception:
+                        pass
+                    try:
+                        _show(reset_all_row)
+                    except Exception:
+                        pass
+                    try:
+                        _show(save_btn)
+                    except Exception:
+                        pass
+                    try:
+                        _show(fit_range_row)
+                    except Exception:
+                        pass
 
                 _on_main_thread(_apply_results_on_ui)
                 # Ensure the Cancel Fit button hides after the worker fully ends
@@ -13055,6 +13186,23 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                             _force_cancel_fit_hidden()
                     except Exception:
                         pass
+                    # Restore controls hidden during Fit
+                    try:
+                        _show(fit_btn)
+                        _show(add_peaks_btn)
+                        _show(iter_btn)
+                        _show(reset_all_row)
+                        _show(save_btn)
+                        _show(fit_range_row)
+                    except Exception:
+                        pass
+                    try:
+                        if delete_peaks_btn is not None:
+                            delete_peaks_btn.layout.display = ""
+                        else:
+                            buttons_row.children[2].layout.display = ""
+                    except Exception:
+                        pass
 
                 _on_main_thread(_notify_cancel)
                 # Clear thread reference and trigger a final visibility update
@@ -13087,6 +13235,23 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                             _force_cancel_fit_shown()
                         else:
                             _force_cancel_fit_hidden()
+                    except Exception:
+                        pass
+                    # Restore controls hidden during Fit
+                    try:
+                        _show(fit_btn)
+                        _show(add_peaks_btn)
+                        _show(iter_btn)
+                        _show(reset_all_row)
+                        _show(save_btn)
+                        _show(fit_range_row)
+                    except Exception:
+                        pass
+                    try:
+                        if delete_peaks_btn is not None:
+                            delete_peaks_btn.layout.display = ""
+                        else:
+                            buttons_row.children[2].layout.display = ""
                     except Exception:
                         pass
 
@@ -14641,6 +14806,12 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         [
             fit_btn,
             add_peaks_btn,
+            # Delete Peaks button (desktop/Colab support wired below)
+            widgets.Button(description="Delete peaks", button_style="warning", layout=widgets.Layout(width="120px")),
+            # Delete mode action placeholders (replaced below)
+            widgets.Button(description="Accept deletions", button_style="success", layout=widgets.Layout(width="160px")),
+            widgets.Button(description="Redo deletions", button_style="warning", layout=widgets.Layout(width="140px")),
+            widgets.Button(description="Cancel deletions", button_style="danger", layout=widgets.Layout(width="170px")),
             accept_new_peaks_btn,
             redo_new_peaks_btn,
             cancel_new_peaks_btn,
@@ -14687,6 +14858,21 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             pass
 
     add_peaks_slider.observe(_sync_text_from_slider, names="value")
+    # Colab delete-by-number: enter peak index (1-based) to delete
+    delete_peak_num_text = widgets.IntText(
+        value=1,
+        description="Peak #",
+        layout=widgets.Layout(width="140px"),
+    )
+    delete_peak_num_btn = widgets.Button(
+        description="Delete",
+        button_style="danger",
+        layout=widgets.Layout(width="100px"),
+    )
+    colab_delete_row = widgets.HBox([delete_peak_num_text, delete_peak_num_btn])
+    colab_delete_help = widgets.HTML(
+        "<span style='color:#555;font-size:12px;'>Colab: Enter the peak number (as shown in the list) to delete.</span>"
+    )
     colab_add_row = widgets.HBox([add_peaks_slider, add_peaks_text, add_peaks_add_btn])
     colab_add_help = widgets.HTML(
         "<span style='color:#555;font-size:12px;'>Colab: Use the slider or type a wavenumber, then click Add. Peaks snap to nearest data point; Accept to commit.</span>"
@@ -14695,6 +14881,8 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
     if not _IN_COLAB:
         colab_add_row.layout.display = "none"
         colab_add_help.layout.display = "none"
+        colab_delete_row.layout.display = "none"
+        colab_delete_help.layout.display = "none"
     # Place plot + mark row in a bordered container; keep mark below the plot
     plot_and_mark_deconv = widgets.VBox(
         [fig, mark_row],
@@ -14715,6 +14903,9 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             #    Colab add controls (only shown in Colab when adding)
             colab_add_row,
             colab_add_help,
+            #    Colab delete controls (only shown in Colab when deleting)
+            colab_delete_row,
+            colab_delete_help,
             # 5) Reset button
             reset_all_row,
             # 6) X range selector bar
@@ -14733,6 +14924,21 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         new_peak_xs.clear()
         _clear_add_peak_shapes()
         _hide(add_peaks_btn)
+        # Ensure plot click is wired for add-mode selections (desktop)
+        try:
+            if not _IN_COLAB:
+                fig.data[0].on_click(_on_data_click)
+        except Exception:
+            pass
+        try:
+            # Hide Delete peaks if present
+            buttons_row.children[2].layout.display = "none"
+        except Exception:
+            pass
+        # Hide non-relevant controls in Peak Addition mode
+        _hide(fit_btn)
+        _hide(reset_all_row)
+        _hide(fit_range_row)
         _show(accept_new_peaks_btn)
         _show(redo_new_peaks_btn)
         _show(cancel_new_peaks_btn)
@@ -14783,6 +14989,431 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             _log_once(
                 "Add-peaks mode: click x-locations on the plot; then Accept/Redo/Cancel."
             )
+
+    # --- Delete-peaks workflow ---
+    deleting_mode = False
+    delete_markers_drawn = False
+
+    def _clear_delete_peak_shapes():
+        try:
+            shapes = list(getattr(fig.layout, "shapes", ()))
+            shapes = [s for s in shapes if getattr(s, "name", None) != "delete_peak_marker"]
+            fig.layout.shapes = tuple(shapes)
+        except Exception:
+            # dict fallback
+            try:
+                shapes = list(getattr(fig.layout, "shapes", ()))
+                new_shapes = []
+                for s in shapes:
+                    try:
+                        if s.get("name") != "delete_peak_marker":
+                            new_shapes.append(s)
+                    except Exception:
+                        new_shapes.append(s)
+                fig.layout.shapes = tuple(new_shapes)
+            except Exception:
+                pass
+
+    def _draw_current_peaks_for_delete(idx):
+        nonlocal delete_markers_drawn
+        _clear_delete_peak_shapes()
+        xs, _ys = _get_visible_peaks(idx)
+        x_arr, y_arr = _get_xy(idx)
+        if not xs or x_arr is None or y_arr is None or x_arr.size == 0:
+            delete_markers_drawn = False
+            return
+        y_min = float(np.nanmin(y_arr))
+        y_max = float(np.nanmax(y_arr))
+        for cx in xs:
+            try:
+                fig.add_shape(
+                    dict(
+                        type="line",
+                        x0=float(cx),
+                        x1=float(cx),
+                        y0=y_min,
+                        y1=y_max,
+                        line=dict(color="#d62728", dash="dash", width=1.5),
+                        name="delete_peak_marker",
+                    )
+                )
+            except Exception:
+                pass
+        delete_markers_drawn = True
+
+    # Staging for deletions and snapshot
+    staged_delete_indices = []
+    _delete_snapshot = {}
+
+    def _enter_delete_mode(b=None):
+        if _recent_click("enter_delete_mode"):
+            return
+        nonlocal deleting_mode
+        deleting_mode = True
+        staged_delete_indices.clear()
+        # Bind delete-mode click handler (desktop)
+        try:
+            if not _IN_COLAB:
+                fig.data[0].on_click(_on_delete_click)
+        except Exception:
+            pass
+        # Hide the Delete Peaks button itself while in delete mode
+        try:
+            if delete_peaks_btn is not None:
+                delete_peaks_btn.layout.display = "none"
+            else:
+                # Fallback to buttons_row index if variable isn't available
+                buttons_row.children[2].layout.display = "none"
+        except Exception:
+            pass
+        # Snapshot current state
+        try:
+            idx = spectrum_sel.value
+            _delete_snapshot = {
+                'centers': list(per_spec_center.get(idx, []) or []),
+                'includes': list(per_spec_include.get(idx, []) or []),
+                'sigmas': list(per_spec_sigma.get(idx, []) or []),
+                'amps': list(per_spec_amplitude.get(idx, []) or []),
+                'windows': list(per_spec_center_window.get(idx, []) or []),
+                'modes': dict(per_spec_modes.get(idx, {'amplitude':[], 'center':[], 'sigma':[]})),
+            }
+        except Exception:
+            _delete_snapshot = {}
+        _hide(add_peaks_btn)
+        try:
+            # Hide Fit and unrelated controls
+            _hide(fit_btn)
+            _hide(reset_all_row)
+            _hide(fit_range_row)
+            # Show Delete button hidden state is handled by creating it below
+            # Hide accept/redo/cancel for add-peaks
+            _hide(accept_new_peaks_btn)
+            _hide(redo_new_peaks_btn)
+            _hide(cancel_new_peaks_btn)
+            # Show delete action placeholders (indices 3,4,5)
+            try:
+                buttons_row.children[3].layout.display = ""
+                buttons_row.children[4].layout.display = ""
+                buttons_row.children[5].layout.display = ""
+            except Exception:
+                pass
+            _hide(iter_btn)
+            cancel_fit_btn.disabled = True
+            _hide_cancel_button()
+            _hide(save_btn)
+            _hide(close_btn)
+            _hide(peak_controls_box)
+        except Exception:
+            pass
+        try:
+            spectrum_sel.disabled = True
+            material_dd.disabled = True
+            conditions_dd.disabled = True
+        except Exception:
+            pass
+        idx = spectrum_sel.value
+        _draw_current_peaks_for_delete(idx)
+        if _IN_COLAB:
+            try:
+                colab_delete_row.layout.display = ""
+                colab_delete_help.layout.display = ""
+            except Exception:
+                pass
+            _log_once("Delete-peaks mode (Colab): enter peak number and click Delete.")
+        else:
+            _log_once("Delete-peaks mode: click existing peak markers to delete.")
+
+    def _exit_delete_mode():
+        nonlocal deleting_mode
+        deleting_mode = False
+        _clear_delete_peak_shapes()
+        # Remove delete-mode click handler
+        try:
+            if not _IN_COLAB:
+                fig.data[0].on_click(None)
+        except Exception:
+            pass
+        _show(add_peaks_btn)
+        # Restore the Delete Peaks button visibility when leaving delete mode
+        try:
+            if delete_peaks_btn is not None:
+                delete_peaks_btn.layout.display = ""
+            else:
+                buttons_row.children[2].layout.display = ""
+        except Exception:
+            pass
+        _show(fit_btn)
+        _show(reset_all_row)
+        _show(fit_range_row)
+        # Hide delete action placeholders
+        try:
+            buttons_row.children[3].layout.display = "none"
+            buttons_row.children[4].layout.display = "none"
+            buttons_row.children[5].layout.display = "none"
+        except Exception:
+            pass
+        _show(iter_btn)
+        _update_cancel_fit_visibility()
+        _show(save_btn)
+        _show(close_btn)
+        _show(peak_controls_box)
+        if _IN_COLAB:
+            try:
+                colab_delete_row.layout.display = "none"
+                colab_delete_help.layout.display = "none"
+            except Exception:
+                pass
+        try:
+            spectrum_sel.disabled = False
+            material_dd.disabled = False
+            conditions_dd.disabled = False
+        except Exception:
+            pass
+
+    # Click handler to stage deletion of nearest visible peak when in delete mode
+    def _on_delete_click(trace, points, selector):
+        try:
+            nonlocal deleting_mode
+            if not deleting_mode:
+                return
+            if not points or not getattr(points, "xs", None):
+                return
+            x_clicked = float(points.xs[0])
+        except Exception:
+            return
+        idx = spectrum_sel.value
+        try:
+            vis_xs, _ = _get_visible_peaks(idx)
+        except Exception:
+            vis_xs = []
+        if not vis_xs:
+            _log_once("No peaks to delete.")
+            return
+        # Find nearest peak center
+        try:
+            nearest_i = int(np.argmin(np.abs(np.asarray(vis_xs, dtype=float) - x_clicked)))
+        except Exception:
+            nearest_i = None
+        if nearest_i is None:
+            return
+        # Stage deletion index
+        try:
+            if nearest_i not in staged_delete_indices:
+                staged_delete_indices.append(nearest_i)
+                _append_status(
+                    f"Staged deletion: Peak {nearest_i + 1} at {vis_xs[nearest_i]:.3f} cm⁻¹."
+                )
+            else:
+                _append_status(
+                    f"Peak {nearest_i + 1} already staged for deletion."
+                )
+        except Exception:
+            pass
+        _draw_current_peaks_for_delete(idx)
+
+    try:
+        if not _IN_COLAB:
+            fig.data[0].on_click(_on_delete_click)
+    except Exception:
+        pass
+
+    def _colab_delete_peak(_b=None):
+        idx = spectrum_sel.value
+        try:
+            peak_num = int(delete_peak_num_text.value)
+        except Exception:
+            return
+        if peak_num <= 0:
+            return
+        # Convert to 0-based index within visible peaks ordering
+        try:
+            vis_xs, _ = _get_visible_peaks(idx)
+        except Exception:
+            vis_xs = []
+        if not vis_xs:
+            return
+        target_i = peak_num - 1
+        if target_i < 0 or target_i >= len(vis_xs):
+            return
+        # Stage deletion by number
+        try:
+            if target_i not in staged_delete_indices:
+                staged_delete_indices.append(target_i)
+                _append_status(
+                    f"Staged deletion: Peak {target_i + 1} at {vis_xs[target_i]:.3f} cm⁻¹."
+                )
+        except Exception:
+            pass
+        _draw_current_peaks_for_delete(idx)
+        # Wait for Accept before applying
+
+    delete_peak_num_btn.on_click(_colab_delete_peak)
+
+    # Bind Delete Peaks button
+    try:
+        delete_peaks_btn = widgets.Button(description="Delete peaks", button_style="warning", layout=widgets.Layout(width="120px"))
+    except Exception:
+        delete_peaks_btn = None
+    if delete_peaks_btn is not None:
+        delete_peaks_btn.on_click(_enter_delete_mode)
+        # Insert next to Add peaks in buttons_row
+        try:
+            kids = list(buttons_row.children)
+            # Replace placeholder created earlier with actual button instance
+            kids[2] = delete_peaks_btn
+            buttons_row.children = tuple(kids)
+        except Exception:
+            pass
+
+    # Wire Accept/Redo/Cancel deletions using placeholders indices 3,4,5
+    def _apply_staged_deletions():
+        try:
+            idx = spectrum_sel.value
+            centers = per_spec_center.get(idx, [])
+            includes = per_spec_include.get(idx, [])
+            sigmas = per_spec_sigma.get(idx, [])
+            amps = per_spec_amplitude.get(idx, [])
+            alphas = per_spec_alpha.get(idx, [])
+            windows = per_spec_center_window.get(idx, [])
+            modes = per_spec_modes.get(idx, {'amplitude':[], 'center':[], 'sigma':[]})
+            for del_i in sorted(staged_delete_indices, reverse=True):
+                for lst in (centers, includes, sigmas, amps, alphas, windows):
+                    try:
+                        if lst and 0 <= del_i < len(lst):
+                            lst.pop(del_i)
+                    except Exception:
+                        pass
+                for key in ("amplitude", "center", "sigma"):
+                    try:
+                        arr = modes.get(key, [])
+                        if arr and 0 <= del_i < len(arr):
+                            arr.pop(del_i)
+                    except Exception:
+                        pass
+            per_spec_center[idx] = centers
+            per_spec_include[idx] = includes
+            per_spec_sigma[idx] = sigmas
+            per_spec_amplitude[idx] = amps
+            per_spec_alpha[idx] = alphas
+            per_spec_center_window[idx] = windows
+            per_spec_modes[idx] = modes
+        except Exception:
+            pass
+
+    def _accept_deletions(_b=None):
+        if _recent_click("accept_deletions"):
+            return
+        try:
+            idx = spectrum_sel.value
+            vis_xs, _ = _get_visible_peaks(idx)
+        except Exception:
+            vis_xs = []
+        _apply_staged_deletions()
+        # Record in session changes for summary
+        try:
+            deleted_centers = [vis_xs[i] for i in staged_delete_indices if i < len(vis_xs)]
+            if 'deleted' not in _deconv_changes:
+                _deconv_changes['deleted'] = []
+            _deconv_changes['deleted'].append((idx, [float(c) for c in deleted_centers]))
+        except Exception:
+            pass
+        # Clear caches so main mode respects new peak list
+        try:
+            if isinstance(peak_box_cache, dict):
+                peak_box_cache.clear()
+        except Exception:
+            pass
+        try:
+            included_index_map.clear()
+        except Exception:
+            pass
+        try:
+            last_result_by_idx.pop(idx, None)
+        except Exception:
+            pass
+        try:
+            last_redchi_by_idx.pop(idx, None)
+        except Exception:
+            pass
+        try:
+            shared_peaks_x = None
+        except Exception:
+            pass
+        # Remove any staged additions that might be lingering for this spectrum
+        try:
+            if isinstance(_STAGED_PEAK_ADDITIONS, dict):
+                _STAGED_PEAK_ADDITIONS.pop(idx, None)
+        except Exception:
+            pass
+        # Rebuild peak-center state mapping to align with new list length
+        try:
+            new_centers = list(per_spec_center.get(idx, []) or [])
+            state = {}
+            for i, c in enumerate(new_centers):
+                try:
+                    cf = float(c)
+                except Exception:
+                    cf = c
+                state[i] = {'initial': cf, 'user': cf}
+            peak_center_state_by_idx[idx] = state
+        except Exception:
+            pass
+        _append_status("Deletions accepted and applied.")
+        try:
+            _refresh_peak_control_widgets(spectrum_sel.value)
+        except Exception:
+            pass
+        try:
+            _update_fit_range_indicator()
+        except Exception:
+            pass
+        staged_delete_indices.clear()
+        _exit_delete_mode()
+
+    def _redo_deletions(_b=None):
+        if _recent_click("redo_deletions"):
+            return
+        staged_delete_indices.clear()
+        try:
+            idx = spectrum_sel.value
+            per_spec_center[idx] = list(_delete_snapshot.get('centers', []))
+            per_spec_include[idx] = list(_delete_snapshot.get('includes', []))
+            per_spec_sigma[idx] = list(_delete_snapshot.get('sigmas', []))
+            per_spec_amplitude[idx] = list(_delete_snapshot.get('amps', []))
+            per_spec_center_window[idx] = list(_delete_snapshot.get('windows', []))
+            per_spec_modes[idx] = dict(_delete_snapshot.get('modes', {'amplitude':[], 'center':[], 'sigma':[]}))
+        except Exception:
+            pass
+        _draw_current_peaks_for_delete(spectrum_sel.value)
+        _append_status("Deletions cleared; restored original peaks.")
+
+    def _cancel_deletions(_b=None):
+        if _recent_click("cancel_deletions"):
+            return
+        try:
+            idx = spectrum_sel.value
+            per_spec_center[idx] = list(_delete_snapshot.get('centers', []))
+            per_spec_include[idx] = list(_delete_snapshot.get('includes', []))
+            per_spec_sigma[idx] = list(_delete_snapshot.get('sigmas', []))
+            per_spec_amplitude[idx] = list(_delete_snapshot.get('amps', []))
+            per_spec_center_window[idx] = list(_delete_snapshot.get('windows', []))
+            per_spec_modes[idx] = dict(_delete_snapshot.get('modes', {'amplitude':[], 'center':[], 'sigma':[]}))
+        except Exception:
+            pass
+        staged_delete_indices.clear()
+        _append_status("Deletions cancelled. No changes applied.")
+        _exit_delete_mode()
+
+    try:
+        buttons_row.children[3].on_click(_accept_deletions)
+        buttons_row.children[4].on_click(_redo_deletions)
+        buttons_row.children[5].on_click(_cancel_deletions)
+        # Hide initial placeholders
+        buttons_row.children[3].layout.display = "none"
+        buttons_row.children[4].layout.display = "none"
+        buttons_row.children[5].layout.display = "none"
+    except Exception:
+        pass
 
     def _accept_new_peaks(b=None):
         if _recent_click("accept_new_peaks"):
@@ -15038,6 +15669,9 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         _hide(redo_new_peaks_btn)
         _hide(cancel_new_peaks_btn)
         # Restore previously hidden/disabled controls after exiting add-peaks mode
+        _show(fit_btn)
+        _show(reset_all_row)
+        _show(fit_range_row)
         _show(iter_btn)
         _update_cancel_fit_visibility()
         _show(save_btn)
@@ -15047,6 +15681,20 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         try:
             adding_mode = False
             _show(add_peaks_btn)
+            # Unbind add-mode click handler when add mode ends
+            try:
+                if not _IN_COLAB:
+                    fig.data[0].on_click(None)
+            except Exception:
+                pass
+            # Ensure Delete Peaks button reappears after ending add mode
+            try:
+                if delete_peaks_btn is not None:
+                    delete_peaks_btn.layout.display = ""
+                else:
+                    buttons_row.children[2].layout.display = ""
+            except Exception:
+                pass
             _clear_add_peak_shapes()
             new_peak_xs.clear()
             new_peak_windows.clear()
@@ -15115,9 +15763,27 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         new_peak_xs.clear()
         _clear_add_peak_shapes()
         _show(add_peaks_btn)
+        # Unbind add-mode click handler when add mode is cancelled
+        try:
+            if not _IN_COLAB:
+                fig.data[0].on_click(None)
+        except Exception:
+            pass
+        # Ensure Delete Peaks button reappears when add mode is cancelled
+        try:
+            if delete_peaks_btn is not None:
+                delete_peaks_btn.layout.display = ""
+            else:
+                buttons_row.children[2].layout.display = ""
+        except Exception:
+            pass
         _hide(accept_new_peaks_btn)
         _hide(redo_new_peaks_btn)
         _hide(cancel_new_peaks_btn)
+        # Restore controls hidden during Peak Addition mode
+        _show(fit_btn)
+        _show(reset_all_row)
+        _show(fit_range_row)
         # Restore previously hidden/disabled controls after cancelling add-peaks mode
         _show(iter_btn)
         _update_cancel_fit_visibility()
