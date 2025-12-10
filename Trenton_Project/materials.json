@@ -20,7 +20,7 @@
                 "1": "All wavenumbers are in cm⁻¹",
                 "2": "This file will be populated in the 'Create JSON File' cell of the Main.ipynb",
                 "3": "It is suggested to rename each material to be descriptive. Later functions will look for 'alias', so manually editing 'name' is acceptable",
-                "4": "Peak models based on Pseudo-Voigt functions"
+                "4": "Peak models are based on Pseudo-Voigt functions"
             }
         },
         "M001": {

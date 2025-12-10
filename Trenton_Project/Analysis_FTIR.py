@@ -104,25 +104,6 @@ class _LazyModePlaceholder(_LazyPlaceholder):
 peak_box_cache = {}
 peak_accordion = None
 
-def migrate_fit_results_column(FTIR_DataFrame):
-    """Rename the old 'Time-Series Fit Results' column to 'Material Fit Results'.
-
-    - Creates the new column if the old exists; preserves data.
-    - Removes the old column if present after migration.
-    - Returns the updated DataFrame.
-    """
-    if FTIR_DataFrame is None or not isinstance(FTIR_DataFrame, pd.DataFrame):
-        raise ValueError("FTIR_DataFrame must be a pandas DataFrame.")
-    old = "Time-Series Fit Results"
-    new = "Material Fit Results"
-    try:
-        if old in FTIR_DataFrame.columns and new not in FTIR_DataFrame.columns:
-            FTIR_DataFrame[new] = FTIR_DataFrame[old]
-        if old in FTIR_DataFrame.columns:
-            FTIR_DataFrame.drop(columns=[old], inplace=True)
-    except Exception:
-        pass
-    return FTIR_DataFrame
 
 def _ensure_cache_from_accordion(idx: int):
     """Module-level fallback to sync a peak's cache entry from accordion widgets.
@@ -7382,7 +7363,10 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
             spectrum_sel.value = None
             with info_out:
                 clear_output(wait=True)
-                print("No spectra match the current filters.")
+                if display_mode.value == "series":
+                    print("Select specific Material and Conditions (not 'any') to view time-series.")
+                else:
+                    print("Select a spectrum from the dropdown to begin normalization.")
             # If in time-series mode, also clear the plot so it's obvious
             try:
                 if display_mode.value == "series":
@@ -7396,10 +7380,11 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
         # Preserve existing selection if still valid; otherwise require manual user selection
         if spectrum_sel.value not in [v for _, v in opts]:
             spectrum_sel.value = None
-            # Only show dropdown guidance in single-spectrum mode
-            if display_mode.value == "single":
-                with info_out:
-                    clear_output(wait=True)
+            with info_out:
+                clear_output(wait=True)
+                if display_mode.value == "series":
+                    print("Select specific Material and Conditions (not 'any') to view time-series.")
+                else:
                     print("Select a spectrum from the dropdown to begin normalization.")
         # If time-series mode is active, refresh plot to reflect current filters
         try:
@@ -7412,12 +7397,16 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
         idx = spectrum_sel.value
         # Time-series mode: plot all spectra currently present in dropdown options (filtered set)
         if display_mode.value == "series":
+            # Always show time-series guidance message
+            try:
+                with info_out:
+                    clear_output(wait=True)
+                    print("Select specific Material and Conditions (not 'any') to view time-series.")
+            except Exception:
+                pass
             # Require specific Material and (if present) Conditions before plotting
             try:
                 if material_dd.value == "any" or (cond_col and conditions_dd.value == "any"):
-                    with info_out:
-                        clear_output(wait=True)
-                        print("Select specific Material and Conditions (not 'any') to view time-series.")
                     try:
                         mark_row.layout.display = "none"
                     except Exception:
@@ -7444,9 +7433,10 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
             except Exception:
                 filtered_ts = FTIR_DataFrame.head(0)
             if filtered_ts is None or len(filtered_ts) == 0:
+                # Keep guidance consistent
                 with info_out:
                     clear_output(wait=True)
-                    print("No spectra match the current filters.")
+                    print("Select specific Material and Conditions (not 'any') to view time-series.")
                 try:
                     mark_row.layout.display = "none"
                 except Exception:
@@ -7480,7 +7470,7 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
             if len(series_data) == 0:
                 with info_out:
                     clear_output(wait=True)
-                    print("No spectra match the current filters.")
+                    print("Select specific Material and Conditions (not 'any') to view time-series.")
                 try:
                     mark_row.layout.display = "none"
                 except Exception:
@@ -7533,9 +7523,10 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
                 mark_row.layout.display = "none"
             except Exception:
                 pass
+            # Keep the guidance message; add plot count to logs if needed
             with info_out:
                 clear_output(wait=True)
-                print(f"Plotted {count_plotted} trace(s). Click two points to select the tip of the normalization peak.")
+                print("Select specific Material and Conditions (not 'any') to view time-series.")
             # Reveal plot container and show Save/Redo in time-series mode
             try:
                 bordered_plot.layout.display = ""
@@ -8210,9 +8201,16 @@ def find_peak_info(FTIR_DataFrame, filepath=None):
 
     options = _build_options()
     if not options:
-        raise ValueError(
-            "No spectra available to analyze. Ensure 'Normalized and Corrected Data' is populated (run baseline and normalization)."
-        )
+        try:
+            info_html = widgets.HTML(
+                "<span style='color:#a00;'>No spectra currently match the filters. "
+                "Ensure 'Normalized and Corrected Data' is populated and adjust Material/Conditions.</span>"
+            )
+            display(info_html)
+        except Exception:
+            pass
+        # Provide a minimal dropdown with a placeholder to avoid exception
+        options = [("<no spectra>", None)]
 
     # Seed from first spectrum, prefer session 'time' if available
     try:
@@ -8546,7 +8544,7 @@ def find_peak_info(FTIR_DataFrame, filepath=None):
         nonlocal current_idx_fp
         current_idx_fp = idx
         x_arr, y_arr = _get_xy(idx)
-        if x_arr is None:
+        if idx is None:
             with msg_out:
                 msg_out.clear_output()
                 print("Selected spectrum missing or invalid normalized data.")
@@ -8559,7 +8557,6 @@ def find_peak_info(FTIR_DataFrame, filepath=None):
         # Update traces
         with fig.batch_update():
             fig.data[0].x = x_arr.tolist()
-            fig.data[0].y = y_arr.tolist()
         # Update bounds for each slider and enable/disable based on checkboxes
         x_min, x_max = float(np.nanmin(x_arr)), float(np.nanmax(x_arr))
         for cb, sl in ((use_r1, x_range1), (use_r2, x_range2), (use_r3, x_range3)):
@@ -17419,7 +17416,7 @@ def fit_material(FTIR_DataFrame):
     def _on_fit_click(_b=None):
         try:
             status_html.value = (
-                "<span style='color:#555;'>Running time-series fit...</span>"
+                "<span style='color:#555;'>Running fit...</span>"
             )
         except Exception:
             pass
