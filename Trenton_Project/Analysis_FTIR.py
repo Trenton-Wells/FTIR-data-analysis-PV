@@ -1412,17 +1412,6 @@ _SESSION_SELECTIONS = {"material": "any", "conditions": "any", "time": "any"}
 # ^ Persist last-used filter selections across interactive tools so a user's context
 #   (material / conditions / time) carries between normalization, peak finding, etc.
 
-# Staged (unsaved) peak additions per spectrum index. When the user Accepts new peaks
-# they are placed here and overlaid for subsequent fitting, but not written back to
-# the DataFrame until the user clicks "Save for spectrum". Changing the selected
-# spectrum does not discard staging; returning to a spectrum with staged additions
-# shows the staged peak set. Structure per idx:
-#   {
-#       'centers': [...], 'center_windows': [...], 'sigma': [...],
-#       'amplitude': [...], 'alpha': [...], 'include': [...],
-#       'modes': {'amplitude': [...], 'center': [...], 'sigma': [...]} }
-_STAGED_PEAK_ADDITIONS = {}
-
 # Track active widgets/figures created by baseline_correct_spectra (interactive) to ensure clean re-entry
 _TB_WIDGETS = []
 # ^ Bookkeeping list of active ipywidgets objects created by baseline_correct_spectra so they can
@@ -8858,7 +8847,7 @@ def find_peak_info(FTIR_DataFrame, filepath=None):
 
 
 def deconvolute_peaks(FTIR_DataFrame, filepath=None):
-    global peak_box_cache, peak_accordion, _STAGED_PEAK_ADDITIONS
+    global peak_box_cache, peak_accordion
     # Begin each session with a fresh widget cache so rebuilt UIs do not reuse
     # placeholders from a previous run (which could hide the peak list until a
     # manual interaction occurs).
@@ -8867,16 +8856,11 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
     peak_box_cache = {}
     # Reset accordion reference; a new instance will be assigned when the UI is built
     peak_accordion = None
-    # Remove any helper callbacks left behind by a prior session and drop staged peaks
+    # Remove any helper callbacks left behind by a prior session
     try:
         globals().pop('_refresh_slider_lists', None)
     except Exception:
         pass
-    try:
-        if isinstance(_STAGED_PEAK_ADDITIONS, dict):
-            _STAGED_PEAK_ADDITIONS.clear()
-    except Exception:
-        _STAGED_PEAK_ADDITIONS = {}
     if FTIR_DataFrame is None or not isinstance(FTIR_DataFrame, pd.DataFrame):
         raise ValueError("Error: FTIR_DataFrame not defined. Load or Create DataFrame first.")
     """
@@ -9442,32 +9426,6 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
     # Track which peaks are currently rendered so range changes can diff efficiently
     previous_in_range_indices: set[int] = set()
 
-    # Persisted per-spectrum settings so switching spectra preserves choices
-    per_spec_alpha = {}  # idx -> list[float]
-    per_spec_include = {}  # idx -> list[bool]
-    per_spec_center = {}  # idx -> list[float]
-    per_spec_center_window = {}  # idx -> list[float]
-    per_spec_sigma = {}  # idx -> list[float]
-    per_spec_amplitude = {}  # idx -> list[float]
-    per_spec_modes = {}  # idx -> { 'amplitude': list[str], 'center': list[str], 'sigma': list[str] }
-    per_spec_locks = {}  # retained for backward compatibility
-    per_spec_globals = {}  # idx -> { 'fit_range': (lo,hi) }
-    # Track the last active (Material, Conditions) filter to scope the above caches
-    current_filter_key = (None, None)
-    # Group-level templates (by current (Material, Conditions)) so parameter changes
-    # carry over across spectra within the same selection.
-    group_alpha_template = {}  # (Material, Conditions) -> list[float]
-    group_include_template = {}  # (Material, Conditions) -> list[bool]
-    group_center_template = {}  # (Material, Conditions) -> list[float]
-    group_center_window_template = {}  # (Material, Conditions) -> list[float]
-    group_sigma_template = {}  # (Material, Conditions) -> list[float]
-    group_amplitude_template = {}  # (Material, Conditions) -> list[float]
-    group_modes_template = {}  # (Material, Conditions) -> { 'amplitude': list[str], 'center': list[str], 'sigma': list[str] }
-    group_locks_template = {}  # (Material, Conditions) -> { 'alpha': list[bool], 'center': list[bool], 'sigma': list[bool] }
-    group_globals_template = ({})  # (Material, Conditions) -> {fit_range}
-    # Shared, group-scoped manual/template peaks (x positions) that should carry over
-    # when switching spectra within the same Material/Conditions selection.
-    shared_peaks_x = None  # list[float] | None
     # Guard to suppress redundant fits during bulk programmatic updates
     bulk_update_in_progress = False
     # Lightweight reentrancy/debounce guards to avoid duplicate callbacks
@@ -9491,105 +9449,43 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         return False
 
     def _snapshot_current_controls():
-        """Persist current UI control values for the active spectrum."""
+        """Best-effort snapshot of current UI widget values.
+
+        Important: this is intentionally *not* used to carry state between spectra.
+        It exists to keep internal bookkeeping consistent (e.g., during range
+        rebuilds or when lazy widgets materialize).
+        """
         try:
             idx = spectrum_sel.value
         except Exception:
+            idx = None
+        if idx is None:
             return
+        # Capture current center slider values into the per-spectrum state for this
+        # currently-selected idx only (the dict is cleared on spectrum change).
         try:
-            per_spec_alpha[idx] = [float(s.value) for s in alpha_sliders]
-        except Exception:
-            per_spec_alpha[idx] = []
-        try:
-            per_spec_include[idx] = [bool(cb.value) for cb in include_checkboxes]
-        except Exception:
-            per_spec_include[idx] = []
-        try:
-            per_spec_center[idx] = [float(sl.value) for sl in center_sliders]
-        except Exception:
-            per_spec_center[idx] = []
-        try:
-            per_spec_center_window[idx] = [float(sl.value) for sl in center_window_sliders]
-        except Exception:
-            per_spec_center_window[idx] = []
-        try:
-            per_spec_amplitude[idx] = [float(sl.value) for sl in amplitude_sliders]
-        except Exception:
-            per_spec_amplitude[idx] = []
-        try:
-            per_spec_modes[idx] = {
-                'amplitude': [tb.value for tb in amplitude_mode_toggles],
-                'center': [_normalize_center_mode_value(tb.value) for tb in center_mode_toggles],
-                'sigma': [tb.value for tb in sigma_mode_toggles],
-            }
-        except Exception:
-            per_spec_modes[idx] = {'amplitude': [], 'center': [], 'sigma': []}
-        try:
-            per_spec_sigma[idx] = [float(sg.value) for sg in sigma_sliders]
-        except Exception:
-            per_spec_sigma[idx] = []
-        try:
-            per_spec_locks[idx] = {
-                'alpha': [bool(cb.value) for cb in lock_alpha_checkboxes],
-                'center': [bool(cb.value) for cb in lock_center_checkboxes],
-                'sigma': [bool(cb.value) for cb in lock_sigma_checkboxes],
-            }
-        except Exception:
-            per_spec_locks[idx] = {'alpha': [], 'center': [], 'sigma': []}
-        try:
-            lo, hi = _current_fit_range()
-            per_spec_globals[idx] = {
-                "fit_range": (float(lo), float(hi)),
-            }
-        except Exception:
-            pass
-        # Also persist group-level templates for this (Material, Conditions)
-        try:
-            key = current_filter_key
-            if isinstance(key, tuple) and any(v is not None for v in key):
+            state = peak_center_state_by_idx.setdefault(idx, {})
+            for pos, sl in enumerate(center_sliders):
                 try:
-                    group_alpha_template[key] = list(per_spec_alpha.get(idx, []))
+                    orig_idx = (
+                        center_slider_peak_indices[pos]
+                        if pos < len(center_slider_peak_indices)
+                        else pos
+                    )
                 except Exception:
-                    group_alpha_template[key] = []
+                    orig_idx = pos
                 try:
-                    group_include_template[key] = list(per_spec_include.get(idx, []))
+                    v = float(getattr(sl, 'value', np.nan))
                 except Exception:
-                    group_include_template[key] = []
-                try:
-                    group_center_template[key] = list(per_spec_center.get(idx, []))
-                except Exception:
-                    group_center_template[key] = []
-                try:
-                    group_center_window_template[key] = list(per_spec_center_window.get(idx, []))
-                except Exception:
-                    group_center_window_template[key] = []
-                try:
-                    group_sigma_template[key] = list(per_spec_sigma.get(idx, []))
-                except Exception:
-                    group_sigma_template[key] = []
-                try:
-                    group_amplitude_template[key] = list(per_spec_amplitude.get(idx, []))
-                except Exception:
-                    group_amplitude_template[key] = []
-                try:
-                    group_modes_template[key] = dict(per_spec_modes.get(idx, {'amplitude': [], 'center': [], 'sigma': []}))
-                except Exception:
-                    group_modes_template[key] = {'amplitude': [], 'center': [], 'sigma': []}
-                try:
-                    group_locks_template[key] = dict(per_spec_locks.get(idx, {'alpha': [], 'center': [], 'sigma': []}))
-                except Exception:
-                    group_locks_template[key] = {'alpha': [], 'center': [], 'sigma': []}
-                try:
-                    group_globals_template[key] = dict(per_spec_globals.get(idx, {}))
-                except Exception:
-                    pass
+                    v = getattr(sl, 'value', None)
+                entry = state.setdefault(orig_idx, {})
+                if entry.get('initial') is None:
+                    entry['initial'] = v
+                entry['user'] = v
         except Exception:
             pass
 
-    def _on_control_change(*_):
-        """Generic control-change handler (kept for backward compatibility)."""
-        # Delegate to fit-range-specific handler by default
-        _on_fit_range_change()
+
 
     def _on_include_toggle(*_):
         """Handle include checkbox toggles without rebuilding the per-peak UI."""
@@ -10078,24 +9974,10 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         return x_arr, y_arr
 
     def _get_peaks(row_idx):
-        # Prefer live per-spectrum working copies so deletions/additions are reflected immediately
-        xs = list(per_spec_center.get(row_idx, []) or [])
-        ys = list(per_spec_amplitude.get(row_idx, []) or [])
-        # Fallback to DataFrame if working copies are empty
-        if not xs or not ys:
-            r = FTIR_DataFrame.loc[row_idx]
-            xs = _parse_seq(r.get("Peak Wavenumbers"))
-            ys = _parse_seq(r.get("Peak Absorbances"))
-        # Overlay staged (unsaved) additions if present for this spectrum index
-        try:
-            if row_idx in _STAGED_PEAK_ADDITIONS:
-                staged = _STAGED_PEAK_ADDITIONS.get(row_idx) or {}
-                if staged.get('centers') is not None:
-                    xs = list(staged.get('centers'))
-                if staged.get('amplitude') is not None:
-                    ys = list(staged.get('amplitude'))
-        except Exception:
-            pass
+        # Read peaks solely from DataFrame.
+        r = FTIR_DataFrame.loc[row_idx]
+        xs = _parse_seq(r.get("Peak Wavenumbers"))
+        ys = _parse_seq(r.get("Peak Absorbances"))
         if xs is None or ys is None:
             return [], []
         try:
@@ -10264,14 +10146,15 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             active_ranges = _current_fit_ranges()
         except Exception:
             active_ranges = [(float("-inf"), float("inf"))]
-        saved_alphas = per_spec_alpha.get(row_idx)
-        saved_includes = per_spec_include.get(row_idx)
-        saved_center = per_spec_center.get(row_idx)
-        saved_sigma = per_spec_sigma.get(row_idx)
-        saved_amplitude = per_spec_amplitude.get(row_idx)
-        saved_modes = per_spec_modes.get(row_idx)
-        saved_center_window = per_spec_center_window.get(row_idx)
-        saved_locks = per_spec_locks.get(row_idx)
+        # Do not restore per-spectrum/group-level settings; start from defaults
+        saved_alphas = None
+        saved_includes = None
+        saved_center = None
+        saved_sigma = None
+        saved_amplitude = None
+        saved_modes = {'amplitude': None, 'center': None, 'sigma': None}
+        saved_center_window = None
+        saved_locks = {'alpha': None, 'center': None, 'sigma': None}
         if saved_center:
             try:
                 for _idx_local, _val in enumerate(saved_center):
@@ -10279,47 +10162,7 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                         _set_peak_user_center(row_idx, _idx_local, _val)
             except Exception:
                 pass
-        # Fallback to group-level templates if no per-spectrum values exist
-        if not saved_alphas:
-            try:
-                saved_alphas = group_alpha_template.get(current_filter_key)
-            except Exception:
-                saved_alphas = None
-        if not saved_includes:
-            try:
-                saved_includes = group_include_template.get(current_filter_key)
-            except Exception:
-                saved_includes = None
-        if not saved_center:
-            try:
-                saved_center = group_center_template.get(current_filter_key)
-            except Exception:
-                saved_center = None
-        if not saved_sigma:
-            try:
-                saved_sigma = group_sigma_template.get(current_filter_key)
-            except Exception:
-                saved_sigma = None
-        if not saved_amplitude:
-            try:
-                saved_amplitude = group_amplitude_template.get(current_filter_key)
-            except Exception:
-                saved_amplitude = None
-        if not saved_modes:
-            try:
-                saved_modes = group_modes_template.get(current_filter_key)
-            except Exception:
-                saved_modes = {'amplitude': None, 'center': None, 'sigma': None}
-        if not saved_center_window:
-            try:
-                saved_center_window = group_center_window_template.get(current_filter_key)
-            except Exception:
-                saved_center_window = None
-        if not saved_locks:
-            try:
-                saved_locks = group_locks_template.get(current_filter_key)
-            except Exception:
-                saved_locks = {'alpha': None, 'center': None, 'sigma': None}
+        # No group-level fallbacks; rely on defaults each rebuild
         if not isinstance(saved_locks, dict):
             saved_locks = {'alpha': None, 'center': None, 'sigma': None}
         included_boxes = []  # will be used only for full rebuild path
@@ -10330,6 +10173,15 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         global peak_box_cache
         if not isinstance(peak_box_cache, dict):
             peak_box_cache = {}
+        # Never reuse cached widget objects across different spectra.
+        nonlocal cache_owner_idx
+        try:
+            if cache_owner_idx != row_idx:
+                peak_box_cache.clear()
+                cache_owner_idx = row_idx
+                previous_in_range_indices = set()
+        except Exception:
+            cache_owner_idx = row_idx
 
         # --- Parameter explanations for the toggle ---
         param_details_text = (
@@ -10670,10 +10522,8 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                     amplitude_slider.observe(_on_center_sigma_change, names="value")
                     center_window_slider.observe(_on_center_sigma_change, names="value")
                     def _on_sigma_change(change, idx_local=peak_idx):
+                        # No persistence across spectra; simply snapshot (no-op) to maintain flow
                         if sigma_mode_toggle.value == 'Manual':
-                            if row_idx not in per_spec_sigma:
-                                per_spec_sigma[row_idx] = [None] * len(peaks_x_all)
-                            per_spec_sigma[row_idx][idx_local] = change['new']
                             _snapshot_current_controls()
                     sigma_slider.observe(_on_sigma_change, names="value")
 
@@ -11152,18 +11002,7 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                             center_window_slider.observe(_on_center_sigma_change, names='value')
                             def _on_sigma_change_stub(change, idx_local=peak_idx):
                                 if sigma_mode_toggle.value == 'Manual':
-                                    try:
-                                        # Ensure row entry exists
-                                        if row_idx not in per_spec_sigma:
-                                            per_spec_sigma[row_idx] = [None] * len(peaks_x_all)
-                                        # Dynamically expand list if new peak index exceeds current length
-                                        needed = idx_local + 1
-                                        current_len = len(per_spec_sigma[row_idx])
-                                        if needed > current_len:
-                                            per_spec_sigma[row_idx].extend([None] * (needed - current_len))
-                                        per_spec_sigma[row_idx][idx_local] = change.get('new')
-                                    except Exception:
-                                        pass
+                                    # No persistence; maintain callback structure
                                     _snapshot_current_controls()
                             sigma_slider.observe(_on_sigma_change_stub, names='value')
                         except Exception:
@@ -11520,7 +11359,7 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
 
     def _rebuild_spectrum_options(*_):
         """Recompute the spectrum dropdown options based on current filters."""
-        nonlocal current_filter_key, bulk_update_in_progress, shared_peaks_x
+        nonlocal bulk_update_in_progress
         # Build candidate set from initial 'filtered' and drop rows without normalized
         # data
         try:
@@ -11553,22 +11392,6 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
 
         # Save current value before updating options
         prev_value = spectrum_sel.value
-
-        # If the (Material, Conditions) filter changed, clear any preserved per-spectrum
-        # state so that edits/added peaks do not leak into unrelated spectra groups.
-        new_filter_key = (sel_mat, sel_cond)
-        if new_filter_key != current_filter_key:
-            # Clear per-spectrum state for new group
-            per_spec_alpha.clear()
-            per_spec_include.clear()
-            per_spec_center.clear()
-            per_spec_center_window.clear()
-            per_spec_sigma.clear()
-            per_spec_amplitude.clear()
-            per_spec_modes.clear()
-            per_spec_locks.clear()
-            per_spec_globals.clear()
-            current_filter_key = new_filter_key
 
         valid_values = [v for (_lbl, v) in new_options]
         value_changed = False
@@ -12041,14 +11864,7 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                     ranges_for_fallback = []
 
             def _user_requested_include(orig_idx: int) -> bool:
-                # Prefer per-spectrum persisted include flags if available.
-                try:
-                    inc_list = per_spec_include.get(idx)
-                    if inc_list is not None and orig_idx < len(inc_list):
-                        return bool(inc_list[orig_idx])
-                except Exception:
-                    pass
-                # Next, consult the live include checkbox mapping if accessible.
+                # Consult the live include checkbox mapping if accessible.
                 try:
                     if center_slider_peak_indices and orig_idx in center_slider_peak_indices:
                         pos = center_slider_peak_indices.index(orig_idx)
@@ -12432,10 +12248,7 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                     try:
                         m = lst[pos].value
                     except Exception:
-                        try:
-                            m = per_spec_modes.get(idx, {}).get(key, [])[peak_idx]
-                        except Exception:
-                            m = 'Auto'
+                        m = 'Auto' if key in ('amplitude','sigma') else CENTER_MODE_WINDOW
                     if key == 'center':
                         return _normalize_center_mode_value(m)
                     if m not in ('Auto','Manual'):
@@ -13287,10 +13100,16 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
 
     # Track displayed spectrum independently for deconvolution
     current_idx_deconv = None
+    cache_owner_idx = None
 
     def _on_spectrum_change(*_):
-        nonlocal bulk_update_in_progress, shared_peaks_x
+        nonlocal bulk_update_in_progress
         nonlocal on_spectrum_change_inflight, last_on_spectrum_change_ts
+        nonlocal cache_owner_idx
+        nonlocal range_sliders
+        nonlocal adding_mode, new_peak_xs, new_peak_windows
+        nonlocal previous_in_range_indices
+        nonlocal xmin, xmax
         # Debounce/guard: prevent rapid double invocation
         try:
             now_ts = time.time()
@@ -13302,75 +13121,102 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             return
         on_spectrum_change_inflight = True
         try:
-            # Snapshot previous spectrum's controls before switching
-            _snapshot_current_controls()
             idx = spectrum_sel.value
             nonlocal current_idx_deconv
             current_idx_deconv = idx
-            # If a shared peaks template exists for this filter group, apply it to the
-            # newly selected spectrum (recompute Y from its data), so user-added peaks
-            # carry over when switching spectra within the same Material/Conditions.
+            # Hard reset any transient UI state so NOTHING carries over between spectra.
+            # New spectrum should initialize from defaults and the DataFrame only.
             try:
-                if shared_peaks_x is not None and isinstance(
-                    shared_peaks_x, (list, tuple)
-                ):
-                    x_arr, y_arr = _get_xy(idx)
-                    if x_arr is not None and y_arr is not None:
-                        xs = [float(v) for v in shared_peaks_x]
-                        ys = []
-                        try:
-                            for xv in xs:
-                                i = int(np.argmin(np.abs(x_arr - xv)))
-                                ys.append(float(y_arr[i]))
-                        except Exception:
-                            ys = [float("nan") for _ in xs]
-                        FTIR_DataFrame.at[idx, "Peak Wavenumbers"] = xs
-                        FTIR_DataFrame.at[idx, "Peak Absorbances"] = ys
-                        # Peak definitions changed for this spectrum; clear per-peak UI
-                        try:
-                            per_spec_alpha.pop(idx, None)
-                            per_spec_include.pop(idx, None)
-                        except Exception:
-                            pass
+                if isinstance(peak_box_cache, dict):
+                    peak_box_cache.clear()
             except Exception:
                 pass
-            # Restore per-spectrum globals and per-peak controls without triggering many
-            # fits
+            cache_owner_idx = None
+            try:
+                previous_in_range_indices = set()
+            except Exception:
+                pass
+            try:
+                peak_center_state_by_idx.clear()
+            except Exception:
+                pass
+            try:
+                last_result_by_idx.clear()
+            except Exception:
+                pass
+            try:
+                last_redchi_by_idx.clear()
+            except Exception:
+                pass
+            try:
+                included_index_map.clear()
+            except Exception:
+                pass
+            # Exit add-peak mode and clear any temporary markers
+            try:
+                adding_mode = False
+                new_peak_xs.clear()
+                new_peak_windows.clear()
+            except Exception:
+                pass
+            try:
+                _clear_add_peak_shapes()
+            except Exception:
+                pass
+
+            # Reset fit ranges to defaults for this spectrum (full x-span, single range)
+            try:
+                x_arr, y_arr = _get_xy(idx)
+            except Exception:
+                x_arr, y_arr = (None, None)
+            if x_arr is not None and getattr(x_arr, 'size', 0) > 0:
+                try:
+                    xmin = float(np.nanmin(x_arr))
+                    xmax = float(np.nanmax(x_arr))
+                    if xmax < xmin:
+                        xmin, xmax = xmax, xmin
+                except Exception:
+                    pass
+            try:
+                fit_range.min = xmin
+                fit_range.max = xmax
+                fit_range.step = (xmax - xmin) / 1000 or 1.0
+                fit_range.value = [xmin, xmax]
+            except Exception:
+                pass
+            try:
+                # Drop any extra ranges and re-enable the add button
+                range_sliders = [fit_range]
+                add_range_btn.disabled = False
+                add_range_btn.tooltip = "Insert an additional fit range (up to 3)."
+                _refresh_range_box()
+            except Exception:
+                pass
+
+            # Update plot data for the new spectrum and clear any prior fit
+            try:
+                x_arr, y_arr = _get_xy(idx)
+                if x_arr is not None and y_arr is not None:
+                    with fig.batch_update():
+                        fig.data[0].x = x_arr.tolist()
+                        fig.data[0].y = y_arr.tolist()
+            except Exception:
+                pass
+            try:
+                with fig.batch_update():
+                    fig.data[1].x = []
+                    fig.data[1].y = []
+                    while len(fig.data) > 2:
+                        fig.data = tuple(fig.data[:2])
+            except Exception:
+                pass
+
+            # Rebuild per-peak controls from scratch (defaults + DataFrame)
             bulk_update_in_progress = True
             try:
-                g = per_spec_globals.get(idx)
-                if g is not None:
-                    try:
-                        fr = g.get("fit_range")
-                        if isinstance(fr, (list, tuple)) and len(fr) == 2:
-                            lo, hi = float(fr[0]), float(fr[1])
-                            # clamp to bounds
-                            lo = max(float(fit_range.min), min(lo, float(fit_range.max)))
-                            hi = max(lo, min(hi, float(fit_range.max)))
-                            fit_range.value = [lo, hi]
-                    except Exception:
-                        pass
-                else:
-                    # Use group-level globals as a fallback when switching within the same
-                    # Material/Conditions selection
-                    try:
-                        gg = group_globals_template.get(current_filter_key)
-                    except Exception:
-                        gg = None
-                    if isinstance(gg, dict) and gg:
-                        try:
-                            fr = gg.get("fit_range")
-                            if isinstance(fr, (list, tuple)) and len(fr) == 2:
-                                lo, hi = float(fr[0]), float(fr[1])
-                                lo = max(float(fit_range.min), min(lo, float(fit_range.max)))
-                                hi = max(lo, min(hi, float(fit_range.max)))
-                                fit_range.value = [lo, hi]
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-            _refresh_peak_control_widgets(idx)
-            bulk_update_in_progress = False
+                _refresh_peak_control_widgets(idx)
+            finally:
+                bulk_update_in_progress = False
             # Refresh the fit range overlay for the new spectrum
             try:
                 _update_fit_range_indicator()
@@ -13419,24 +13265,8 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         if _recent_click("save_for_file"):
             return
         idx = spectrum_sel.value
-        # If there are staged peak additions, require a Fit before committing so
-        # saved parameters reflect the updated component set.
         res = last_result_by_idx.get(idx)
-        if idx in _STAGED_PEAK_ADDITIONS:
-            if res is None:
-                _log_once("Staged peaks pending: run Fit before Save to commit them.")
-                return
-            # Commit staged peaks to DataFrame (structural change) prior to saving results
-            try:
-                staged = _STAGED_PEAK_ADDITIONS.get(idx) or {}
-                FTIR_DataFrame.loc[idx, 'Peak Wavenumbers'] = list(staged.get('centers') or [])
-                FTIR_DataFrame.loc[idx, 'Peak Absorbances'] = list(staged.get('amplitude') or [])
-                # Remove staging entry after commit
-                del _STAGED_PEAK_ADDITIONS[idx]
-                _log_once(f"Committed {len(FTIR_DataFrame.loc[idx, 'Peak Wavenumbers'])} staged peaks to DataFrame.")
-            except Exception as _e_commit:
-                _log_once(f"Failed committing staged peaks: {_e_commit}")
-        # If still no result (and no staging), instruct user to Fit
+        # Require a Fit for the current spectrum before saving.
         if res is None:
             _log_once("No current fit. Click 'Fit' to compute, then click 'Save' again.")
             return
@@ -13503,13 +13333,7 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             if initial_val is None and orig_idx < len(all_peaks_x):
                 initial_val = all_peaks_x[orig_idx]
 
-            if user_val is None:
-                try:
-                    saved_centers = per_spec_center.get(idx)
-                    if saved_centers is not None and orig_idx < len(saved_centers):
-                        user_val = saved_centers[orig_idx]
-                except Exception:
-                    pass
+            # Do not restore user centers from per-spectrum caches
             if user_val is None:
                 try:
                     pos = center_slider_peak_indices.index(orig_idx)
@@ -13572,7 +13396,7 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
 
     def _close_ui(b):
         global peak_box_cache, peak_accordion
-        nonlocal shared_peaks_x, current_filter_key, adding_mode, previous_in_range_indices
+        nonlocal adding_mode, previous_in_range_indices
         # Emit a session summary before closing widgets; keep log_html visible
         try:
             lines = _session_summary_lines(_deconv_changes, context="deconvolution")
@@ -13599,10 +13423,7 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             new_peak_windows.clear()
         except Exception:
             pass
-        try:
-            shared_peaks_x = None
-        except Exception:
-            pass
+        # No shared cross-spectrum state to clear
         try:
             spectrum_sel.close()
             material_dd.close()
@@ -13779,39 +13600,6 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             pass
         try:
             last_click_ts.clear()
-        except Exception:
-            pass
-        try:
-            per_spec_alpha.clear()
-            per_spec_include.clear()
-            per_spec_center.clear()
-            per_spec_center_window.clear()
-            per_spec_sigma.clear()
-            per_spec_amplitude.clear()
-            per_spec_modes.clear()
-            per_spec_locks.clear()
-            per_spec_globals.clear()
-        except Exception:
-            pass
-        try:
-            group_alpha_template.clear()
-            group_include_template.clear()
-            group_center_template.clear()
-            group_center_window_template.clear()
-            group_sigma_template.clear()
-            group_amplitude_template.clear()
-            group_modes_template.clear()
-            group_locks_template.clear()
-            if isinstance(group_globals_template, dict):
-                group_globals_template.clear()
-        except Exception:
-            pass
-        try:
-            current_filter_key = (None, None)
-        except Exception:
-            pass
-        try:
-            _STAGED_PEAK_ADDITIONS.clear()
         except Exception:
             pass
         try:
@@ -15066,14 +14854,7 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         # Snapshot current state
         try:
             idx = spectrum_sel.value
-            _delete_snapshot = {
-                'centers': list(per_spec_center.get(idx, []) or []),
-                'includes': list(per_spec_include.get(idx, []) or []),
-                'sigmas': list(per_spec_sigma.get(idx, []) or []),
-                'amps': list(per_spec_amplitude.get(idx, []) or []),
-                'windows': list(per_spec_center_window.get(idx, []) or []),
-                'modes': dict(per_spec_modes.get(idx, {'amplitude':[], 'center':[], 'sigma':[]})),
-            }
+            _delete_snapshot = {}
         except Exception:
             _delete_snapshot = {}
         _hide(add_peaks_btn)
@@ -15266,34 +15047,22 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
     def _apply_staged_deletions():
         try:
             idx = spectrum_sel.value
-            centers = per_spec_center.get(idx, [])
-            includes = per_spec_include.get(idx, [])
-            sigmas = per_spec_sigma.get(idx, [])
-            amps = per_spec_amplitude.get(idx, [])
-            alphas = per_spec_alpha.get(idx, [])
-            windows = per_spec_center_window.get(idx, [])
-            modes = per_spec_modes.get(idx, {'amplitude':[], 'center':[], 'sigma':[]})
+            xs, ys = _get_peaks(idx)
+            xs = list(xs or [])
+            ys = list(ys or [])
             for del_i in sorted(staged_delete_indices, reverse=True):
-                for lst in (centers, includes, sigmas, amps, alphas, windows):
-                    try:
-                        if lst and 0 <= del_i < len(lst):
-                            lst.pop(del_i)
-                    except Exception:
-                        pass
-                for key in ("amplitude", "center", "sigma"):
-                    try:
-                        arr = modes.get(key, [])
-                        if arr and 0 <= del_i < len(arr):
-                            arr.pop(del_i)
-                    except Exception:
-                        pass
-            per_spec_center[idx] = centers
-            per_spec_include[idx] = includes
-            per_spec_sigma[idx] = sigmas
-            per_spec_amplitude[idx] = amps
-            per_spec_alpha[idx] = alphas
-            per_spec_center_window[idx] = windows
-            per_spec_modes[idx] = modes
+                try:
+                    if 0 <= del_i < len(xs):
+                        xs.pop(del_i)
+                except Exception:
+                    pass
+                try:
+                    if 0 <= del_i < len(ys):
+                        ys.pop(del_i)
+                except Exception:
+                    pass
+            FTIR_DataFrame.at[idx, "Peak Wavenumbers"] = xs
+            FTIR_DataFrame.at[idx, "Peak Absorbances"] = ys
         except Exception:
             pass
 
@@ -15332,29 +15101,21 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             last_redchi_by_idx.pop(idx, None)
         except Exception:
             pass
-        try:
-            shared_peaks_x = None
-        except Exception:
-            pass
-        # Remove any staged additions that might be lingering for this spectrum
-        try:
-            if isinstance(_STAGED_PEAK_ADDITIONS, dict):
-                _STAGED_PEAK_ADDITIONS.pop(idx, None)
-        except Exception:
-            pass
+        # No staged peak additions are retained.
         # Rebuild peak-center state mapping to align with new list length
         try:
-            new_centers = list(per_spec_center.get(idx, []) or [])
-            state = {}
-            for i, c in enumerate(new_centers):
-                try:
-                    cf = float(c)
-                except Exception:
-                    cf = c
-                state[i] = {'initial': cf, 'user': cf}
-            peak_center_state_by_idx[idx] = state
+            new_centers, _new_ys = _get_peaks(idx)
+            peak_center_state_by_idx[idx] = {
+                i: {'initial': float(c), 'user': float(c)} for i, c in enumerate(new_centers)
+            }
         except Exception:
-            pass
+            try:
+                new_centers, _new_ys = _get_peaks(idx)
+                peak_center_state_by_idx[idx] = {
+                    i: {'initial': c, 'user': c} for i, c in enumerate(new_centers)
+                }
+            except Exception:
+                pass
         _append_status("Deletions accepted and applied.")
         try:
             _refresh_peak_control_widgets(spectrum_sel.value)
@@ -15373,12 +15134,10 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         staged_delete_indices.clear()
         try:
             idx = spectrum_sel.value
-            per_spec_center[idx] = list(_delete_snapshot.get('centers', []))
-            per_spec_include[idx] = list(_delete_snapshot.get('includes', []))
-            per_spec_sigma[idx] = list(_delete_snapshot.get('sigmas', []))
-            per_spec_amplitude[idx] = list(_delete_snapshot.get('amps', []))
-            per_spec_center_window[idx] = list(_delete_snapshot.get('windows', []))
-            per_spec_modes[idx] = dict(_delete_snapshot.get('modes', {'amplitude':[], 'center':[], 'sigma':[]}))
+            xs_restore = list(_delete_snapshot.get('centers', []))
+            ys_restore = list(_delete_snapshot.get('amps', []))
+            FTIR_DataFrame.at[idx, "Peak Wavenumbers"] = xs_restore
+            FTIR_DataFrame.at[idx, "Peak Absorbances"] = ys_restore
         except Exception:
             pass
         _draw_current_peaks_for_delete(spectrum_sel.value)
@@ -15389,12 +15148,10 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             return
         try:
             idx = spectrum_sel.value
-            per_spec_center[idx] = list(_delete_snapshot.get('centers', []))
-            per_spec_include[idx] = list(_delete_snapshot.get('includes', []))
-            per_spec_sigma[idx] = list(_delete_snapshot.get('sigmas', []))
-            per_spec_amplitude[idx] = list(_delete_snapshot.get('amps', []))
-            per_spec_center_window[idx] = list(_delete_snapshot.get('windows', []))
-            per_spec_modes[idx] = dict(_delete_snapshot.get('modes', {'amplitude':[], 'center':[], 'sigma':[]}))
+            xs_restore = list(_delete_snapshot.get('centers', []))
+            ys_restore = list(_delete_snapshot.get('amps', []))
+            FTIR_DataFrame.at[idx, "Peak Wavenumbers"] = xs_restore
+            FTIR_DataFrame.at[idx, "Peak Absorbances"] = ys_restore
         except Exception:
             pass
         staged_delete_indices.clear()
@@ -15415,7 +15172,7 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
     def _accept_new_peaks(b=None):
         if _recent_click("accept_new_peaks"):
             return
-        nonlocal adding_mode, shared_peaks_x
+        nonlocal adding_mode
         idx = spectrum_sel.value
         x_arr, y_arr = _get_xy(idx)
         if x_arr is None:
@@ -15468,179 +15225,33 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                 valid_new_peaks.append((float(x_new), float(y_new)))
             except Exception:
                 pass
-        # Integrate new peaks: build combined sorted list and update DataFrame + per-spectrum parameter lists
+        # Integrate new peaks: build combined sorted list and update DataFrame.
+        # Note: we intentionally do NOT preserve parameter choices from the previous
+        # spectrum or from the pre-add state; after accepting, the spectrum derives
+        # from FTIR_DataFrame + defaults.
         try:
-            # Prepare mapping of existing peak center -> parameter values (for preservation)
-            existing_param_map = {}
-            old_centers_raw = per_spec_center.get(idx) or []
-            old_centers = list(old_centers_raw)
-            old_center_windows_raw = per_spec_center_window.get(idx) or []
-            old_center_windows = list(old_center_windows_raw)
-            old_sigmas = list(per_spec_sigma.get(idx) or [])
-            old_amplitudes = list(per_spec_amplitude.get(idx) or [])
-            old_alphas = list(per_spec_alpha.get(idx) or [])
-            old_includes = list(per_spec_include.get(idx) or [])
-            old_modes_src = per_spec_modes.get(idx) or {'amplitude': [], 'center': [], 'sigma': []}
-            old_modes = {
-                'amplitude': list(old_modes_src.get('amplitude') or []),
-                'center': [
-                    _normalize_center_mode_value(v) if v is not None else None
-                    for v in (old_modes_src.get('center') or [])
-                ],
-                'sigma': list(old_modes_src.get('sigma') or []),
-            }
-            # tolerance for matching existing centers
-            tol = 1e-9
-            for j, c_old in enumerate(xs_list):
-                existing_param_map[c_old] = {
-                    'center': c_old,
-                    'center_window': old_center_windows[j] if j < len(old_center_windows) else PER_PEAK_DEFAULT_CENTER_WINDOW,
-                    'sigma': old_sigmas[j] if j < len(old_sigmas) else PER_PEAK_DEFAULT_SIGMA,
-                    'amplitude': old_amplitudes[j] if j < len(old_amplitudes) else ys_list[j] if j < len(ys_list) else 1.0,
-                    'alpha': old_alphas[j] if j < len(old_alphas) else DEFAULT_ALPHA,
-                    'include': old_includes[j] if j < len(old_includes) else True,
-                    # Preserve prior modes exactly; default to Auto for amplitude/sigma and Window for center when absent.
-                    'mode_amplitude': (old_modes.get('amplitude') or [None]*len(xs_list))[j] if j < len(old_modes.get('amplitude') or []) and (old_modes.get('amplitude') or [None])[j] is not None else 'Auto',
-                    'mode_center': _normalize_center_mode_value((old_modes.get('center') or [None]*len(xs_list))[j]) if j < len(old_modes.get('center') or []) and (old_modes.get('center') or [None])[j] is not None else CENTER_MODE_WINDOW,
-                    'mode_sigma': (old_modes.get('sigma') or [None]*len(xs_list))[j] if j < len(old_modes.get('sigma') or []) and (old_modes.get('sigma') or [None])[j] is not None else 'Auto',
-                }
-            # Append valid new peaks into working list
             for (c_new, a_new) in valid_new_peaks:
-                xs_list.append(c_new)
-                ys_list.append(a_new)
-            # Sort combined peaks
+                xs_list.append(float(c_new))
+                ys_list.append(float(a_new))
             combined = sorted(zip(xs_list, ys_list), key=lambda t: float(t[0]))
-            new_xs, new_ys = [list(t) for t in zip(*combined)] if combined else ([], [])
-            # Build new parameter lists aligned with sorted centers
-            new_centers = []
-            new_center_windows = []
-            new_sigmas = []
-            new_amplitudes = []
-            new_alphas = []
-            new_includes = []
-            new_mode_amp = []
-            new_mode_center = []
-            new_mode_sigma = []
-            for c in new_xs:
-                # Match existing center within tolerance; else assign defaults
-                reused = None
-                for c_old, pdata in existing_param_map.items():
-                    if abs(c_old - c) <= tol:
-                        reused = pdata
-                        break
-                if reused is not None:
-                    new_centers.append(reused['center'])
-                    new_center_windows.append(reused['center_window'])
-                    new_sigmas.append(reused['sigma'])
-                    new_amplitudes.append(reused['amplitude'])
-                    new_alphas.append(reused['alpha'])
-                    new_includes.append(reused['include'])
-                    # Preserve previously selected modes exactly.
-                    new_mode_amp.append(reused['mode_amplitude'])
-                    new_mode_center.append(_normalize_center_mode_value(reused['mode_center']))
-                    new_mode_sigma.append(reused['mode_sigma'])
-                else:
-                    # Defaults for brand-new peak
-                    new_centers.append(c)
-                    new_center_windows.append(new_peak_windows.get(c, PER_PEAK_DEFAULT_CENTER_WINDOW))
-                    new_sigmas.append(PER_PEAK_DEFAULT_SIGMA)
-                    # amplitude guess = y value from combined list matching c
-                    try:
-                        idx_amp = new_xs.index(c)
-                        new_amplitudes.append(new_ys[idx_amp])
-                    except Exception:
-                        new_amplitudes.append(1.0)
-                    new_alphas.append(DEFAULT_ALPHA)
-                    new_includes.append(True)
-                    # Default brand-new peak modes to Window (user can switch to Exact explicitly)
-                    new_mode_amp.append('Auto')
-                    new_mode_center.append(CENTER_MODE_WINDOW)
-                    new_mode_sigma.append('Auto')
-            # Remap cached per-peak state so toggle labels and saved fits track new ordering
+            new_centers = [float(c) for c, _a in combined] if combined else []
+            new_amplitudes = [float(_a) for _c, _a in combined] if combined else []
             try:
-                prev_state = peak_center_state_by_idx.get(idx, {})
-                tol_match = 1e-3
-                used_old_indices = set()
-                candidate_records = []
-                for old_idx, c_prev in enumerate(old_sorted_centers):
-                    candidate_val = None
-                    if old_idx < len(old_centers):
-                        candidate_val = old_centers[old_idx]
-                    if candidate_val is None:
-                        candidate_val = c_prev
-                    try:
-                        candidate_float = float(candidate_val)
-                    except Exception:
-                        candidate_float = None
-                    state_entry = prev_state.get(old_idx, {}) if isinstance(prev_state, dict) else {}
-                    candidate_records.append((old_idx, candidate_float, state_entry))
-                remapped_state = {}
-                for new_idx, center_val in enumerate(new_centers):
-                    try:
-                        center_float = float(center_val)
-                    except Exception:
-                        center_float = None
-                    matched_entry = None
-                    if center_float is not None:
-                        for old_idx, candidate_float, state_entry in candidate_records:
-                            if old_idx in used_old_indices:
-                                continue
-                            if candidate_float is None:
-                                continue
-                            if abs(candidate_float - center_float) <= tol_match:
-                                matched_entry = (old_idx, state_entry)
-                                break
-                    if matched_entry is not None:
-                        old_idx, state_entry = matched_entry
-                        used_old_indices.add(old_idx)
-                        new_state = dict(state_entry or {})
-                    else:
-                        new_state = {}
-                    if center_float is not None:
-                        new_state['initial'] = center_float
-                        new_state['user'] = center_float
-                    else:
-                        new_state['initial'] = center_val
-                        new_state['user'] = center_val
-                    new_state.pop('fit', None)
-                    remapped_state[new_idx] = new_state
-                peak_center_state_by_idx[idx] = remapped_state
-            except Exception:
-                try:
-                    peak_center_state_by_idx[idx] = {
-                        i: {'initial': float(c), 'user': float(c)}
-                        for i, c in enumerate(new_centers)
-                    }
-                except Exception:
-                    peak_center_state_by_idx[idx] = {
-                        i: {'initial': c, 'user': c}
-                        for i, c in enumerate(new_centers)
-                    }
-            # Stage (do not persist yet) new peak set so user can Fit before saving
-            try:
-                _STAGED_PEAK_ADDITIONS[idx] = {
-                    'centers': list(new_centers),
-                    'center_windows': list(new_center_windows),
-                    'sigma': list(new_sigmas),
-                    'amplitude': list(new_amplitudes),
-                    'alpha': list(new_alphas),
-                    'include': list(new_includes),
-                    'modes': {
-                        'amplitude': list(new_mode_amp),
-                        'center': list(new_mode_center),
-                        'sigma': list(new_mode_sigma),
-                    },
+                peak_center_state_by_idx[idx] = {
+                    i: {'initial': float(c), 'user': float(c)}
+                    for i, c in enumerate(new_centers)
                 }
+            except Exception:
+                peak_center_state_by_idx[idx] = {
+                    i: {'initial': c, 'user': c} for i, c in enumerate(new_centers)
+                }
+            # Persist the accepted peak set directly to the DataFrame so the spectrum
+            # always derives its state from FTIR_DataFrame (no cross-spectrum carry-over).
+            try:
+                FTIR_DataFrame.loc[idx, 'Peak Wavenumbers'] = list(new_centers)
+                FTIR_DataFrame.loc[idx, 'Peak Absorbances'] = list(new_amplitudes)
             except Exception:
                 pass
-            # Update per-spectrum parameter stores (working copies) so Fit uses staged set
-            per_spec_center[idx] = list(_STAGED_PEAK_ADDITIONS[idx]['centers'])
-            per_spec_center_window[idx] = list(_STAGED_PEAK_ADDITIONS[idx]['center_windows'])
-            per_spec_sigma[idx] = list(_STAGED_PEAK_ADDITIONS[idx]['sigma'])
-            per_spec_amplitude[idx] = list(_STAGED_PEAK_ADDITIONS[idx]['amplitude'])
-            per_spec_alpha[idx] = list(_STAGED_PEAK_ADDITIONS[idx]['alpha'])
-            per_spec_include[idx] = list(_STAGED_PEAK_ADDITIONS[idx]['include'])
-            per_spec_modes[idx] = dict(_STAGED_PEAK_ADDITIONS[idx]['modes'])
             try:
                 if isinstance(peak_box_cache, dict):
                     peak_box_cache.clear()
@@ -15658,8 +15269,7 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                 last_redchi_by_idx.pop(idx, None)
             except Exception:
                 pass
-            # Clear shared peaks template (force rebuild reflecting new list)
-            shared_peaks_x = None
+            # No shared peaks template; rebuild reflects new list
         except Exception as _e_add:
             _log_once(f"Failed to integrate new peaks: {_e_add}")
         _hide(accept_new_peaks_btn)
