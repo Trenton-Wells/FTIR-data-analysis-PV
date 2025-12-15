@@ -752,6 +752,7 @@ def extract_file_info(
         "Normalized and Corrected Data",
         "Peak Wavenumbers",
         "Peak Absorbances",
+        "Using Canon Peaks",
         "Deconvolution Results",
         "Material Fit Results",
     ]
@@ -800,6 +801,7 @@ def extract_file_info(
         "Material",
         "Baseline Function",
         "Baseline Parameters",
+        "Using Canon Peaks",
     ]
     for col in string_cols:
         if col in FTIR_DataFrame.columns:
@@ -1051,6 +1053,7 @@ def extract_file_info(
             "Normalized and Corrected Data",
             "Peak Wavenumbers",
             "Peak Absorbances",
+            "Using Canon Peaks",
             "Deconvolution Results",
             "Material Fit Results",
         ]
@@ -9220,6 +9223,12 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         button_style="info",
         layout=widgets.Layout(width="110px"),
     )
+    # Dedicated Delete peaks button (wired later)
+    delete_peaks_btn = widgets.Button(
+        description="Delete peaks",
+        button_style="warning",
+        layout=widgets.Layout(width="120px"),
+    )
     accept_new_peaks_btn = widgets.Button(
         description="Accept new peak(s)",
         button_style="success",
@@ -9256,6 +9265,22 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         tooltip="Save deconvolution results for the current spectrum",
     )
     close_btn = widgets.Button(description="Close", button_style="danger")
+    # Delete-mode action buttons (shown only in delete mode)
+    accept_deletions_btn = widgets.Button(
+        description="Accept deletions",
+        button_style="success",
+        layout=widgets.Layout(width="160px"),
+    )
+    redo_deletions_btn = widgets.Button(
+        description="Redo deletions",
+        button_style="warning",
+        layout=widgets.Layout(width="140px"),
+    )
+    cancel_deletions_btn = widgets.Button(
+        description="Cancel deletions",
+        button_style="danger",
+        layout=widgets.Layout(width="170px"),
+    )
     # Dedicated status label to avoid Output-widget buffering issues
     status_html = widgets.HTML(value="")
     optimize_status_html = widgets.HTML(value="")
@@ -9713,6 +9738,11 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             cancel_fit_btn.layout.visibility = "visible"
         except Exception:
             pass
+        # Ensure the containing row is visible
+        try:
+            cancel_row.layout.display = ""
+        except Exception:
+            pass
 
     def _hide_cancel_button():
         try:
@@ -9721,6 +9751,11 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             pass
         try:
             cancel_fit_btn.layout.visibility = "hidden"
+        except Exception:
+            pass
+        # Hide the containing row when not needed
+        try:
+            cancel_row.layout.display = "none"
         except Exception:
             pass
 
@@ -11546,10 +11581,15 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         except Exception:
             pass
         try:
-            if delete_peaks_btn is not None:
-                delete_peaks_btn.layout.display = "none"
-            else:
-                buttons_row.children[2].layout.display = "none"
+            _hide(canonize_btn)
+        except Exception:
+            pass
+        try:
+            _hide(load_canon_btn)
+        except Exception:
+            pass
+        try:
+            delete_peaks_btn.layout.display = "none"
         except Exception:
             pass
         try:
@@ -12934,10 +12974,15 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                     except Exception:
                         pass
                     try:
-                        if delete_peaks_btn is not None:
-                            delete_peaks_btn.layout.display = ""
-                        else:
-                            buttons_row.children[2].layout.display = ""
+                        _show(canonize_btn)
+                    except Exception:
+                        pass
+                    try:
+                        _show(load_canon_btn)
+                    except Exception:
+                        pass
+                    try:
+                        delete_peaks_btn.layout.display = ""
                     except Exception:
                         pass
                     try:
@@ -13007,10 +13052,12 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                     except Exception:
                         pass
                     try:
-                        if delete_peaks_btn is not None:
-                            delete_peaks_btn.layout.display = ""
-                        else:
-                            buttons_row.children[2].layout.display = ""
+                        _show(canonize_btn)
+                        _show(load_canon_btn)
+                    except Exception:
+                        pass
+                    try:
+                        delete_peaks_btn.layout.display = ""
                     except Exception:
                         pass
 
@@ -13058,10 +13105,12 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                     except Exception:
                         pass
                     try:
-                        if delete_peaks_btn is not None:
-                            delete_peaks_btn.layout.display = ""
-                        else:
-                            buttons_row.children[2].layout.display = ""
+                        _show(canonize_btn)
+                        _show(load_canon_btn)
+                    except Exception:
+                        pass
+                    try:
+                        delete_peaks_btn.layout.display = ""
                     except Exception:
                         pass
 
@@ -13498,10 +13547,6 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                 pass
             try:
                 mark_row.close()
-            except Exception:
-                pass
-            try:
-                buttons_row.close()
             except Exception:
                 pass
             try:
@@ -14516,7 +14561,7 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
     # Layout
     controls_row_filters = widgets.HBox([material_dd, conditions_dd])
     controls_row_spectrum = widgets.HBox([spectrum_sel, include_bad_cb])
-    # Place the Fit X-range slider above the peak modification section
+    # We'll place the Fit X-ranges section AFTER the primary action rows
     fit_range_row = widgets.VBox([
         widgets.HTML("<b>Fit X-ranges</b>"),
         range_sliders_box,
@@ -14587,32 +14632,64 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
 
     # Refresh function provided by helper
 
-    buttons_row = widgets.HBox(
-        [
-            fit_btn,
-            add_peaks_btn,
-            # Delete Peaks button (desktop/Colab support wired below)
-            widgets.Button(description="Delete peaks", button_style="warning", layout=widgets.Layout(width="120px")),
-            # Delete mode action placeholders (replaced below)
-            widgets.Button(description="Accept deletions", button_style="success", layout=widgets.Layout(width="160px")),
-            widgets.Button(description="Redo deletions", button_style="warning", layout=widgets.Layout(width="140px")),
-            widgets.Button(description="Cancel deletions", button_style="danger", layout=widgets.Layout(width="170px")),
-            accept_new_peaks_btn,
-            redo_new_peaks_btn,
-            cancel_new_peaks_btn,
-            iter_btn,
-            cancel_fit_btn,
-            save_btn,
-            close_btn,
-        ],
+    # Three action rows before Fit X-ranges
+    primary_actions_row = widgets.HBox(
+        [fit_btn, save_btn, close_btn],
         layout=widgets.Layout(
-            flex_flow="row wrap",
-            align_items="center",
-            justify_content="flex-start",
-            width="100%",
+            flex_flow="row wrap", align_items="center", justify_content="flex-start", width="100%"
         ),
     )
+    canonize_btn = widgets.Button(
+        description="Canonize peaks for material",
+        button_style="info",
+        tooltip="Save current spectrum's peak centers as canonical for this material",
+        layout=widgets.Layout(width="260px"),
+    )
+    load_canon_btn = widgets.Button(
+        description="Load canon peaks",
+        button_style="info",
+        tooltip="Load canonical peak centers from materials.json for this material",
+        layout=widgets.Layout(width="190px"),
+    )
+    edit_actions_row = widgets.HBox(
+        [add_peaks_btn, delete_peaks_btn, canonize_btn, load_canon_btn],
+        layout=widgets.Layout(
+            flex_flow="row wrap", align_items="center", justify_content="flex-start", width="100%"
+        ),
+    )
+    optimize_actions_row = widgets.HBox(
+        [iter_btn, reset_all_btn],
+        layout=widgets.Layout(
+            flex_flow="row wrap", align_items="center", justify_content="flex-start", width="100%"
+        ),
+    )
+    # Alias: existing code toggles reset_all_row; make it refer to the optimize row
+    reset_all_row = optimize_actions_row
+    # Additional rows that are shown contextually
+    add_peaks_actions_row = widgets.HBox(
+        [accept_new_peaks_btn, redo_new_peaks_btn, cancel_new_peaks_btn],
+        layout=widgets.Layout(
+            flex_flow="row wrap", align_items="center", justify_content="flex-start", width="100%"
+        ),
+    )
+    delete_actions_row = widgets.HBox(
+        [accept_deletions_btn, redo_deletions_btn, cancel_deletions_btn],
+        layout=widgets.Layout(
+            flex_flow="row wrap", align_items="center", justify_content="flex-start", width="100%"
+        ),
+    )
+    # Hide contextual rows initially
+    try:
+        add_peaks_actions_row.layout.display = "none"
+        delete_actions_row.layout.display = "none"
+    except Exception:
+        pass
     status_row = widgets.HBox([status_html])
+    cancel_row = widgets.HBox([cancel_fit_btn])
+    try:
+        cancel_row.layout.display = "none"
+    except Exception:
+        pass
     # Colab fallback slider + typed input + Add button for peak addition
     add_peaks_slider = widgets.FloatSlider(
         value=float((xmin + xmax) / 2.0),
@@ -14683,22 +14760,229 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             plot_and_mark_deconv,
             # Status (reduced chi-square and operation updates) directly under plot
             status_row,
-            # 4) Fit/Save/etc buttons
-            buttons_row,
+            # Cancel button row (visible only during long-running fits)
+            cancel_row,
+            # 4) Primary actions rows (before Fit X-ranges)
+            primary_actions_row,
+            edit_actions_row,
+            optimize_actions_row,
+            # Contextual action rows
+            add_peaks_actions_row,
+            delete_actions_row,
             #    Colab add controls (only shown in Colab when adding)
             colab_add_row,
             colab_add_help,
             #    Colab delete controls (only shown in Colab when deleting)
             colab_delete_row,
             colab_delete_help,
-            # 5) Reset button
-            reset_all_row,
             # 6) X range selector bar
             fit_range_row,
             # 7) List of peaks and per-peak controls
             peak_controls_section,
         ]
     )
+
+    # --- Canonize/Load canonical peaks handlers ---
+    def _materials_json_path():
+        try:
+            base_dir_js = os.path.dirname(__file__)
+        except Exception:
+            base_dir_js = os.getcwd()
+        return os.path.join(base_dir_js, "materials.json")
+
+    def _lookup_material_code(top: dict, mat_name: str):
+        try:
+            m = str(mat_name)
+        except Exception:
+            m = mat_name
+        if not isinstance(top, dict):
+            return None
+        for k, payload in top.items():
+            try:
+                if not isinstance(payload, dict):
+                    continue
+                alias = str(payload.get("alias", ""))
+                namev = str(payload.get("name", ""))
+                if alias == m or namev == m:
+                    return k
+            except Exception:
+                continue
+        return None
+
+    def _current_material_name():
+        try:
+            mval = material_dd.value
+            if mval and str(mval).lower() != "any":
+                return str(mval)
+        except Exception:
+            pass
+        # fallback to spectrum row value
+        try:
+            idx = spectrum_sel.value
+            return str(FTIR_DataFrame.loc[idx].get("Material", ""))
+        except Exception:
+            return ""
+
+    def _canonize_peaks_for_material(_b=None):
+        # Get current peaks centers
+        try:
+            idx = spectrum_sel.value
+        except Exception:
+            idx = None
+        if idx is None:
+            _append_status("No spectrum selected to canonize peaks from.")
+            return
+        try:
+            xs, ys = _get_peaks(idx)
+        except Exception:
+            xs, ys = ([], [])
+        centers = [float(x) for x in (xs or [])]
+        if not centers:
+            _append_status("No peaks available to canonize.")
+            return
+        # Sort by wavenumber to maintain order
+        centers = sorted(centers)
+        mat_name = _current_material_name()
+        if not mat_name:
+            _append_status("Material not determined; cannot update materials.json.")
+            return
+        # Load JSON
+        try:
+            mpath = _materials_json_path()
+            with open(mpath, "r", encoding="utf-8") as jf:
+                content = json.load(jf)
+        except Exception as e:
+            _append_status(f"Failed to read materials.json: {e}")
+            return
+        if not isinstance(content, list) or not content or not isinstance(content[0], dict):
+            _append_status("materials.json structure unexpected; aborting.")
+            return
+        top = content[0]
+        code_key = _lookup_material_code(top, mat_name)
+        if code_key is None:
+            _append_status(f"Material '{mat_name}' not found in materials.json.")
+            return
+        mat_payload = dict(top.get(code_key, {}))
+        peaks_payload = dict(mat_payload.get("peaks", {})) if isinstance(mat_payload.get("peaks"), dict) else {}
+        # Build new mapping while preserving existing per-peak σ/α when present
+        new_len = len(centers)
+        new_map = {}
+        for i, c in enumerate(centers, start=1):
+            key = str(i)
+            prev = peaks_payload.get(key, {}) if isinstance(peaks_payload, dict) else {}
+            try:
+                sigma_prev = float(prev.get("σ", 0.0))
+            except Exception:
+                sigma_prev = 0.0
+            try:
+                alpha_prev = float(prev.get("α", 0.0))
+            except Exception:
+                alpha_prev = 0.0
+            new_map[key] = {
+                "name": str(prev.get("name", "")),
+                "center_wavenumber": float(c),
+                "σ": sigma_prev,
+                "α": alpha_prev,
+            }
+        # Replace peaks, effectively adding/removing to match current set
+        mat_payload["peaks"] = new_map
+        top[code_key] = mat_payload
+        try:
+            with open(mpath, "w", encoding="utf-8") as jf:
+                json.dump(content, jf, indent=4, ensure_ascii=False)
+            _append_status(f"Canonized {new_len} peak(s) for material '{mat_name}'.")
+        except Exception as e:
+            _append_status(f"Failed to write materials.json: {e}")
+
+    def _load_canon_peaks(_b=None):
+        mat_name = _current_material_name()
+        if not mat_name:
+            _append_status("Material not determined; cannot load canonical peaks.")
+            return
+        try:
+            mpath = _materials_json_path()
+            with open(mpath, "r", encoding="utf-8") as jf:
+                content = json.load(jf)
+        except Exception as e:
+            _append_status(f"Failed to read materials.json: {e}")
+            return
+        if not isinstance(content, list) or not content or not isinstance(content[0], dict):
+            _append_status("materials.json structure unexpected; aborting.")
+            return
+        top = content[0]
+        code_key = _lookup_material_code(top, mat_name)
+        if code_key is None:
+            _append_status(f"Material '{mat_name}' not found in materials.json.")
+            return
+        peaks_dict = {}
+        try:
+            peaks_dict = top.get(code_key, {}).get("peaks", {}) or {}
+        except Exception:
+            peaks_dict = {}
+        if not isinstance(peaks_dict, dict) or not peaks_dict:
+            _append_status(f"No canonical peaks stored for '{mat_name}'.")
+            return
+        # Build centers list ordered by numeric key
+        try:
+            ordered_items = sorted(((int(k), v) for k, v in peaks_dict.items()), key=lambda t: t[0])
+            centers = [float(v.get("center_wavenumber", 0.0)) for _k, v in ordered_items]
+        except Exception:
+            centers = []
+        if not centers:
+            _append_status(f"No valid canonical peak centers for '{mat_name}'.")
+            return
+        # Apply to current spectrum: set Peak Wavenumbers and infer amplitudes from data
+        try:
+            idx = spectrum_sel.value
+            x_arr, y_arr = _get_xy(idx)
+        except Exception:
+            idx, x_arr, y_arr = None, None, None
+        if idx is None or x_arr is None or y_arr is None or getattr(x_arr, "size", 0) == 0:
+            _append_status("Cannot apply canonical peaks: current spectrum data unavailable.")
+            return
+        amps = []
+        for c in centers:
+            try:
+                i = int(np.argmin(np.abs(x_arr - float(c))))
+                amps.append(float(y_arr[i]))
+            except Exception:
+                amps.append(0.0)
+        # Persist into DataFrame
+        try:
+            FTIR_DataFrame.at[idx, "Peak Wavenumbers"] = list(centers)
+            FTIR_DataFrame.at[idx, "Peak Absorbances"] = list(amps)
+            # Optional column to mark usage
+            if "Using Canon Peaks" not in FTIR_DataFrame.columns:
+                FTIR_DataFrame["Using Canon Peaks"] = None
+            FTIR_DataFrame.at[idx, "Using Canon Peaks"] = "True"
+        except Exception:
+            pass
+        # Clear caches to reflect new list
+        try:
+            if isinstance(peak_box_cache, dict):
+                peak_box_cache.clear()
+        except Exception:
+            pass
+        try:
+            included_index_map.clear()
+        except Exception:
+            pass
+        try:
+            last_result_by_idx.pop(idx, None)
+        except Exception:
+            pass
+        try:
+            last_redchi_by_idx.pop(idx, None)
+        except Exception:
+            pass
+        try:
+            _refresh_peak_control_widgets(idx)
+        except Exception:
+            pass
+        _append_status(f"Loaded {len(centers)} canonical peak(s) for '{mat_name}'.")
+
+    canonize_btn.on_click(_canonize_peaks_for_material)
+    load_canon_btn.on_click(_load_canon_peaks)
 
     # --- Add-peaks workflow callbacks ---
     def _enter_add_mode(b=None):
@@ -14715,15 +14999,20 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                 fig.data[0].on_click(_on_data_click)
         except Exception:
             pass
+        # Hide Delete peaks if present
         try:
-            # Hide Delete peaks if present
-            buttons_row.children[2].layout.display = "none"
+            delete_peaks_btn.layout.display = "none"
         except Exception:
             pass
         # Hide non-relevant controls in Peak Addition mode
         _hide(fit_btn)
         _hide(reset_all_row)
         _hide(fit_range_row)
+        # Show add-peaks contextual row
+        try:
+            add_peaks_actions_row.layout.display = ""
+        except Exception:
+            pass
         _show(accept_new_peaks_btn)
         _show(redo_new_peaks_btn)
         _show(cancel_new_peaks_btn)
@@ -14844,11 +15133,7 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             pass
         # Hide the Delete Peaks button itself while in delete mode
         try:
-            if delete_peaks_btn is not None:
-                delete_peaks_btn.layout.display = "none"
-            else:
-                # Fallback to buttons_row index if variable isn't available
-                buttons_row.children[2].layout.display = "none"
+            delete_peaks_btn.layout.display = "none"
         except Exception:
             pass
         # Snapshot current state
@@ -14868,11 +15153,14 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             _hide(accept_new_peaks_btn)
             _hide(redo_new_peaks_btn)
             _hide(cancel_new_peaks_btn)
-            # Show delete action placeholders (indices 3,4,5)
+            # Show delete-action row
             try:
-                buttons_row.children[3].layout.display = ""
-                buttons_row.children[4].layout.display = ""
-                buttons_row.children[5].layout.display = ""
+                delete_actions_row.layout.display = ""
+            except Exception:
+                pass
+            # Hide add-peaks action row if visible
+            try:
+                add_peaks_actions_row.layout.display = "none"
             except Exception:
                 pass
             _hide(iter_btn)
@@ -14914,20 +15202,15 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         _show(add_peaks_btn)
         # Restore the Delete Peaks button visibility when leaving delete mode
         try:
-            if delete_peaks_btn is not None:
-                delete_peaks_btn.layout.display = ""
-            else:
-                buttons_row.children[2].layout.display = ""
+            delete_peaks_btn.layout.display = ""
         except Exception:
             pass
         _show(fit_btn)
         _show(reset_all_row)
         _show(fit_range_row)
-        # Hide delete action placeholders
+        # Hide delete action row
         try:
-            buttons_row.children[3].layout.display = "none"
-            buttons_row.children[4].layout.display = "none"
-            buttons_row.children[5].layout.display = "none"
+            delete_actions_row.layout.display = "none"
         except Exception:
             pass
         _show(iter_btn)
@@ -15029,19 +15312,9 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
 
     # Bind Delete Peaks button
     try:
-        delete_peaks_btn = widgets.Button(description="Delete peaks", button_style="warning", layout=widgets.Layout(width="120px"))
-    except Exception:
-        delete_peaks_btn = None
-    if delete_peaks_btn is not None:
         delete_peaks_btn.on_click(_enter_delete_mode)
-        # Insert next to Add peaks in buttons_row
-        try:
-            kids = list(buttons_row.children)
-            # Replace placeholder created earlier with actual button instance
-            kids[2] = delete_peaks_btn
-            buttons_row.children = tuple(kids)
-        except Exception:
-            pass
+    except Exception:
+        pass
 
     # Wire Accept/Redo/Cancel deletions using placeholders indices 3,4,5
     def _apply_staged_deletions():
@@ -15159,13 +15432,11 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         _exit_delete_mode()
 
     try:
-        buttons_row.children[3].on_click(_accept_deletions)
-        buttons_row.children[4].on_click(_redo_deletions)
-        buttons_row.children[5].on_click(_cancel_deletions)
-        # Hide initial placeholders
-        buttons_row.children[3].layout.display = "none"
-        buttons_row.children[4].layout.display = "none"
-        buttons_row.children[5].layout.display = "none"
+        accept_deletions_btn.on_click(_accept_deletions)
+        redo_deletions_btn.on_click(_redo_deletions)
+        cancel_deletions_btn.on_click(_cancel_deletions)
+        # Ensure hidden initially
+        delete_actions_row.layout.display = "none"
     except Exception:
         pass
 
@@ -15296,10 +15567,12 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                 pass
             # Ensure Delete Peaks button reappears after ending add mode
             try:
-                if delete_peaks_btn is not None:
-                    delete_peaks_btn.layout.display = ""
-                else:
-                    buttons_row.children[2].layout.display = ""
+                delete_peaks_btn.layout.display = ""
+            except Exception:
+                pass
+            # Hide add-peaks actions row after exit
+            try:
+                add_peaks_actions_row.layout.display = "none"
             except Exception:
                 pass
             _clear_add_peak_shapes()
@@ -15378,15 +15651,16 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             pass
         # Ensure Delete Peaks button reappears when add mode is cancelled
         try:
-            if delete_peaks_btn is not None:
-                delete_peaks_btn.layout.display = ""
-            else:
-                buttons_row.children[2].layout.display = ""
+            delete_peaks_btn.layout.display = ""
         except Exception:
             pass
         _hide(accept_new_peaks_btn)
         _hide(redo_new_peaks_btn)
         _hide(cancel_new_peaks_btn)
+        try:
+            add_peaks_actions_row.layout.display = "none"
+        except Exception:
+            pass
         # Restore controls hidden during Peak Addition mode
         _show(fit_btn)
         _show(reset_all_row)
