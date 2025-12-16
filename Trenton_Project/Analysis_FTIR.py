@@ -742,6 +742,8 @@ def extract_file_info(
         "Conditions",
         "Material",
         "Time",
+        "Sample Humidity",
+        "Sample Temperature",
         "X-Axis",
         "Raw Data",
         "Baseline Function",
@@ -812,21 +814,50 @@ def extract_file_info(
         FTIR_DataFrame["Time"] = pd.to_numeric(
             FTIR_DataFrame["Time"], errors="coerce"
         ).astype("Int64")
+    # Numeric sample environment columns
+    for env_col in ("Sample Humidity", "Sample Temperature"):
+        if env_col in FTIR_DataFrame.columns:
+            try:
+                FTIR_DataFrame[env_col] = pd.to_numeric(
+                    FTIR_DataFrame[env_col], errors="coerce"
+                ).astype("float")
+            except Exception:
+                pass
 
     # Dictionary columns
     if "Baseline Parameters" in FTIR_DataFrame.columns:
 
         def _to_dict(val):
-            if isinstance(val, dict) or pd.isnull(val):
-                return val
-            if isinstance(val, str):
+            try:
+                if isinstance(val, dict):
+                    return val
+                if val is None:
+                    return None
+                # Handle scalar NA safely (avoid array truth-value checks)
                 try:
-                    parsed = ast.literal_eval(val)
-                    if isinstance(parsed, dict):
-                        return parsed
+                    import numpy as np  # local import in case top-level not loaded yet
+                    if isinstance(val, (float, np.floating)) and np.isnan(val):
+                        return None
+                    # Only invoke pandas isna for scalars
+                    from pandas.api.types import is_scalar
+
+                    if is_scalar(val) and pd.isna(val):
+                        return None
                 except Exception:
                     pass
-            return val
+                if isinstance(val, str):
+                    s = val.strip()
+                    if not s:
+                        return None
+                    try:
+                        parsed = ast.literal_eval(s)
+                        if isinstance(parsed, dict):
+                            return parsed
+                    except Exception:
+                        pass
+                return val
+            except Exception:
+                return val
 
         FTIR_DataFrame["Baseline Parameters"] = FTIR_DataFrame[
             "Baseline Parameters"
@@ -834,16 +865,34 @@ def extract_file_info(
     if "Deconvolution Results" in FTIR_DataFrame.columns:
 
         def _to_dict(val):
-            if isinstance(val, dict) or pd.isnull(val):
-                return val
-            if isinstance(val, str):
+            try:
+                if isinstance(val, dict):
+                    return val
+                if val is None:
+                    return None
                 try:
-                    parsed = ast.literal_eval(val)
-                    if isinstance(parsed, dict):
-                        return parsed
+                    import numpy as np
+                    if isinstance(val, (float, np.floating)) and np.isnan(val):
+                        return None
+                    from pandas.api.types import is_scalar
+
+                    if is_scalar(val) and pd.isna(val):
+                        return None
                 except Exception:
                     pass
-            return val
+                if isinstance(val, str):
+                    s = val.strip()
+                    if not s:
+                        return None
+                    try:
+                        parsed = ast.literal_eval(s)
+                        if isinstance(parsed, dict):
+                            return parsed
+                    except Exception:
+                        pass
+                return val
+            except Exception:
+                return val
 
         FTIR_DataFrame["Deconvolution Results"] = FTIR_DataFrame[
             "Deconvolution Results"
@@ -851,16 +900,34 @@ def extract_file_info(
     if "Material Fit Results" in FTIR_DataFrame.columns:
 
         def _to_dict(val):
-            if isinstance(val, dict) or pd.isnull(val):
-                return val
-            if isinstance(val, str):
+            try:
+                if isinstance(val, dict):
+                    return val
+                if val is None:
+                    return None
                 try:
-                    parsed = ast.literal_eval(val)
-                    if isinstance(parsed, dict):
-                        return parsed
+                    import numpy as np
+                    if isinstance(val, (float, np.floating)) and np.isnan(val):
+                        return None
+                    from pandas.api.types import is_scalar
+
+                    if is_scalar(val) and pd.isna(val):
+                        return None
                 except Exception:
                     pass
-            return val
+                if isinstance(val, str):
+                    s = val.strip()
+                    if not s:
+                        return None
+                    try:
+                        parsed = ast.literal_eval(s)
+                        if isinstance(parsed, dict):
+                            return parsed
+                    except Exception:
+                        pass
+                return val
+            except Exception:
+                return val
 
         FTIR_DataFrame["Material Fit Results"] = FTIR_DataFrame[
             "Material Fit Results"
@@ -1043,8 +1110,11 @@ def extract_file_info(
             "Conditions",
             "Material",
             "Time",
+            "Sample Humidity",
+            "Sample Temperature",
             "Quality",
             "X-Axis",
+            "Raw Data",
             "Baseline Function",
             "Baseline Parameters",
             "Baseline",
@@ -3259,41 +3329,19 @@ def plot_spectra(
         except Exception:
             return 1
 
-    # Build a blue -> purple -> red gradient based on time, and apply dash styles for replicates.
+    # Build shared palette mapping via _time_gradient_color and apply dash styles for replicates.
     time_values = [t for t in filtered_data_sorted.get("Time", []) if pd.notna(t)]
     try:
         time_values_unique = sorted(set(time_values))
     except Exception:
         time_values_unique = []
-    if time_values_unique:
-        t_min = float(min(time_values_unique))
-        t_max = float(max(time_values_unique))
-    else:
-        t_min = 0.0
-        t_max = 1.0
 
-    def _time_to_color(t):
+    def _time_to_color(val):
         try:
-            t = float(t)
+            # Use shared blue→purple→red equal-step palette
+            return _time_gradient_color(time_values_unique, val)
         except Exception:
-            return "#800080"  # fallback purple
-        span = t_max - t_min
-        if span <= 0:
-            norm = 0.5
-        else:
-            norm = (t - t_min) / span
-        norm = max(0.0, min(1.0, norm))
-        if norm <= 0.5:
-            r_ratio = norm / 0.5
-            r = int(0 + (128 - 0) * r_ratio)
-            g = 0
-            b = int(255 + (128 - 255) * r_ratio)  # 255 -> 128
-        else:
-            r_ratio = (norm - 0.5) / 0.5
-            r = int(128 + (255 - 128) * r_ratio)
-            g = 0
-            b = int(128 + (0 - 128) * r_ratio)  # 128 -> 0
-        return f"#{r:02X}{g:02X}{b:02X}"
+            return "rgb(160,80,200)"  # fallback purple
 
     dash_styles = ["solid", "dash", "dot", "dashdot", "longdash", "longdashdot"]
     replicate_counts = {}
@@ -6967,6 +7015,9 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
 
     info_out = widgets.Output()
     msg_out = widgets.Output()
+    # Track session changes and messages for a shared summary
+    session_lines = []
+    session_changes = {}
 
     # State shared with callbacks
     selected_points = []  # up to two x positions
@@ -7437,7 +7488,7 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
                     fig.data = tuple()
                     fig.update_layout(title="Time Series | No spectra")
                 return
-            series_data = []  # list of dicts: {x, y, name}
+            series_data = []  # list of dicts: {x, y, name, time}
             count_plotted = 0
             for i in filtered_ts.index:
                 try:
@@ -7455,6 +7506,7 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
                         "x": x_arr.tolist(),
                         "y": y_arr.tolist(),
                         "name": name,
+                        "time": tval,
                     })
                     count_plotted += 1
                 except Exception:
@@ -7482,19 +7534,42 @@ def normalize_spectra(FTIR_DataFrame, filepath=None):
                 return
             title_mat = material_dd.value
             title_cond_sel = conditions_dd.value if (cond_col and conditions_dd.value != "any") else None
+            # Build unique times list in display order for palette mapping
+            times_unique = []
+            try:
+                for d in series_data:
+                    tv = d.get("time")
+                    if tv not in times_unique:
+                        times_unique.append(tv)
+            except Exception:
+                times_unique = []
+
             with fig.batch_update():
                 # Shrink to desired number of traces by taking a subset (allowed by FigureWidget)
                 while len(fig.data) > len(series_data):
                     fig.data = fig.data[:-1]
                 # Update existing traces or add new ones
                 for i, d in enumerate(series_data):
+                    # Assign palette color based on time position
+                    try:
+                        _col = _time_gradient_color(times_unique, d.get("time"))
+                    except Exception:
+                        _col = None
                     if i < len(fig.data):
                         fig.data[i].x = d["x"]
                         fig.data[i].y = d["y"]
                         fig.data[i].mode = "lines"
                         fig.data[i].name = d["name"]
+                        try:
+                            if _col:
+                                fig.data[i].line.color = _col
+                        except Exception:
+                            pass
                     else:
-                        fig.add_scatter(x=d["x"], y=d["y"], mode="lines", name=d["name"])
+                        if _col:
+                            fig.add_scatter(x=d["x"], y=d["y"], mode="lines", name=d["name"], line=dict(color=_col))
+                        else:
+                            fig.add_scatter(x=d["x"], y=d["y"], mode="lines", name=d["name"])
                 title = f"Time Series | {title_mat}"
                 if title_cond_sel:
                     title += f" | Condition: {title_cond_sel} (+ unexposed)"
@@ -8425,7 +8500,7 @@ def find_peak_info(FTIR_DataFrame, filepath=None):
     )
 
     save_file_btn = widgets.Button(description="Save for spectrum", button_style="success")
-    save_all_btn = widgets.Button(description="Save for time-series", button_style="info")
+    save_all_btn = widgets.Button(description="Save for material", button_style="info")
     # --- Change tracking for session summary on Close ---
     _peak_changes = {
         "saved_file": [],  # list[(idx, n_peaks)]
@@ -8638,14 +8713,40 @@ def find_peak_info(FTIR_DataFrame, filepath=None):
             )
 
     def _save_for_filtered(b):
+        # apply to all spectra for the selected material (ignore Conditions)
         ranges = _current_ranges()
         if not ranges:
             with msg_out:
                 msg_out.clear_output()
                 print("Please enable at least one X-range before saving.")
             return
+        # Require a specific material selection
+        sel_material = getattr(material_dd, "value", "any")
+        if sel_material is None or str(sel_material).strip().lower() == "any":
+            with msg_out:
+                msg_out.clear_output()
+                print("Select a specific Material before saving for material.")
+            return
+        # Respect Include bad spectra; always include unexposed; require normalized data
+        try:
+            include_bad_flag = bool(getattr(include_bad_cb, "value", True))
+        except Exception:
+            include_bad_flag = True
+        df_mat = _filter_spectra_dataframe(
+            FTIR_DataFrame,
+            material=sel_material,
+            condition="any",
+            include_bad=include_bad_flag,
+            include_unexposed=True,
+            normalized_column="Normalized and Corrected Data",
+        )
+        # Only rows with normalized data
+        try:
+            df_mat = df_mat[df_mat["Normalized and Corrected Data"].notna()]
+        except Exception:
+            pass
         updated, skipped = 0, 0
-        for idx, _row in _current_filtered_df().iterrows():
+        for idx, _row in df_mat.iterrows():
             x_arr, y_arr = _get_xy(idx)
             if x_arr is None:
                 skipped += 1
@@ -15858,6 +15959,73 @@ def fit_material(FTIR_DataFrame):
     # --- New behavior: fit across all spectra of selected material ---
     import json, ast, os, numpy as np
 
+    # Shared (per-session) canonical parameters sourced from materials.json or computed
+    shared_centers_list = None  # list[float]
+    shared_sigma_list = None    # list[float]
+    shared_alpha_list = None    # list[float]
+
+    # materials.json helpers
+    def _load_materials_json():
+        try:
+            base_dir_js = os.path.dirname(__file__)
+            path = os.path.join(base_dir_js, "materials.json")
+            with open(path, "r", encoding="utf-8") as jf:
+                content = json.load(jf)
+            return path, content
+        except Exception:
+            return None, None
+
+    def _lookup_material_code(top_dict, mat_name: str):
+        try:
+            for k, payload in top_dict.items():
+                if not isinstance(payload, dict):
+                    continue
+                if (
+                    str(payload.get("alias", "")).strip() == str(mat_name)
+                    or str(payload.get("name", "")).strip() == str(mat_name)
+                ):
+                    return k
+        except Exception:
+            pass
+        return None
+
+    def _canon_from_json(mat_name: str):
+        """Return (centers, sigmas, alphas) from materials.json for a material.
+        Falls back to empty lists when unavailable.
+        """
+        path, content = _load_materials_json()
+        if content is None or not isinstance(content, list) or not content:
+            return [], [], []
+        top = content[0] if isinstance(content[0], dict) else {}
+        code = _lookup_material_code(top, mat_name)
+        if code is None:
+            return [], [], []
+        payload = top.get(code, {})
+        try:
+            peaks = payload.get("peaks", {}) or {}
+        except Exception:
+            peaks = {}
+        centers, sigmas, alphas = [], [], []
+        try:
+            # Sort by numeric key order "1","2",...
+            for idx_key in sorted(peaks.keys(), key=lambda s: int(str(s)) if str(s).isdigit() else str(s)):
+                p = peaks.get(idx_key, {}) or {}
+                try:
+                    centers.append(float(p.get("center_wavenumber", 0.0)))
+                except Exception:
+                    centers.append(0.0)
+                try:
+                    sigmas.append(float(p.get("σ", 0.0)))
+                except Exception:
+                    sigmas.append(0.0)
+                try:
+                    alphas.append(float(p.get("α", 0.0)))
+                except Exception:
+                    alphas.append(0.0)
+        except Exception:
+            pass
+        return centers, sigmas, alphas
+
     def _parse_deconv(val):
         if val is None:
             return None
@@ -15921,6 +16089,7 @@ def fit_material(FTIR_DataFrame):
             sub = sub[sub["Normalized and Corrected Data"].notna()]
         except Exception:
             pass
+        # Gather deconvolution results and align to canonical centers from JSON
         peak_lists = []
         entries = []
         for idx, row in sub.iterrows():
@@ -15930,73 +16099,84 @@ def fit_material(FTIR_DataFrame):
                 entries.append((idx, row, peaks))
         if not peak_lists:
             continue
-        # Use first spectrum as reference; align by nearest centers
-        ref = peak_lists[0]
-        k = len(ref)
-        mat_res = {"peaks": []}
-        for j in range(k):
-            ref_c = float(ref[j].get("center") or ref[j].get("center_wavenumber") or 0.0)
-            centers, alphas, sigmas, times = [], [], [], []
-            for idx, row, peaks in entries:
-                # choose closest center
-                try:
-                    ci_list = [float(p.get("center", p.get("center_wavenumber", float("nan")))) for p in peaks]
-                    sel = int(np.argmin([abs(c - ref_c) for c in ci_list]))
-                except Exception:
-                    continue
-                p = peaks[sel]
-                try:
-                    centers.append(float(p.get("center", p.get("center_wavenumber"))))
-                except Exception:
-                    centers.append(float("nan"))
-                try:
-                    alphas.append(float(p.get("alpha", p.get("fraction", float("nan")))))
-                except Exception:
-                    alphas.append(float("nan"))
-                try:
-                    sigmas.append(float(p.get("sigma", p.get("σ", float("nan")))))
-                except Exception:
-                    sigmas.append(float("nan"))
-                times.append(row.get("Time"))
-            mat_res["peaks"].append({
-                "center_wavenumber": centers,
-                "α": alphas,
-                "σ": sigmas,
-                "time": times,
-            })
-        results_by_material[mat] = mat_res
-
-        # Persist per-row simplified fit results back to DataFrame
-        for idx, row, peaks in entries:
-            cleaned = []
-            for p in peaks:
-                try:
-                    cen = float(p.get("center", p.get("center_wavenumber", float("nan"))))
-                except Exception:
-                    cen = float("nan")
-                try:
-                    alpha = float(p.get("alpha", p.get("fraction", float("nan"))))
-                except Exception:
-                    alpha = float("nan")
-                try:
-                    sigma = float(p.get("sigma", p.get("σ", float("nan"))))
-                except Exception:
-                    sigma = float("nan")
-                # Keep amplitude if available for later export
-                try:
-                    amp = float(p.get("amplitude", float("nan")))
-                except Exception:
-                    amp = float("nan")
-                cleaned.append({
-                    "amplitude": amp,
-                    "center": cen,
-                    "alpha": alpha,
-                    "sigma": sigma,
-                })
+        # Canon centers from materials.json for this material
+        canon_centers, _canon_sigmas, _canon_alphas = _canon_from_json(mat)
+        # Fallback: if no canon present, infer by collecting all centers and sorting unique
+        if not canon_centers:
             try:
-                FTIR_DataFrame.at[idx, "Material Fit Results"] = cleaned
+                allc = []
+                for _pk in peak_lists:
+                    for p in _pk:
+                        try:
+                            allc.append(float(p.get("center", p.get("center_wavenumber", np.nan))))
+                        except Exception:
+                            pass
+                canon_centers = sorted({c for c in allc if np.isfinite(c)})
             except Exception:
-                pass
+                canon_centers = []
+        k = len(canon_centers)
+        if k <= 0:
+            continue
+        # Compute series sigma/alpha aligned to canonical centers
+        sigma_samples_by_peak = [[] for _ in range(k)]
+        alpha_samples_by_peak = [[] for _ in range(k)]
+        amplitude_by_idx = {}
+        for idx, row, peaks in entries:
+            # initialize amplitude vector for this spectrum
+            amps_i = [0.0] * k
+            used = set()
+            for i, ccan in enumerate(canon_centers):
+                # find nearest deconv peak to this canon center
+                best_j = None
+                best_d = float("inf")
+                for j, p in enumerate(peaks):
+                    if j in used:
+                        continue
+                    try:
+                        cval = float(p.get("center", p.get("center_wavenumber", np.nan)))
+                    except Exception:
+                        cval = np.nan
+                    if not np.isfinite(cval):
+                        continue
+                    d = abs(cval - ccan)
+                    if d < best_d:
+                        best_d = d
+                        best_j = j
+                if best_j is not None:
+                    used.add(best_j)
+                    p = peaks[best_j]
+                    # collect sigma/alpha samples
+                    try:
+                        sval = float(p.get("sigma", p.get("σ", np.nan)))
+                        if np.isfinite(sval):
+                            sigma_samples_by_peak[i].append(sval)
+                    except Exception:
+                        pass
+                    try:
+                        aval = float(p.get("alpha", p.get("fraction", np.nan)))
+                        if np.isfinite(aval):
+                            alpha_samples_by_peak[i].append(aval)
+                    except Exception:
+                        pass
+                    try:
+                        amps_i[i] = float(p.get("amplitude", 0.0))
+                    except Exception:
+                        amps_i[i] = 0.0
+            amplitude_by_idx[idx] = amps_i
+
+        # Aggregate sigma/alpha across spectra
+        with np.errstate(all="ignore"):
+            avg_sigma = [
+                (float(np.nanmean(s)) if len(s) else 10.0) for s in sigma_samples_by_peak
+            ]
+            avg_alpha = [
+                (float(np.nanmean(a)) if len(a) else 0.5) for a in alpha_samples_by_peak
+            ]
+
+        # Store shared parameters for plotting and Save
+        shared_centers_list = canon_centers[:]
+        shared_sigma_list = avg_sigma[:]
+        shared_alpha_list = [float(np.clip(a, 0.0, 1.0)) for a in avg_alpha]
 
     # -------------------------- Backend helpers --------------------------- #
     def _parse_deconv(val):
@@ -16210,21 +16390,15 @@ def fit_material(FTIR_DataFrame):
                     refit_logs.append(f"Row {idx}: no data available; preserved amplitudes.")
                 except Exception:
                     pass
-                out = []
+                # Persist amplitude-only results
+                out_amps = []
                 for i in range(k):
                     try:
-                        amp = float(aligned[i].get("amplitude", 0.0))
+                        out_amps.append(float(aligned[i].get("amplitude", 0.0)))
                     except Exception:
-                        amp = 0.0
-                    out.append({
-                        "amplitude": amp,
-                        "center": float(avg_center[i]),
-                        "alpha": float(avg_alpha[i]),
-                        "sigma_l": float(avg_sigma[i]),
-                        "sigma_g": float(avg_sigma[i]) / float(np.sqrt(2.0 * np.log(2.0))),
-                    })
+                        out_amps.append(0.0)
                 try:
-                    FTIR_DataFrame.at[idx, "Material Fit Results"] = out
+                    FTIR_DataFrame.at[idx, "Material Fit Results"] = out_amps
                     assigned += 1
                 except Exception:
                     pass
@@ -16236,9 +16410,10 @@ def fit_material(FTIR_DataFrame):
             for i in range(k):
                 m = PseudoVoigtModel(prefix=f"p{i}_")
                 p = m.make_params()
-                p[f"p{i}_center"].set(value=float(avg_center[i]), vary=False)
-                p[f"p{i}_sigma"].set(value=float(avg_sigma[i]), min=1e-3, max=1e4, vary=False)
-                p[f"p{i}_fraction"].set(value=float(np.clip(avg_alpha[i], 0.0, 1.0)), min=0.0, max=1.0, vary=False)
+                # Use canonical centers and aggregated sigma/alpha
+                p[f"p{i}_center"].set(value=float(shared_centers_list[i]), vary=False)
+                p[f"p{i}_sigma"].set(value=float(shared_sigma_list[i]), min=1e-3, max=1e4, vary=False)
+                p[f"p{i}_fraction"].set(value=float(shared_alpha_list[i]), min=0.0, max=1.0, vary=False)
                 # Seed amplitude from aligned peak or a heuristic
                 try:
                     amp0 = float(aligned[i].get("amplitude", 1.0))
@@ -16312,13 +16487,7 @@ def fit_material(FTIR_DataFrame):
                             amp = 0.0
                     except Exception:
                         amp = 0.0
-                    fit_list.append({
-                        "amplitude": amp,
-                        "center": float(avg_center[i]),
-                        "alpha": float(avg_alpha[i]),
-                        "sigma_l": float(avg_sigma[i]),
-                        "sigma_g": float(avg_sigma[i]) / float(np.sqrt(2.0 * np.log(2.0)))
-                    })
+                    fit_list.append(amp)
                 FTIR_DataFrame.at[idx, "Material Fit Results"] = fit_list
                 assigned += 1
             except Exception as _fit_err:
@@ -16327,26 +16496,19 @@ def fit_material(FTIR_DataFrame):
                     refit_logs.append(f"Row {idx}: fit failed ({_fit_err}); preserved amplitudes.")
                 except Exception:
                     pass
-                out = []
+                out_amps = []
                 for i in range(k):
                     try:
-                        amp = float(aligned[i].get("amplitude", 0.0))
+                        out_amps.append(float(aligned[i].get("amplitude", 0.0)))
                     except Exception:
-                        amp = 0.0
-                    out.append({
-                        "amplitude": amp,
-                        "center": float(avg_center[i]),
-                        "alpha": float(avg_alpha[i]),
-                        "sigma_l": float(avg_sigma[i]),
-                        "sigma_g": float(avg_sigma[i]) / float(np.sqrt(2.0 * np.log(2.0)))
-                    })
+                        out_amps.append(0.0)
                 try:
-                    FTIR_DataFrame.at[idx, "Material Fit Results"] = out
+                    FTIR_DataFrame.at[idx, "Material Fit Results"] = out_amps
                     assigned += 1
                 except Exception:
                     pass
 
-        print(f"Averaged parameters applied and amplitudes refit for Material={material}. Updated {assigned} spectra.")
+        print(f"Amplitudes refit for Material={material} using canon centers. Updated {assigned} spectra.")
         # Surface logs in the UI if available
         try:
             if refit_logs:
@@ -16761,67 +16923,40 @@ def fit_material(FTIR_DataFrame):
             y_arr = np.asarray(y, dtype=float)
         except Exception:
             return None, None, None
+        # Build fit from amplitude-only results using shared parameters
         res = row.get("Material Fit Results")
-        if isinstance(res, dict):
-            return x_arr, y_arr, None
         if isinstance(res, str):
             try:
                 res = ast.literal_eval(res)
             except Exception:
                 res = None
-        if not isinstance(res, list) or len(res) == 0:
+        amps = None
+        if isinstance(res, list) and len(res) > 0:
+            try:
+                # list of amplitudes
+                amps = [float(v) for v in res]
+            except Exception:
+                amps = None
+        if amps is None or not isinstance(shared_centers_list, list) or not isinstance(shared_sigma_list, list) or not isinstance(shared_alpha_list, list):
             return x_arr, y_arr, None
-        comp_model = None
-        params = None
         try:
-            for i, p in enumerate(res):
+            k = min(len(amps), len(shared_centers_list), len(shared_sigma_list), len(shared_alpha_list))
+            comp_model = None
+            params = None
+            for i in range(k):
                 m = PseudoVoigtModel(prefix=f"p{i}_")
                 pr = m.make_params()
-                try:
-                    pr[f"p{i}_center"].set(
-                        value=float(p.get("center", 0.0)), vary=False
-                    )
-                except Exception:
-                    pr[f"p{i}_center"].set(value=0.0, vary=False)
-                # Sigma_l preferred; fallback to legacy 'sigma' if present
-                try:
-                    sig_val = p.get("sigma_l")
-                    if sig_val is None:
-                        sig_val = p.get("sigma", 10.0)
-                    pr[f"p{i}_sigma"].set(
-                        value=float(sig_val), min=1e-3, max=1e4, vary=False
-                    )
-                except Exception:
-                    pr[f"p{i}_sigma"].set(value=10.0, min=1e-3, max=1e4, vary=False)
-                # Fraction parameter (Lorentzian fraction): prefer 'alpha', fallback to legacy 'fraction'
-                try:
-                    frac_val = p.get("alpha")
-                    if frac_val is None:
-                        frac_val = p.get("fraction")
-                    fv = float(frac_val if frac_val is not None else 0.5)
-                except Exception:
-                    fv = 0.5
-                pr[f"p{i}_fraction"].set(
-                    value=float(np.clip(fv, 0.0, 1.0)), min=0.0, max=1.0, vary=False
-                )
-                try:
-                    pr[f"p{i}_amplitude"].set(
-                        value=max(0.0, float(p.get("amplitude", 1.0))), min=0.0
-                    )
-                except Exception:
-                    pr[f"p{i}_amplitude"].set(value=1.0, min=0.0)
+                pr[f"p{i}_center"].set(value=float(shared_centers_list[i]), vary=False)
+                pr[f"p{i}_sigma"].set(value=float(shared_sigma_list[i]), min=1e-3, max=1e4, vary=False)
+                pr[f"p{i}_fraction"].set(value=float(np.clip(shared_alpha_list[i], 0.0, 1.0)), min=0.0, max=1.0, vary=False)
+                pr[f"p{i}_amplitude"].set(value=max(0.0, float(amps[i])), min=0.0)
                 if comp_model is None:
                     comp_model = m
                     params = pr
                 else:
                     comp_model = comp_model + m
                     params.update(pr)
-            if comp_model is None:
-                return x_arr, y_arr, None
-            try:
-                y_fit = comp_model.eval(params, x=x_arr)
-            except Exception:
-                y_fit = None
+            y_fit = comp_model.eval(params, x=x_arr) if comp_model is not None else None
             return x_arr, y_arr, y_fit
         except Exception:
             return x_arr, y_arr, None
@@ -16985,49 +17120,11 @@ def fit_material(FTIR_DataFrame):
         # Build/update wavenumbers (shared centers), sigmas, alphas table and amplitude table
         try:
             if with_fits and has_any_fit:
-                # Determine shared centers/sigmas/alphas from first available fit result
-                centers_list = None
-                sigmas_list = None
-                fracs_list = None
-                for _idx, _row in df_series.iterrows():
-                    res0 = _row.get("Material Fit Results")
-                    if isinstance(res0, str):
-                        try:
-                            res0 = ast.literal_eval(res0)
-                        except Exception:
-                            res0 = None
-                    if isinstance(res0, list) and len(res0) > 0:
-                        try:
-                            centers_list = [
-                                float(p.get("center", float("nan"))) for p in res0
-                            ]
-                            # Prefer sigma_l; fallback to legacy 'sigma'
-                            sigmas_list = [
-                                float(
-                                    (
-                                        p.get("sigma_l")
-                                        if p.get("sigma_l") is not None
-                                        else p.get("sigma", float("nan"))
-                                    )
-                                )
-                                for p in res0
-                            ]
-                            # Alpha is stored; fallback to legacy 'fraction' if present
-                            fracs_list = [
-                                float(
-                                    (
-                                        p.get("alpha")
-                                        if p.get("alpha") is not None
-                                        else p.get("fraction", float("nan"))
-                                    )
-                                )
-                                for p in res0
-                            ]
-                        except Exception:
-                            centers_list = None
-                        break
+                # Use shared canonical parameters (centers/sigmas/alphas)
+                centers_list = shared_centers_list or []
+                sigmas_list = shared_sigma_list or []
+                fracs_list = shared_alpha_list or []
 
-                # If we have centers, render a compact table for peak wavenumbers
                 if centers_list and len(centers_list) > 0:
                     try:
                         import pandas as pd  # local import safe here
@@ -17162,11 +17259,9 @@ def fit_material(FTIR_DataFrame):
                             res = None
                     if isinstance(res, list) and len(res) > 0:
                         try:
-                            amps = [
-                                float(p.get("amplitude", float("nan"))) for p in res
-                            ]
+                            # amplitude-only list
+                            amps = [float(a) for a in res]
                             k_max = max(k_max, len(amps))
-                            # Notes: if all amplitudes are zero or non-finite, flag likely guard/sanitization
                             try:
                                 finite_amps = [a for a in amps if np.isfinite(a)]
                                 if len(finite_amps) == 0:
@@ -17507,14 +17602,14 @@ def fit_material(FTIR_DataFrame):
     _plot_series(with_fits=True, include_bad=include_bad_cb.value)
 
     def _on_save_click(_b=None):
-        """Save per-row peak wavenumbers (centers), alphas (fractions), sigmas, and areas (amplitudes) into 'Material Fit Results'."""
+        """Save amplitudes to DataFrame; write σ and α to materials.json for the selected material."""
         try:
             mat = str(material_dd.value)
             cond = None
         except Exception:
             mat = "material"
             cond = "condition"
-        # Build a fresh table to ensure we capture latest fits, independent of UI
+        # Build a fresh table to ensure we capture latest amplitudes, independent of UI
         df_series = _series_df(mat, include_bad=include_bad_cb.value)
         if df_series.empty:
             try:
@@ -17522,12 +17617,9 @@ def fit_material(FTIR_DataFrame):
             except Exception:
                 pass
             return
-        # Determine peak count and build records for areas, and collect centers
+        # Determine peak count and build records for areas
         k_max = 0
         series_rows = []  # (time, amplitudes | None)
-        centers_list = None
-        sigmas_list = None
-        fracs_list = None
         for _idx, _row in df_series.iterrows():
             t_val = _row.get("Time")
             res = _row.get("Material Fit Results")
@@ -17538,21 +17630,9 @@ def fit_material(FTIR_DataFrame):
                     res = None
             if isinstance(res, list) and len(res) > 0:
                 try:
-                    amps = [float(p.get("amplitude", float("nan"))) for p in res]
+                    # amplitude-only
+                    amps = [float(a) for a in res]
                     k_max = max(k_max, len(amps))
-                    if centers_list is None:
-                        try:
-                            centers_list = [
-                                float(p.get("center", float("nan"))) for p in res
-                            ]
-                            sigmas_list = [
-                                float(p.get("sigma", float("nan"))) for p in res
-                            ]
-                            fracs_list = [
-                                float(p.get("fraction", float("nan"))) for p in res
-                            ]
-                        except Exception:
-                            centers_list = None
                 except Exception:
                     amps = None
             else:
@@ -17564,8 +17644,7 @@ def fit_material(FTIR_DataFrame):
             except Exception:
                 pass
             return
-        # Persist results to DataFrame as before (existing code below) AND update materials.json
-        # Normalize and persist per-row results back into 'Material Fit Results'
+        # Persist amplitudes back into 'Material Fit Results'
         try:
             dest_col = "Material Fit Results"
             if dest_col not in FTIR_DataFrame.columns:
@@ -17586,202 +17665,68 @@ def fit_material(FTIR_DataFrame):
                         res = ast.literal_eval(res)
                     except Exception:
                         res = None
-                if not isinstance(res, list) or len(res) == 0:
-                    # If no result exists, but we have centers and series_rows amplitudes aligned by time
-                    # attempt to construct a minimal record for this row
+                # Ensure it's a list of amplitudes; if missing, attempt to map by time from series_rows
+                if not (isinstance(res, list) and len(res) > 0):
                     try:
                         t_val = _row.get("Time")
-                        # find matching amplitudes for this time
                         amps = None
                         for t_it, a_it in series_rows:
                             if t_it == t_val:
                                 amps = a_it
                                 break
-                        if centers_list and amps and len(centers_list) == len(amps):
-                            res = []
-                            for i in range(len(centers_list)):
-                                try:
-                                    c = float(centers_list[i])
-                                except Exception:
-                                    c = float("nan")
-                                try:
-                                    a = float(amps[i])
-                                except Exception:
-                                    a = float("nan")
-                                res.append(
-                                    {
-                                        "amplitude": a,
-                                        "center": c,
-                                        # preserve optional keys with defaults or shared lists
-                                        "sigma": (
-                                            float(sigmas_list[i])
-                                            if (sigmas_list and i < len(sigmas_list))
-                                            else float("nan")
-                                        ),
-                                        "fraction": (
-                                            float(fracs_list[i])
-                                            if (fracs_list and i < len(fracs_list))
-                                            else float("nan")
-                                        ),
-                                    }
-                                )
+                        if isinstance(amps, list) and len(amps) > 0:
+                            res = [float(a) for a in amps]
                         else:
                             res = None
                     except Exception:
                         res = None
-
-                # Clean/normalize the structure to ensure plain Python floats
                 if isinstance(res, list) and len(res) > 0:
-                    cleaned = []
-                    for p in res:
-                        try:
-                            amp = float(p.get("amplitude", float("nan")))
-                        except Exception:
-                            amp = float("nan")
-                        try:
-                            cen = float(p.get("center", float("nan")))
-                        except Exception:
-                            cen = float("nan")
-                        try:
-                            sig = float(
-                                p.get(
-                                    "sigma",
-                                    (
-                                        sigmas_list[res.index(p)]
-                                        if sigmas_list
-                                        and res.index(p) < len(sigmas_list)
-                                        else float("nan")
-                                    ),
-                                )
-                            )
-                        except Exception:
-                            sig = float("nan")
-                        try:
-                            frac = float(
-                                p.get(
-                                    "fraction",
-                                    (
-                                        fracs_list[res.index(p)]
-                                        if fracs_list and res.index(p) < len(fracs_list)
-                                        else float("nan")
-                                    ),
-                                )
-                            )
-                        except Exception:
-                            frac = float("nan")
-                        # Also store component widths and alpha if available, preserving prior keys
-                        try:
-                            alpha_val = float(
-                                p.get(
-                                    "alpha",
-                                    (1.0 - frac) if np.isfinite(frac) else float("nan"),
-                                )
-                            )
-                        except Exception:
-                            alpha_val = (
-                                (1.0 - frac) if np.isfinite(frac) else float("nan")
-                            )
-                        try:
-                            sg = float(p.get("sigma_g", p.get("sigma", float("nan"))))
-                        except Exception:
-                            sg = float("nan")
-                        try:
-                            sl = float(p.get("sigma_l", p.get("sigma", float("nan"))))
-                        except Exception:
-                            sl = float("nan")
-                        cleaned.append(
-                            {
-                                "amplitude": amp,
-                                "center": cen,
-                                "sigma": sig,
-                                "fraction": frac,
-                                "alpha": alpha_val,
-                                "sigma_g": sg,
-                                "sigma_l": sl,
-                            }
-                        )
                     try:
-                        FTIR_DataFrame.at[idx, dest_col] = cleaned
+                        FTIR_DataFrame.at[idx, dest_col] = [float(a) for a in res]
                         updated += 1
                     except Exception:
                         pass
             try:
-                status_html.value = f"<span style='color:#0a0;'>Saved per-row peak parameters to '{dest_col}' for {updated} row(s).</span>"
+                status_html.value = f"<span style='color:#0a0;'>Saved per-row peak amplitudes to '{dest_col}' for {updated} row(s).</span>"
             except Exception:
                 pass
-            # --- JSON update: save minimal peak info (center_wavenumber, σ, α) --- #
+            # --- JSON update: write σ and α for canon peaks of this material --- #
             try:
-                base_dir_js = os.path.dirname(__file__)
-                materials_json_path = os.path.join(base_dir_js, "materials.json")
-                with open(materials_json_path, "r", encoding="utf-8") as jf:
-                    _content = json.load(jf)
-                if not isinstance(_content, list) or not _content:
-                    raise ValueError("materials.json unexpected structure (not list)")
-                _top = _content[0]
-
-                # Locate material code key (M###) by alias/name
-                def _lookup_code(mname):
-                    for _k, _payload in _top.items():
-                        if not isinstance(_payload, dict):
-                            continue
-                        if (
-                            str(_payload.get("alias")) == mname
-                            or str(_payload.get("name")) == mname
-                        ):
-                            return _k
-                    return None
-
-                code_key = _lookup_code(mat)
-                if code_key is not None:
-                    mat_payload = _top.get(code_key, {})
-                    peaks_payload = {}
-                    # Build minimal peaks using centers_list, sigmas_list, fracs_list
-                    for p_idx in range(1, k_max + 1):
-                        try:
-                            center = (
-                                float(centers_list[p_idx - 1])
-                                if centers_list and p_idx - 1 < len(centers_list)
-                                else 0.0
-                            )
-                            sigma = (
-                                float(sigmas_list[p_idx - 1])
-                                if sigmas_list and p_idx - 1 < len(sigmas_list)
-                                else 0.0
-                            )
-                            alpha = (
-                                float(fracs_list[p_idx - 1])
-                                if fracs_list and p_idx - 1 < len(fracs_list)
-                                else 0.0
-                            )
-                        except Exception:
-                            center, sigma, alpha = 0.0, 0.0, 0.0
-                        peaks_payload[str(p_idx)] = {
-                            "name": "",
-                            "center_wavenumber": center,
-                            "σ": sigma,
-                            "α": alpha,
-                        }
-                    mat_payload["peaks"] = peaks_payload
-                    _top[code_key] = mat_payload
-                    # Write back JSON
-                    try:
-                        with open(materials_json_path, "w", encoding="utf-8") as jf:
-                            json.dump(_content, jf, indent=4, ensure_ascii=False)
-                        print(
-                            f"[fit_time_series] materials.json updated (added/merged peaks 1..{k_max} for {mat})."
-                        )
-                    except Exception as _je:
-                        print(
-                            f"[fit_time_series] Failed to write materials.json: {_je}"
-                        )
+                path, content = _load_materials_json()
+                if content is None or not isinstance(content, list) or not content:
+                    raise ValueError("materials.json unavailable")
+                top = content[0]
+                code_key = _lookup_material_code(top, mat)
+                if code_key is None:
+                    print(f"[fit_material] Material '{mat}' not found in materials.json; skip JSON update.")
                 else:
-                    print(
-                        f"[fit_time_series] Material '{mat}' not found in materials.json; skip JSON update."
-                    )
+                    mat_payload = top.get(code_key, {}) or {}
+                    peaks_payload = mat_payload.get("peaks", {}) or {}
+                    kjson = len(shared_centers_list or [])
+                    for i in range(kjson):
+                        key = str(i + 1)
+                        entry = peaks_payload.get(key, {})
+                        # Update only σ and α, leave centers as-is (canon)
+                        try:
+                            entry["σ"] = float(shared_sigma_list[i])
+                        except Exception:
+                            entry["σ"] = entry.get("σ", 0.0)
+                        try:
+                            entry["α"] = float(shared_alpha_list[i])
+                        except Exception:
+                            entry["α"] = entry.get("α", 0.0)
+                        peaks_payload[key] = entry
+                    mat_payload["peaks"] = peaks_payload
+                    top[code_key] = mat_payload
+                    # Write file
+                    try:
+                        with open(path, "w", encoding="utf-8") as jf:
+                            json.dump(content, jf, indent=4, ensure_ascii=False)
+                        print(f"[fit_material] materials.json updated (σ, α) for {mat}.")
+                    except Exception as _je:
+                        print(f"[fit_material] Failed to write materials.json: {_je}")
             except Exception as _json_err:
-                print(
-                    f"[fit_time_series] JSON update skipped due to error: {_json_err}"
-                )
+                print(f"[fit_material] JSON update skipped: {_json_err}")
         except Exception as e:
             try:
                 status_html.value = f"<span style='color:#a00;'>Failed to save per-row results: {e}</span>"
@@ -17901,10 +17846,6 @@ def check_fit_quality(FTIR_DataFrame):
 
     Returns the DataFrame unchanged.
     """
-    try:
-        import ipywidgets as widgets  # type: ignore
-    except Exception:
-        widgets = None  # type: ignore
 
     _require_columns(
         FTIR_DataFrame,
@@ -18711,5 +18652,431 @@ def display_DataFrame(FTIR_DataFrame, height: int = 500):
     ui = widgets.VBox([controls, buttons, out])
     display(ui)
     _render()
+
+    return FTIR_DataFrame
+
+
+def export_material_output_csv(
+    FTIR_DataFrame,
+    material: str,
+    *,
+    materials_json_path: str | None = None,
+    output_path: str | None = None,
+):
+    """Export a material-specific CSV with standardized columns and peak headers.
+
+    Filename: material_output_<material>.csv (unless output_path is provided)
+
+    Columns (in order):
+    - Name, Alias, Condition, Sample Humidity, Sample Temperature, Time, Normalization Peak, Quality
+    - Followed by one column per peak with header:
+      'Peak <i>_name="<name>"_sigma=<σ>,alpha=<α>' (values from materials.json)
+
+        Notes
+        -----
+        - Populates one CSV row per DataFrame row for the selected material.
+        - Peak columns are populated from 'Material Fit Results' amplitudes; blanks when
+            amplitudes are missing or unusable.
+        - Uses the DataFrame's 'Normalization Peak Wavenumber' for the 'Normalization Peak'
+            column as-is (string or numeric). Quality is taken from the detected quality column.
+    """
+    if FTIR_DataFrame is None or not isinstance(FTIR_DataFrame, pd.DataFrame):
+        raise ValueError("Error: FTIR_DataFrame not defined. Load or Create DataFrame first.")
+    if material is None or str(material).strip() == "":
+        raise ValueError("'material' must be a non-empty string.")
+
+    import os, json
+
+    # Resolve materials.json path (default: alongside this module)
+    if materials_json_path is None:
+        try:
+            materials_json_path = os.path.join(os.path.dirname(__file__), "materials.json")
+        except Exception:
+            materials_json_path = "materials.json"
+
+    # Load materials.json
+    try:
+        with open(materials_json_path, "r", encoding="utf-8") as f:
+            _content = json.load(f)
+    except Exception as e:
+        raise FileNotFoundError(f"Could not load materials.json at {materials_json_path!r}: {e}")
+
+    # Top-level structure is a list with one dict of material codes
+    if not isinstance(_content, list) or not _content or not isinstance(_content[0], dict):
+        raise ValueError("materials.json unexpected structure; expected a list with a single mapping object")
+    _top = _content[0]
+
+    # Find material entry by name or alias
+    mat_code = None
+    mat_payload = None
+    target_name = str(material)
+    try:
+        for k, v in _top.items():
+            if not isinstance(v, dict):
+                continue
+            if str(v.get("alias", "")) == target_name or str(v.get("name", "")) == target_name:
+                mat_code = k
+                mat_payload = v
+                break
+    except Exception:
+        pass
+    if mat_code is None or not isinstance(mat_payload, dict):
+        raise KeyError(f"Material {material!r} not found in materials.json (by 'name' or 'alias').")
+
+    mat_name = str(mat_payload.get("name", material))
+    mat_alias = str(mat_payload.get("alias", material))
+    peaks_def = mat_payload.get("peaks", {}) or {}
+
+    # Build peak column headers from JSON (sorted by numeric key order)
+    def _peak_header(idx_key: str):
+        p = peaks_def.get(idx_key, {}) or {}
+        pname = str(p.get("name", ""))
+        # Extract numeric center; support both 'center_wavenumber' and 'center' keys
+        pcenter = None
+        for key in ("center_wavenumber", "center"):
+            try:
+                val = p.get(key, None)
+                if val is not None:
+                    pcenter = float(val)
+                    break
+            except Exception:
+                pass
+        if pcenter is None:
+            pcenter = 0.0
+        try:
+            psigma = float(p.get("σ", 0))
+        except Exception:
+            psigma = 0.0
+        try:
+            palpha = float(p.get("α", 0))
+        except Exception:
+            palpha = 0.0
+        # Title format: Peak 1_name=""_center=#,sigma=#,alpha=#
+        return f"Peak{idx_key}_name=\{pname}\_center={pcenter},sigma={psigma},alpha={palpha}"
+
+    peak_keys_sorted = sorted(peaks_def.keys(), key=lambda s: int(str(s)) if str(s).isdigit() else str(s))
+    peak_headers = [_peak_header(k) for k in peak_keys_sorted]
+
+    # Determine columns from DataFrame
+    cond_col = _conditions_column_name(FTIR_DataFrame)
+    q_col = _quality_column_name(FTIR_DataFrame)
+    norm_col = "Normalization Peak Wavenumber"
+
+    # Filter rows for selected material (exact match on 'Material')
+    try:
+        df_mat = FTIR_DataFrame[FTIR_DataFrame.get("Material").astype(str) == str(material)]
+    except Exception:
+        df_mat = FTIR_DataFrame.iloc[0:0]
+
+    # Sort rows by Time (if present)
+    try:
+        if "Time" in df_mat.columns:
+            df_mat = df_mat.copy()
+            df_mat["_sort_time"] = pd.to_numeric(df_mat["Time"], errors="coerce").fillna(float("inf"))
+            df_mat = df_mat.sort_values(by=["_sort_time"], kind="mergesort")
+            df_mat.drop(columns=["_sort_time"], inplace=True, errors="ignore")
+    except Exception:
+        pass
+
+    # Base columns
+    base_headers = [
+        "Name",
+        "Alias",
+        "Condition",
+        "Sample Humidity",
+        "Sample Temperature",
+        "Time",
+        "Normalization Peak",
+        "Quality",
+    ]
+    export_headers = base_headers + peak_headers
+
+    # Helper: extract amplitudes list from a 'Material Fit Results' cell
+    def _amps_from_fit_cell(cell):
+        try:
+            v = _safe_literal_eval(cell, value_name="Material Fit Results")
+        except Exception:
+            v = cell
+        # Direct list of numbers (preferred modern format)
+        if isinstance(v, (list, tuple)):
+            try:
+                return [float(x) for x in v]
+            except Exception:
+                return None
+        # Dict-based legacy formats
+        if isinstance(v, dict):
+            for key in ("amplitudes", "amps", "areas", "A"):
+                if key in v and isinstance(v[key], (list, tuple)):
+                    try:
+                        return [float(x) for x in v[key]]
+                    except Exception:
+                        return None
+            # Sometimes stored as list of peak dicts under 'peaks'
+            if isinstance(v.get("peaks"), (list, tuple)):
+                vals = []
+                for p in v.get("peaks", []):
+                    if isinstance(p, dict):
+                        a = p.get("amplitude", p.get("amp", p.get("area")))
+                        try:
+                            vals.append(float(a))
+                        except Exception:
+                            vals.append(None)
+                return vals if vals else None
+        return None
+
+    # Assemble rows (populate peak columns from amplitudes where available)
+    rows = []
+    for _, r in df_mat.iterrows():
+        try:
+            row_vals = [
+                mat_name,
+                mat_alias,
+                (r.get(cond_col) if cond_col else None),
+                r.get("Sample Humidity"),
+                r.get("Sample Temperature"),
+                r.get("Time"),
+                r.get(norm_col),
+                r.get(q_col),
+            ]
+            # Extract amplitudes for peaks
+            amps = _amps_from_fit_cell(r.get("Material Fit Results"))
+            fname = r.get("File Name", "")
+            # Only populate when counts match; otherwise leave blank and report
+            if isinstance(amps, list) and len(amps) == len(peak_headers):
+                row_vals.extend(amps)
+            else:
+                row_vals.extend([None] * len(peak_headers))
+                try:
+                    if isinstance(amps, list):
+                        print(
+                            f"export_material_output_csv: amplitude count {len(amps)} != peak count {len(peak_headers)} for file '{fname}'; leaving peak columns blank."
+                        )
+                    else:
+                        print(
+                            f"export_material_output_csv: missing/unreadable amplitudes in 'Material Fit Results' for file '{fname}'; leaving peak columns blank."
+                        )
+                except Exception:
+                    pass
+        except Exception:
+            # On any failure, append a minimal-length row padded with None
+            row_vals = [mat_name, mat_alias, None, None, None, None, None, None] + [None] * len(peak_headers)
+        rows.append(row_vals)
+
+    # Build DataFrame and write CSV
+    out_df = pd.DataFrame(rows, columns=export_headers)
+    # Default output: CWD/material_output_<material>.csv
+    if output_path is None:
+        safe_mat = str(material).replace("/", "-").replace("\\", "-")
+        output_path = os.path.join(os.getcwd(), f"material_output_{safe_mat}.csv")
+    try:
+        out_df.to_csv(output_path, index=False)
+        print(f"Exported material CSV: {output_path}")
+    except Exception as e:
+        raise IOError(f"Failed to write CSV to {output_path!r}: {e}")
+    return output_path
+
+
+def trim_DataFrame(FTIR_DataFrame):
+    """Interactively clear selected columns in `FTIR_DataFrame`.
+
+    UI features:
+    - Filter mode: select `Material`, `Conditions`, and `Time`, with an option to include bad spectra.
+    - Index mode: toggle to target a single row index directly.
+    - Column checklist: choose which columns to clear for the targeted rows.
+    - Apply clears selected columns, Close hides the UI but keeps a session summary visible.
+
+    Returns the updated DataFrame.
+    """
+
+    if FTIR_DataFrame is None or not isinstance(FTIR_DataFrame, pd.DataFrame):
+        raise ValueError("trim_DataFrame: FTIR_DataFrame must be a valid pandas DataFrame")
+    
+    # Session tracking for summary output
+    session_lines = []
+    session_changes = {}
+
+    # Ensure common columns exist gracefully
+    _require_columns(
+        FTIR_DataFrame,
+        [
+            "File Name",
+            "Material",
+            "Conditions",
+            "Time",
+        ],
+        context="FTIR_DataFrame (trim_DataFrame)",
+    )
+
+    # Persisted defaults across tools
+    defaults = _get_session_defaults()
+
+    # Materials and Conditions lists
+    materials, conditions = _extract_material_condition_lists(FTIR_DataFrame, exclude_unexposed=False) or ([], [])
+    materials = sorted(materials)
+    conditions = sorted(conditions)
+
+    # Time list
+    try:
+        times_unique = sorted([t for t in FTIR_DataFrame["Time"].dropna().unique()])
+    except Exception:
+        times_unique = []
+
+    # Widgets
+    use_index_toggle = widgets.ToggleButton(
+        value=False,
+        description="Use index instead",
+        layout=widgets.Layout(width="200px", margin="0 0 10px 0"),
+        button_style="warning",
+    )
+    index_input = widgets.IntText(
+        value=int(FTIR_DataFrame.index[0]) if len(FTIR_DataFrame.index) > 0 else 0,
+        description="Index",
+        layout=widgets.Layout(width="220px"),
+    )
+
+    material_dd = widgets.Dropdown(
+        options=["any"] + materials,
+        value=(defaults.get("material") if defaults.get("material") in materials else "any"),
+        description="Material",
+        layout=widgets.Layout(width="40%"),
+    )
+    conditions_dd = widgets.Dropdown(
+        options=["any"] + conditions,
+        value=(defaults.get("conditions") if defaults.get("conditions") in conditions else "any"),
+        description="Conditions",
+        layout=widgets.Layout(width="40%"),
+    )
+    time_dd = widgets.Dropdown(
+        options=["any"] + times_unique,
+        value=(defaults.get("time") if defaults.get("time") in times_unique else "any"),
+        description="Time",
+        layout=widgets.Layout(width="25%"),
+    )
+    include_bad_cb = widgets.Checkbox(value=False, description="Include bad spectra")
+
+    # Column checklist: list all columns except core identifiers
+    identifier_cols = {"File Location", "File Name", "Material", "Conditions", "Time"}
+    col_options = [c for c in FTIR_DataFrame.columns if c not in identifier_cols]
+    col_checks = [widgets.Checkbox(value=False, description=c) for c in col_options]
+    # Make the list scrollable
+    col_box = widgets.VBox(col_checks, layout=widgets.Layout(max_height="250px", overflow_y="auto", border="1px solid #ddd", padding="6px"))
+
+    apply_btn = widgets.Button(description="Apply", button_style="success")
+    close_btn = widgets.Button(description="Close", button_style="danger")
+
+    msg_out = widgets.Output()
+
+    # Dynamic containers for filter vs index-only mode
+    filter_row = widgets.HBox([material_dd, conditions_dd, time_dd, include_bad_cb])
+    index_row = widgets.HBox([index_input])
+    # Start in filter mode
+    index_row.layout.display = "none"
+
+    # Layout
+    controls_top = widgets.HBox([use_index_toggle])
+    controls = widgets.VBox([controls_top, filter_row, index_row])
+    actions = widgets.HBox([apply_btn, close_btn])
+    ui = widgets.VBox([controls, col_box, actions, msg_out])
+
+    display(ui)
+
+    # Helper: build mask based on mode
+    def _mask_for_selection():
+        if use_index_toggle.value:
+            # Index-only mode
+            idx = index_input.value
+            mask = FTIR_DataFrame.index == idx
+            return mask
+        # Filter mode
+        mask = pd.Series([True] * len(FTIR_DataFrame), index=FTIR_DataFrame.index)
+        mat = material_dd.value
+        cond = conditions_dd.value
+        tim = time_dd.value
+        if isinstance(mat, str) and mat.strip().lower() != "any":
+            mask &= FTIR_DataFrame["Material"].astype(str).str.lower() == mat.strip().lower()
+        if isinstance(cond, str) and cond.strip().lower() != "any":
+            # Use detected conditions column name
+            cond_col = _conditions_column_name(FTIR_DataFrame) or "Conditions"
+            mask &= FTIR_DataFrame[cond_col].astype(str).str.lower() == cond.strip().lower()
+        if tim != "any":
+            try:
+                mask &= FTIR_DataFrame["Time"] == tim
+            except Exception:
+                pass
+        if not include_bad_cb.value:
+            try:
+                mask &= _quality_good_mask(FTIR_DataFrame)
+            except Exception:
+                pass
+        return mask
+
+    # Toggle behavior
+    def _on_toggle(change):
+        if use_index_toggle.value:
+            use_index_toggle.description = "Use filters instead"
+            use_index_toggle.button_style = "info"
+            filter_row.layout.display = "none"
+            index_row.layout.display = ""
+        else:
+            use_index_toggle.description = "Use index instead"
+            use_index_toggle.button_style = "warning"
+            filter_row.layout.display = ""
+            index_row.layout.display = "none"
+
+    use_index_toggle.observe(_on_toggle, names="value")
+
+    # Apply
+    def _on_apply(_b=None):
+        selected_cols = [cb.description for cb in col_checks if cb.value]
+        with msg_out:
+            msg_out.clear_output()
+            if not selected_cols:
+                print("No columns selected; nothing to clear.")
+                return
+            mask = _mask_for_selection()
+            rows = FTIR_DataFrame[mask]
+            if rows.empty:
+                print("No rows match the current selection; nothing to clear.")
+                return
+            # Perform clearing
+            FTIR_DataFrame.loc[mask, selected_cols] = None
+
+            # Persist session defaults when using filters
+            if not use_index_toggle.value:
+                _set_session_selection(material=material_dd.value, conditions=conditions_dd.value, time=(time_dd.value if time_dd.value != "any" else "any"))
+
+            # Summary
+            session_changes.setdefault("trim", []).append((len(rows), selected_cols))
+            session_lines.append(
+                f"Cleared {len(rows)} row(s) in columns: {', '.join(selected_cols)}"
+            )
+            try:
+                _emit_function_summary(msg_out, session_lines, title="Session Summary")
+            except Exception:
+                for line in session_lines:
+                    print(line)
+
+    apply_btn.on_click(_on_apply)
+
+    # Close: hide UI but keep summary visible
+    def _on_close(_b=None):
+        # Hide interactive elements
+        try:
+            ui.layout.display = "none"
+        except Exception:
+            pass
+        # Keep msg_out visible with any previous summary
+        with msg_out:
+            try:
+                if session_lines:
+                    _emit_function_summary(msg_out, session_lines, title="Session Summary")
+                print("Closed trim_DataFrame UI. Summary remains above.")
+            except Exception:
+                # Fallback to printing accumulated lines
+                for line in session_lines:
+                    print(line)
+                print("Closed trim_DataFrame UI. Summary remains above.")
+
+    close_btn.on_click(_on_close)
 
     return FTIR_DataFrame
