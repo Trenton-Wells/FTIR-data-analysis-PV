@@ -119,89 +119,83 @@
                 },
                 "6": {
                     "name": "",
-                    "center_wavenumber": 793.10274,
+                    "center_wavenumber": 846.66292,
                     "σ": 0.0,
                     "α": 0.0
                 },
                 "7": {
                     "name": "",
-                    "center_wavenumber": 846.66292,
+                    "center_wavenumber": 872.41301,
                     "σ": 0.0,
                     "α": 0.0
                 },
                 "8": {
                     "name": "",
-                    "center_wavenumber": 872.41301,
+                    "center_wavenumber": 970.26335,
                     "σ": 0.0,
                     "α": 0.0
                 },
                 "9": {
                     "name": "",
-                    "center_wavenumber": 970.26335,
+                    "center_wavenumber": 983.6534,
                     "σ": 0.0,
                     "α": 0.0
                 },
                 "10": {
                     "name": "",
-                    "center_wavenumber": 983.6534,
+                    "center_wavenumber": 1017.64351,
                     "σ": 0.0,
                     "α": 0.0
                 },
                 "11": {
                     "name": "",
-                    "center_wavenumber": 1017.64351,
+                    "center_wavenumber": 1100.0438,
                     "σ": 0.0,
                     "α": 0.0
                 },
                 "12": {
                     "name": "",
-                    "center_wavenumber": 1100.0438,
+                    "center_wavenumber": 1119.61387,
                     "σ": 0.0,
                     "α": 0.0
                 },
                 "13": {
                     "name": "",
-                    "center_wavenumber": 1119.61387,
+                    "center_wavenumber": 1186.5641,
                     "σ": 0.0,
                     "α": 0.0
                 },
                 "14": {
                     "name": "",
-                    "center_wavenumber": 1186.5641,
+                    "center_wavenumber": 1247.33431,
                     "σ": 0.0,
                     "α": 0.0
                 },
                 "15": {
                     "name": "",
-                    "center_wavenumber": 1247.33431,
+                    "center_wavenumber": 1340.03463,
                     "σ": 0.0,
                     "α": 0.0
                 },
                 "16": {
                     "name": "",
-                    "center_wavenumber": 1340.03463,
+                    "center_wavenumber": 1410.07487,
                     "σ": 0.0,
                     "α": 0.0
                 },
                 "17": {
                     "name": "",
-                    "center_wavenumber": 1410.07487,
+                    "center_wavenumber": 1505.8652,
                     "σ": 0.0,
                     "α": 0.0
                 },
                 "18": {
                     "name": "",
-                    "center_wavenumber": 1505.8652,
+                    "center_wavenumber": 1684.05581,
                     "σ": 0.0,
                     "α": 0.0
                 },
                 "19": {
-                    "name": "",
-                    "center_wavenumber": 1691.26584,
-                    "σ": 0.0,
-                    "α": 0.0
-                },
-                "20": {
                     "name": "",
                     "center_wavenumber": 1715.98592,
                     "σ": 0.0,

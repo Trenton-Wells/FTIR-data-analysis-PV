@@ -8276,15 +8276,13 @@ def find_peak_info(FTIR_DataFrame, filepath=None):
             display(info_html)
         except Exception:
             pass
-        # Provide a minimal dropdown with a placeholder to avoid exception
         options = [("<no spectra>", None)]
 
-    # Seed from first spectrum, prefer session 'time' if available
+    # Seed from first spectrum, prefer session 'time' if available; skip placeholder None values
     try:
         _sess = _get_session_defaults()
         saved_time = _sess.get("time", "any")
 
-        # find first option whose Time matches saved_time
         def _matches_time(idx):
             try:
                 t = FTIR_DataFrame.loc[idx].get("Time")
@@ -8297,20 +8295,30 @@ def find_peak_info(FTIR_DataFrame, filepath=None):
             except Exception:
                 return False
 
-        match = next((idx for (_lab, idx) in options if _matches_time(idx)), None)
-        first_idx = match if match is not None else options[0][1]
+        match = next((idx for (_lab, idx) in options if idx is not None and _matches_time(idx)), None)
+        valid_vals = [v for (_lab, v) in options if v is not None]
+        first_idx = match if match is not None else (valid_vals[0] if valid_vals else None)
     except Exception:
-        # Fallback to the first available option
-        first_idx = options[0][1]
-    x0 = _parse_seq(FTIR_DataFrame.loc[first_idx].get("X-Axis"))
-    y0 = _parse_seq(FTIR_DataFrame.loc[first_idx].get("Normalized and Corrected Data"))
-    if x0 is None or y0 is None:
-        raise ValueError(
-            "Selected spectrum is missing 'X-Axis' or 'Normalized and Corrected Data'."
-        )
-    x0 = np.asarray(x0, dtype=float)
-    y0 = np.asarray(y0, dtype=float)
-    xmin, xmax = (float(np.nanmin(x0)), float(np.nanmax(x0)))
+        valid_vals = [v for (_lab, v) in options if v is not None]
+        first_idx = valid_vals[0] if valid_vals else None
+
+    if first_idx is not None:
+        x0 = _parse_seq(FTIR_DataFrame.loc[first_idx].get("X-Axis"))
+        y0 = _parse_seq(FTIR_DataFrame.loc[first_idx].get("Normalized and Corrected Data"))
+        if x0 is None or y0 is None:
+            # Fall back to empty arrays if selected row lacks data
+            x0, y0 = [], []
+            xmin, xmax = 0.0, 1.0
+        else:
+            x0 = np.asarray(x0, dtype=float)
+            y0 = np.asarray(y0, dtype=float)
+            if x0.size == 0 or y0.size == 0:
+                xmin, xmax = 0.0, 1.0
+            else:
+                xmin, xmax = (float(np.nanmin(x0)), float(np.nanmax(x0)))
+    else:
+        x0, y0 = [], []
+        xmin, xmax = 0.0, 1.0
 
     # Build spectrum options using current filters; include 'unexposed' spectra always
     def _current_filtered_df():
@@ -8361,9 +8369,9 @@ def find_peak_info(FTIR_DataFrame, filepath=None):
 
     options = _build_options()
     if not options:
-        raise ValueError("No spectra available after filtering.")
+        options = [("<no spectra>", None)]
 
-    # Seed from first spectrum; prefer session 'time' match if available
+    # Seed from first spectrum; prefer session 'time' match if available; skip None
     try:
         _sess = _get_session_defaults()
         saved_time = _sess.get("time", "any")
@@ -8380,12 +8388,29 @@ def find_peak_info(FTIR_DataFrame, filepath=None):
             except Exception:
                 return False
 
-        _match_idx = next((idx for (_lab, idx) in options if _time_matches(idx)), None)
-        first_idx = _match_idx if _match_idx is not None else options[0][1]
+        _match_idx = next((idx for (_lab, idx) in options if idx is not None and _time_matches(idx)), None)
+        _valid_vals = [v for (_lab, v) in options if v is not None]
+        first_idx = _match_idx if _match_idx is not None else (_valid_vals[0] if _valid_vals else None)
     except Exception:
-        first_idx = options[0][1]
-    x0 = _parse_seq(FTIR_DataFrame.loc[first_idx].get("X-Axis"))
-    y0 = _parse_seq(FTIR_DataFrame.loc[first_idx].get("Normalized and Corrected Data"))
+        _valid_vals = [v for (_lab, v) in options if v is not None]
+        first_idx = _valid_vals[0] if _valid_vals else None
+
+    if first_idx is not None:
+        x0 = _parse_seq(FTIR_DataFrame.loc[first_idx].get("X-Axis"))
+        y0 = _parse_seq(FTIR_DataFrame.loc[first_idx].get("Normalized and Corrected Data"))
+        if x0 is None or y0 is None:
+            x0, y0 = [], []
+            xmin, xmax = 0.0, 1.0
+        else:
+            x0 = np.asarray(x0, dtype=float)
+            y0 = np.asarray(y0, dtype=float)
+            if x0.size == 0 or y0.size == 0:
+                xmin, xmax = 0.0, 1.0
+            else:
+                xmin, xmax = (float(np.nanmin(x0)), float(np.nanmax(x0)))
+    else:
+        x0, y0 = [], []
+        xmin, xmax = 0.0, 1.0
     if x0 is None or y0 is None:
         raise ValueError(
             "Selected spectrum is missing 'X-Axis' or 'Normalized and Corrected Data'."
@@ -8542,7 +8567,12 @@ def find_peak_info(FTIR_DataFrame, filepath=None):
     )
 
     def _get_xy(row_idx):
-        r = FTIR_DataFrame.loc[row_idx]
+        if row_idx is None:
+            return None, None
+        try:
+            r = FTIR_DataFrame.loc[row_idx]
+        except Exception:
+            return None, None
         x = _parse_seq(r.get("X-Axis"))
         y = _parse_seq(r.get("Normalized and Corrected Data"))
         if x is None or y is None:
@@ -8552,7 +8582,13 @@ def find_peak_info(FTIR_DataFrame, filepath=None):
             y_arr = np.asarray(y, dtype=float)
         except Exception:
             return None, None
-        if x_arr.ndim != 1 or y_arr.ndim != 1 or x_arr.shape[0] != y_arr.shape[0]:
+        if (
+            x_arr.ndim != 1
+            or y_arr.ndim != 1
+            or x_arr.shape[0] != y_arr.shape[0]
+            or x_arr.size == 0
+            or y_arr.size == 0
+        ):
             return None, None
         return x_arr, y_arr
 
@@ -8610,7 +8646,6 @@ def find_peak_info(FTIR_DataFrame, filepath=None):
         idx = spectrum_sel.value
         nonlocal current_idx_fp
         current_idx_fp = idx
-        x_arr, y_arr = _get_xy(idx)
         if idx is None:
             with msg_out:
                 msg_out.clear_output()
@@ -8621,11 +8656,24 @@ def find_peak_info(FTIR_DataFrame, filepath=None):
             except Exception:
                 pass
             return
+        x_arr, y_arr = _get_xy(idx)
+        if x_arr is None or y_arr is None:
+            with msg_out:
+                msg_out.clear_output()
+                print("Selected spectrum has missing or invalid normalized data.")
+            try:
+                mark_row.layout.display = "none"
+            except Exception:
+                pass
+            return
         # Update traces
         with fig.batch_update():
             fig.data[0].x = x_arr.tolist()
         # Update bounds for each slider and enable/disable based on checkboxes
-        x_min, x_max = float(np.nanmin(x_arr)), float(np.nanmax(x_arr))
+        try:
+            x_min, x_max = float(np.nanmin(x_arr)), float(np.nanmax(x_arr))
+        except Exception:
+            x_min, x_max = 0.0, 1.0
         for cb, sl in ((use_r1, x_range1), (use_r2, x_range2), (use_r3, x_range3)):
             sl.min = x_min
             sl.max = x_max
@@ -8811,54 +8859,51 @@ def find_peak_info(FTIR_DataFrame, filepath=None):
         # Emit session summary before closing figure (leave msg_out visible)
         try:
             lines = _session_summary_lines(_peak_changes, context="peaks")
-            _emit_session_summary(msg_out, lines, title="Session summary (Peak Finder)")
+        except Exception:
+            lines = ["Peak Finder session closed."]
+        try:
+            _emit_function_summary(msg_out, lines, title="Session Summary (Peak Finder)")
         except Exception:
             pass
+        # Close all interactive widgets and containers except msg_out
         try:
-            # Close dropdowns/filters first
-            try:
-                material_dd.close()
-            except Exception:
-                pass
-            try:
-                conditions_dd.close()
-            except Exception:
-                pass
-            spectrum_sel.close()
-            x_range1.close()
-            x_range2.close()
-            x_range3.close()
-            use_r1.close()
-            use_r2.close()
-            use_r3.close()
-            prominence.close()
-            min_height.close()
-            distance.close()
-            width.close()
-            max_peaks.close()
-            save_file_btn.close()
-            save_all_btn.close()
-            try:
-                mark_bad_btn.close()
-            except Exception:
-                pass
-            try:
-                mark_good_btn.close()
-            except Exception:
-                pass
-            try:
-                include_bad_cb.close()
-            except Exception:
-                pass
-            close_btn.close()
-            # Leave msg_out displayed so the last messages remain visible
-            fig.close()
-            try:
-                # Close container widgets if available
-                filters_row.close()
-            except Exception:
-                pass
-            # ui variable not defined in this scope; remove stale close attempt
+            # Primitive widgets
+            try: material_dd.close()
+            except Exception: pass
+            try: conditions_dd.close()
+            except Exception: pass
+            try: spectrum_sel.close()
+            except Exception: pass
+            for w in (x_range1, x_range2, x_range3, use_r1, use_r2, use_r3,
+                      prominence, min_height, distance, width, max_peaks,
+                      save_file_btn, save_all_btn, include_bad_cb, close_btn):
+                try:
+                    w.close()
+                except Exception:
+                    pass
+            try: mark_bad_btn.close()
+            except Exception: pass
+            try: mark_good_btn.close()
+            except Exception: pass
+            # Figure
+            try: fig.close()
+            except Exception: pass
+            # Row/container widgets displayed via display(...)
+            for row in (
+                filters_row,
+                controls_row1,
+                controls_row2,
+                controls_row3,
+                controls_row4,
+                controls_row5,
+                controls_row6,
+                buttons_row,
+                plot_and_mark_pf,
+            ):
+                try:
+                    row.close()
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -10005,41 +10050,48 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                     w_i = float(center_window_sliders[i].value)
                 except Exception:
                     w_i = default_win
-                if abs(float(cx) - float(x_new)) <= abs(w_i):
+                # Enforce minimum separation of 2× the per-peak Center ± window
+                if abs(float(cx) - float(x_new)) <= (2.0 * abs(w_i)):
                     try:
                         status_html.value = (
-                            f"<span style='color:#a00;'>Rejected: {x_new:.3f} cm⁻¹ overlaps existing peak @ {cx:.3f} ±{w_i:.1f} cm⁻¹. "
+                            f"<span style='color:#a00;'>Rejected: {x_new:.3f} cm⁻¹ is too close to existing peak @ {cx:.3f}. "
+                            f"Must be ≥ 2×(Center ± window) = {2.0*abs(w_i):.1f} cm⁻¹ away. "
                             f"Adjust selection or that peak’s Center ± window.</span>"
                         )
                     except Exception:
                         _log_once(
-                            f"Rejected: {x_new:.3f} cm⁻¹ overlaps existing peak @ {cx:.3f} ±{w_i:.1f} cm⁻¹. "
+                            f"Rejected: {x_new:.3f} cm⁻¹ is too close to existing peak @ {cx:.3f}. "
+                            f"Must be ≥ 2×(Center ± window) = {2.0*abs(w_i):.1f} cm⁻¹ away. "
                             f"Adjust selection or that peak’s Center ± window."
                         )
                     return
         except Exception:
             pass
-        # Enforce proximity using Center ±window as minimum separation (customizable)
+        # Enforce minimum separation between newly selected peaks as well.
+        # Use 2× the (± window) as the required center-to-center spacing.
         try:
-            min_sep = float(PER_PEAK_DEFAULT_CENTER_WINDOW)
+            candidate_w = float(PER_PEAK_DEFAULT_CENTER_WINDOW)
         except Exception:
-            min_sep = 0.0
-        # Too close to a previously selected (session) peak?
+            candidate_w = 0.0
         for existing_x in new_peak_xs:
-            if abs(existing_x - x_new) <= min_sep:
+            try:
+                existing_w = float(new_peak_windows.get(existing_x, candidate_w))
+            except Exception:
+                existing_w = candidate_w
+            required_sep = 2.0 * max(abs(existing_w), abs(candidate_w))
+            if abs(existing_x - x_new) <= required_sep:
                 try:
                     status_html.value = (
                         f"<span style='color:#a00;'>Rejected: {x_new:.3f} cm⁻¹ is "
-                        f"within ±{min_sep:.2f} cm⁻¹ of another selected peak "
-                        f"({existing_x:.3f}). "
-                        f"Tip: reduce the per-peak Center ± slider to fit peaks in small "
-                        f"spaces.</span>"
+                        f"too close to another selected peak ({existing_x:.3f}). "
+                        f"Must be ≥ {required_sep:.2f} cm⁻¹ away (2× window). "
+                        f"Tip: reduce the per-peak Center ± slider if you need peaks closer.</span>"
                     )
                 except Exception:
                     _log_once(
-                        f"Rejected: {x_new:.3f} cm⁻¹ is within ±{min_sep:.2f} cm⁻¹ of "
-                        f"another selected peak ({existing_x:.3f}). Tip: reduce the "
-                        f"per-peak Center ± slider to fit peaks in small spaces."
+                        f"Rejected: {x_new:.3f} cm⁻¹ is too close to another selected peak "
+                        f"({existing_x:.3f}). Must be ≥ {required_sep:.2f} cm⁻¹ away (2× window). "
+                        f"Tip: reduce the per-peak Center ± slider if you need peaks closer."
                     )
                 return
         # Compute an effective session window so the new peak's window won't cover existing peaks
@@ -11593,8 +11645,15 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         except Exception:
             pass
 
-    def _fit_and_update_plot(*_, ignore_debounce=False, override_ranges=None):
-        """Run a Pseudo-Voigt fit for the selected spectrum and refresh the plot."""
+    def _fit_and_update_plot(*_, ignore_debounce=False, override_ranges=None, update_plot=True, update_controls=True):
+        """Run a Pseudo-Voigt fit for the selected spectrum.
+
+        When update_plot is False, the fit still runs and redchi/result are
+        recorded, but Plotly traces are not updated.
+
+        When update_controls is False, status text and show/hide control
+        animations are suppressed.
+        """
         nonlocal fit_thread, cancel_event, fit_cancel_token, iterating_in_progress
         nonlocal fit_update_inflight, last_fit_update_ts
         nonlocal alpha_sliders, include_checkboxes, center_sliders, sigma_sliders
@@ -11664,69 +11723,71 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             _log_dbg('DEBOUNCE_BYPASS', f"ignore_debounce=True; delta={delta_since_last:.4f}")
         fit_update_inflight = True
         _log_dbg('GUARD_SET', f"fit_update_inflight set True at ts={now_ts:.4f}")
-        # Notify user immediately before any heavy per-peak inspection runs
-        if not iterating_in_progress:
+        if update_controls:
+            # Notify user immediately before any heavy per-peak inspection runs
+            if not iterating_in_progress:
+                try:
+                    status_html.value = (
+                        "<span style='color:#555;'>Fitting...</span>"
+                    )
+                except Exception:
+                    _log_once("Fitting...")
+            # Hide controls while a Fit is running
             try:
-                status_html.value = (
-                    "<span style='color:#555;'>Fitting...</span>"
-                )
+                _hide(fit_btn)
             except Exception:
-                _log_once("Fitting...")
-        # Hide controls while a Fit is running
-        try:
-            _hide(fit_btn)
-        except Exception:
-            pass
-        try:
-            _hide(add_peaks_btn)
-        except Exception:
-            pass
-        try:
-            _hide(canonize_btn)
-        except Exception:
-            pass
-        try:
-            _hide(load_canon_btn)
-        except Exception:
-            pass
-        try:
-            delete_peaks_btn.layout.display = "none"
-        except Exception:
-            pass
-        try:
-            _hide(iter_btn)
-        except Exception:
-            pass
-        try:
-            _hide(reset_all_row)
-        except Exception:
-            pass
-        try:
-            _hide(save_btn)
-        except Exception:
-            pass
-        try:
-            _hide(fit_range_row)
-        except Exception:
-            pass
+                pass
+            try:
+                _hide(add_peaks_btn)
+            except Exception:
+                pass
+            try:
+                _hide(canonize_btn)
+            except Exception:
+                pass
+            try:
+                _hide(load_canon_btn)
+            except Exception:
+                pass
+            try:
+                delete_peaks_btn.layout.display = "none"
+            except Exception:
+                pass
+            try:
+                _hide(iter_btn)
+            except Exception:
+                pass
+            try:
+                _hide(reset_all_row)
+            except Exception:
+                pass
+            try:
+                _hide(save_btn)
+            except Exception:
+                pass
+            try:
+                _hide(fit_range_row)
+            except Exception:
+                pass
 
         # Snapshot current control state
         try:
             _snapshot_current_controls()
         except Exception:
             pass
-        try:
-            _set_cancel_button_mode("optimize" if iterating_in_progress else "fit")
-        except Exception:
-            pass
-        try:
-            _force_cancel_fit_shown()
-        except Exception:
-            pass
-        try:
-            _on_main_thread(_force_cancel_fit_shown)
-        except Exception:
-            pass
+        if update_controls:
+            try:
+                _set_cancel_button_mode("optimize" if iterating_in_progress else "fit")
+            except Exception:
+                pass
+            try:
+                _force_cancel_fit_shown()
+            except Exception:
+                pass
+            try:
+                _on_main_thread(_force_cancel_fit_shown)
+            except Exception:
+                pass
 
         # Resolve current spectrum
         try:
@@ -12530,22 +12591,23 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         except Exception:
             pass
 
-        # Prepare component traces count on main thread for consistent layout
-        comp_traces_needed = len(included)
-        with fig.batch_update():
-            current_components = max(0, len(fig.data) - 2)
-            if current_components > comp_traces_needed:
-                fig.data = tuple(list(fig.data)[: 2 + comp_traces_needed])
-            elif current_components < comp_traces_needed:
-                for _k in range(comp_traces_needed - current_components):
-                    # Placeholder name will be updated after fit with actual peak number
-                    fig.add_scatter(
-                        x=[],
-                        y=[],
-                        mode="lines",
-                        line=dict(dash="dot"),
-                        name="Peak ?",
-                    )
+        if update_plot:
+            # Prepare component traces count on main thread for consistent layout
+            comp_traces_needed = len(included)
+            with fig.batch_update():
+                current_components = max(0, len(fig.data) - 2)
+                if current_components > comp_traces_needed:
+                    fig.data = tuple(list(fig.data)[: 2 + comp_traces_needed])
+                elif current_components < comp_traces_needed:
+                    for _k in range(comp_traces_needed - current_components):
+                        # Placeholder name will be updated after fit with actual peak number
+                        fig.add_scatter(
+                            x=[],
+                            y=[],
+                            mode="lines",
+                            line=dict(dash="dot"),
+                            name="Peak ?",
+                        )
 
         # Cancel any running fit and start a new one in the background
         try:
@@ -12565,16 +12627,17 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
 
         old_redchi = last_redchi_by_idx.get(idx, None)
         _log_dbg('OLD_REDCHI', f"old_redchi={old_redchi}")
-        # Update status label immediately on main thread
-        if not iterating_in_progress:
-            try:
-                status_html.value = (
-                    "<span style='color:#555;'>Refitting...</span>"
-                    if old_redchi is not None
-                    else "<span style='color:#555;'>Fitting...</span>"
-                )
-            except Exception:
-                _log_once("Refitting..." if old_redchi is not None else "Fitting...")
+        if update_controls:
+            # Update status label immediately on main thread
+            if not iterating_in_progress:
+                try:
+                    status_html.value = (
+                        "<span style='color:#555;'>Refitting...</span>"
+                        if old_redchi is not None
+                        else "<span style='color:#555;'>Fitting...</span>"
+                    )
+                except Exception:
+                    _log_once("Refitting..." if old_redchi is not None else "Fitting...")
 
         def _worker(local_cancel_token=local_cancel, forced_ranges=fit_ranges_for_this_run):
             nonlocal fit_thread
@@ -12735,9 +12798,13 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                 _log_dbg('LMFIT_DONE', f"Fit result redchi={getattr(result,'redchi',None)}")
                 if local_cancel_token.is_set():
                     return
-                # Evaluate results for full x-array for plotting
-                y_fit = result.eval(x=x_arr)
-                comps = result.eval_components(x=x_arr)
+                # Evaluate results for full x-array for plotting (optional)
+                if update_plot:
+                    y_fit = result.eval(x=x_arr)
+                    comps = result.eval_components(x=x_arr)
+                else:
+                    y_fit = None
+                    comps = None
 
                 # Post-fit parameter snapshot & mode/vary verification
                 # Post-fit snapshot (always capture; conditional detailed logging)
@@ -12810,6 +12877,29 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                     last_result_by_idx[idx] = result
                 except Exception:
                     pass
+
+                # Persist redchi immediately (used by silent objective evaluation)
+                try:
+                    rc_val = getattr(result, "redchi", None)
+                    if rc_val is not None:
+                        try:
+                            last_redchi_by_idx[idx] = float(rc_val)
+                        except Exception:
+                            last_redchi_by_idx[idx] = rc_val
+                except Exception:
+                    pass
+
+                # Silent mode: do not touch the UI/plot; just clear guards.
+                if (not update_plot) and (not update_controls):
+                    try:
+                        fit_thread = None
+                    except Exception:
+                        pass
+                    try:
+                        _finish_fit_guard()
+                    except Exception:
+                        pass
+                    return
 
                 def _apply_results_on_ui():
                     nonlocal iter_summary_pending, iter_start_redchi, iter_final_redchi
@@ -13065,43 +13155,44 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                         _update_cancel_fit_visibility()
                     except Exception:
                         pass
-                    # Restore controls hidden during Fit
-                    try:
-                        _show(fit_btn)
-                    except Exception:
-                        pass
-                    try:
-                        _show(add_peaks_btn)
-                    except Exception:
-                        pass
-                    try:
-                        _show(canonize_btn)
-                    except Exception:
-                        pass
-                    try:
-                        _show(load_canon_btn)
-                    except Exception:
-                        pass
-                    try:
-                        delete_peaks_btn.layout.display = ""
-                    except Exception:
-                        pass
-                    try:
-                        _show(iter_btn)
-                    except Exception:
-                        pass
-                    try:
-                        _show(reset_all_row)
-                    except Exception:
-                        pass
-                    try:
-                        _show(save_btn)
-                    except Exception:
-                        pass
-                    try:
-                        _show(fit_range_row)
-                    except Exception:
-                        pass
+                    if update_controls and (not iterating_in_progress):
+                        # Restore controls hidden during Fit
+                        try:
+                            _show(fit_btn)
+                        except Exception:
+                            pass
+                        try:
+                            _show(add_peaks_btn)
+                        except Exception:
+                            pass
+                        try:
+                            _show(canonize_btn)
+                        except Exception:
+                            pass
+                        try:
+                            _show(load_canon_btn)
+                        except Exception:
+                            pass
+                        try:
+                            delete_peaks_btn.layout.display = ""
+                        except Exception:
+                            pass
+                        try:
+                            _show(iter_btn)
+                        except Exception:
+                            pass
+                        try:
+                            _show(reset_all_row)
+                        except Exception:
+                            pass
+                        try:
+                            _show(save_btn)
+                        except Exception:
+                            pass
+                        try:
+                            _show(fit_range_row)
+                        except Exception:
+                            pass
 
                 _on_main_thread(_apply_results_on_ui)
                 # Ensure the Cancel Fit button hides after the worker fully ends
@@ -13111,14 +13202,15 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                 except Exception:
                     pass
                 # Only hide at the end if not iterating/frozen
-                try:
-                    _on_main_thread(_force_cancel_fit_hidden)
-                except Exception:
-                    pass
-                try:
-                    _on_main_thread(_force_cancel_fit_hidden)
-                except Exception:
-                    pass
+                if update_controls and (not iterating_in_progress):
+                    try:
+                        _on_main_thread(_force_cancel_fit_hidden)
+                    except Exception:
+                        pass
+                    try:
+                        _on_main_thread(_force_cancel_fit_hidden)
+                    except Exception:
+                        pass
                 # Mark fit complete (successful path)
                 try:
                     _finish_fit_guard()
@@ -13142,25 +13234,26 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                             _force_cancel_fit_hidden()
                     except Exception:
                         pass
-                    # Restore controls hidden during Fit
-                    try:
-                        _show(fit_btn)
-                        _show(add_peaks_btn)
-                        _show(iter_btn)
-                        _show(reset_all_row)
-                        _show(save_btn)
-                        _show(fit_range_row)
-                    except Exception:
-                        pass
-                    try:
-                        _show(canonize_btn)
-                        _show(load_canon_btn)
-                    except Exception:
-                        pass
-                    try:
-                        delete_peaks_btn.layout.display = ""
-                    except Exception:
-                        pass
+                    if update_controls and (not iterating_in_progress):
+                        # Restore controls hidden during Fit
+                        try:
+                            _show(fit_btn)
+                            _show(add_peaks_btn)
+                            _show(iter_btn)
+                            _show(reset_all_row)
+                            _show(save_btn)
+                            _show(fit_range_row)
+                        except Exception:
+                            pass
+                        try:
+                            _show(canonize_btn)
+                            _show(load_canon_btn)
+                        except Exception:
+                            pass
+                        try:
+                            delete_peaks_btn.layout.display = ""
+                        except Exception:
+                            pass
 
                 _on_main_thread(_notify_cancel)
                 # Clear thread reference and trigger a final visibility update
@@ -13195,25 +13288,26 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                             _force_cancel_fit_hidden()
                     except Exception:
                         pass
-                    # Restore controls hidden during Fit
-                    try:
-                        _show(fit_btn)
-                        _show(add_peaks_btn)
-                        _show(iter_btn)
-                        _show(reset_all_row)
-                        _show(save_btn)
-                        _show(fit_range_row)
-                    except Exception:
-                        pass
-                    try:
-                        _show(canonize_btn)
-                        _show(load_canon_btn)
-                    except Exception:
-                        pass
-                    try:
-                        delete_peaks_btn.layout.display = ""
-                    except Exception:
-                        pass
+                    if update_controls and (not iterating_in_progress):
+                        # Restore controls hidden during Fit
+                        try:
+                            _show(fit_btn)
+                            _show(add_peaks_btn)
+                            _show(iter_btn)
+                            _show(reset_all_row)
+                            _show(save_btn)
+                            _show(fit_range_row)
+                        except Exception:
+                            pass
+                        try:
+                            _show(canonize_btn)
+                            _show(load_canon_btn)
+                        except Exception:
+                            pass
+                        try:
+                            delete_peaks_btn.layout.display = ""
+                        except Exception:
+                            pass
 
                 _on_main_thread(_notify_error)
                 # Clear thread reference and trigger a final visibility update
@@ -13233,19 +13327,20 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
 
         fit_thread = threading.Thread(target=_worker, daemon=True)
         fit_thread.start()
-        # Show the Cancel Fit button immediately when a fit starts (guard will be
-        # cleared only when the worker actually finishes to prevent overlapping fits).
-        try:
-            _force_cancel_fit_shown()
-        except Exception:
-            pass
-        try:
-            _on_main_thread(_force_cancel_fit_shown)
-        except Exception:
+        if update_controls:
+            # Show the Cancel Fit button immediately when a fit starts (guard will be
+            # cleared only when the worker actually finishes to prevent overlapping fits).
             try:
-                _update_cancel_fit_visibility()
+                _force_cancel_fit_shown()
             except Exception:
                 pass
+            try:
+                _on_main_thread(_force_cancel_fit_shown)
+            except Exception:
+                try:
+                    _update_cancel_fit_visibility()
+                except Exception:
+                    pass
         return None
 
     # Track displayed spectrum independently for deconvolution
@@ -13537,7 +13632,7 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         except Exception:
             file_label = str(idx)
         _log_once(
-            f"Saved deconvolution for file '{file_label}'. Stored results in DataFrame; JSON export runs during material fit."
+            f"Saved deconvolution for file '{file_label}'. Stored results in DataFrame."
         )
         try:
             _deconv_changes["saved"].append((idx, len(out)))
@@ -14053,7 +14148,12 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             if wait_prev is None:
                 return np.inf
             override_ranges = list(local_ranges) if local_ranges else None
-            _fit_and_update_plot(ignore_debounce=True, override_ranges=override_ranges)
+            _fit_and_update_plot(
+                ignore_debounce=True,
+                override_ranges=override_ranges,
+                update_plot=False,
+                update_controls=False,
+            )
             wait_current = _wait_for_fit_idle(reason="fit to finish")
             if wait_current is False:
                 msg_curr = "Timed out waiting for fit to finish. Optimization stopped."
@@ -14375,6 +14475,65 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             except Exception:
                 return val
 
+        def _try_directional_alpha(slider, current_val, step, current_rc_local):
+            """Try +/-step once to choose direction, then keep stepping until no improvement."""
+            nonlocal total_evaluations
+            if slider is None or not hasattr(slider, "value"):
+                return current_val, current_rc_local, False
+
+            best_val = current_val
+            best_rc = current_rc_local
+            chosen_dir = 0.0
+
+            # First decision: compare +step vs -step
+            for direction in (step, -step):
+                cand = _clamp_alpha(current_val + direction)
+                if abs(cand - current_val) < 1e-9:
+                    continue
+                _set_quiet(slider, "value", cand)
+                rc = _run_fit_and_wait(fit_ranges_snapshot)
+                total_evaluations += 1
+                if not np.isfinite(rc):
+                    rc = np.inf
+                if rc + improvement_threshold < best_rc:
+                    best_rc = rc
+                    best_val = cand
+                    chosen_dir = direction
+
+            # No improvement at this step size
+            if chosen_dir == 0.0 or abs(best_val - current_val) < 1e-12:
+                _set_quiet(slider, "value", current_val)
+                return current_val, current_rc_local, False
+
+            # Accept best direction and keep stepping while improving
+            current_val = best_val
+            current_rc_local = best_rc
+            _set_quiet(slider, "value", current_val)
+
+            while True:
+                try:
+                    if cancel_event.is_set():
+                        break
+                except Exception:
+                    pass
+                cand = _clamp_alpha(current_val + chosen_dir)
+                if abs(cand - current_val) < 1e-9:
+                    break
+                _set_quiet(slider, "value", cand)
+                rc = _run_fit_and_wait(fit_ranges_snapshot)
+                total_evaluations += 1
+                if not np.isfinite(rc):
+                    rc = np.inf
+                if rc + improvement_threshold < current_rc_local:
+                    current_val = cand
+                    current_rc_local = rc
+                    continue
+                # Revert and stop when no improvement
+                _set_quiet(slider, "value", current_val)
+                break
+
+            return current_val, current_rc_local, True
+
         sweep = 0
         while True:
             try:
@@ -14401,54 +14560,30 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                 peak_idx = target.get("peak_idx")
 
                 for step in step_sequence:
-                    while True:
-                        try:
-                            if cancel_event.is_set():
-                                break
-                        except Exception:
-                            pass
-                        candidates = []
-                        try:
-                            for direction in (step, -step):
-                                cand = _clamp_alpha(current_val + direction)
-                                if abs(cand - current_val) < 1e-9:
-                                    continue
-                                candidates.append(cand)
-                        except Exception:
-                            pass
-                        if not candidates:
+                    try:
+                        if cancel_event.is_set():
                             break
-                        best_candidate_val = current_val
-                        best_candidate_rc = current_rc
-                        improved = False
-                        for cand in candidates:
-                            _set_quiet(slider, "value", cand)
-                            rc = _run_fit_and_wait(fit_ranges_snapshot)
-                            total_evaluations += 1
-                            if not np.isfinite(rc):
-                                rc = np.inf
-                            if rc + improvement_threshold < best_candidate_rc:
-                                best_candidate_val = cand
-                                best_candidate_rc = rc
-                                improved = True
-                        _set_quiet(slider, "value", best_candidate_val)
-                        if improved:
-                            current_val = best_candidate_val
-                            current_rc = best_candidate_rc
-                            sweep_changed = True
-                            idx_key = peak_idx if peak_idx is not None else target.get("pos")
-                            if idx_key is not None:
-                                changed_peak_indices.add(idx_key)
-                            try:
-                                _update_iter_status(
-                                    f"<span style='color:#555;'>iterating... sweep {sweep} | peak {idx_target}/{num_targets} | evaluations={total_evaluations} | α={current_val:.3f} | redχ={current_rc:.4g}</span>"
-                                )
-                            except Exception:
-                                pass
-                            continue  # stay on this step size while improving
-                        break
-                    if cancel_event.is_set():
-                        break
+                    except Exception:
+                        pass
+                    new_val, new_rc, improved = _try_directional_alpha(
+                        slider, current_val, step, current_rc
+                    )
+                    if improved and (new_rc + improvement_threshold < current_rc):
+                        current_val = new_val
+                        current_rc = new_rc
+                        sweep_changed = True
+                        idx_key = peak_idx if peak_idx is not None else target.get("pos")
+                        if idx_key is not None:
+                            changed_peak_indices.add(idx_key)
+                        try:
+                            _update_iter_status(
+                                f"<span style='color:#555;'>iterating... sweep {sweep} | peak {idx_target}/{num_targets} | evaluations={total_evaluations} | α={current_val:.3f} | redχ={current_rc:.4g}</span>"
+                            )
+                        except Exception:
+                            pass
+                        continue
+                    # No improvement at this step size; try next smaller step
+                    _set_quiet(slider, "value", current_val)
                 _set_quiet(slider, "value", current_val)
                 if cancel_event.is_set():
                     break
@@ -14544,6 +14679,17 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         cancel_fit_btn_frozen = False
         try:
             _on_main_thread(_force_cancel_fit_hidden)
+        except Exception:
+            pass
+
+        # One final visible refresh (silent evaluations do not update the plot)
+        try:
+            _fit_and_update_plot(
+                ignore_debounce=True,
+                override_ranges=fit_ranges_snapshot,
+                update_plot=True,
+                update_controls=True,
+            )
         except Exception:
             pass
 
@@ -15574,10 +15720,11 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             try:
                 for i, cx in enumerate(peaks_x or []):
                     try:
-                        w_i = float(PER_PEAK_DEFAULT_CENTER_WINDOW)
+                        w_i = float(center_window_sliders[i].value)
                     except Exception:
                         w_i = float(PER_PEAK_DEFAULT_CENTER_WINDOW)
-                    if abs(float(cx) - float(x_new)) <= abs(w_i):
+                    # Enforce minimum separation of 2× the per-peak Center ± window
+                    if abs(float(cx) - float(x_new)) <= (2.0 * abs(w_i)):
                         overlapped = True
                         break
             except Exception:
@@ -15620,8 +15767,10 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             # Persist the accepted peak set directly to the DataFrame so the spectrum
             # always derives its state from FTIR_DataFrame (no cross-spectrum carry-over).
             try:
-                FTIR_DataFrame.loc[idx, 'Peak Wavenumbers'] = list(new_centers)
-                FTIR_DataFrame.loc[idx, 'Peak Absorbances'] = list(new_amplitudes)
+                # Use .at for scalar cell assignment; .loc with list-like values
+                # can be interpreted as iterable assignment and fail.
+                FTIR_DataFrame.at[idx, 'Peak Wavenumbers'] = list(new_centers)
+                FTIR_DataFrame.at[idx, 'Peak Absorbances'] = list(new_amplitudes)
             except Exception:
                 pass
             try:
@@ -15703,7 +15852,7 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         if rejected_close:
             joined = ", ".join(f"{v:.3f}" for v in rejected_close)
             msg = (
-                "Rejected: {} overlap existing peaks' Center ± windows. "
+                "Rejected: {} are too close to existing peaks (must be ≥ 2× Center ± window away). "
                 "Tip: adjust per-peak Center ± sliders to make room."
             ).format(joined)
             try:
@@ -15822,25 +15971,34 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         try:
             for i, cx in enumerate(vis_xs or []):
                 try:
-                    w_i = float(PER_PEAK_DEFAULT_CENTER_WINDOW)
+                    w_i = float(center_window_sliders[i].value)
                 except Exception:
                     w_i = default_win
-                if abs(float(cx) - float(x_new)) <= abs(w_i):
+                # Enforce minimum separation of 2× the per-peak Center ± window
+                if abs(float(cx) - float(x_new)) <= (2.0 * abs(w_i)):
                     _log_once(
-                        f"Rejected: {x_new:.3f} cm⁻¹ overlaps existing peak @ {cx:.3f} ±{w_i:.1f} cm⁻¹. Adjust selection or that peak’s Center ± window."
+                        f"Rejected: {x_new:.3f} cm⁻¹ is too close to existing peak @ {cx:.3f}. "
+                        f"Must be ≥ 2×(Center ± window) = {2.0*abs(w_i):.1f} cm⁻¹ away. "
+                        f"Adjust selection or that peak’s Center ± window."
                     )
                     return
         except Exception:
             pass
-        # Check against session-selected peaks using default window
+        # Check against session-selected peaks using 2× window rule
         try:
-            min_sep_default = float(PER_PEAK_DEFAULT_CENTER_WINDOW)
+            candidate_w = float(PER_PEAK_DEFAULT_CENTER_WINDOW)
         except Exception:
-            min_sep_default = 0.0
+            candidate_w = 0.0
         for existing_x in new_peak_xs:
-            if abs(existing_x - x_new) <= min_sep_default:
+            try:
+                existing_w = float(new_peak_windows.get(existing_x, candidate_w))
+            except Exception:
+                existing_w = candidate_w
+            required_sep = 2.0 * max(abs(existing_w), abs(candidate_w))
+            if abs(existing_x - x_new) <= required_sep:
                 _log_once(
-                    f"Rejected: {x_new:.3f} cm⁻¹ overlaps the ±{min_sep_default:.2f} cm⁻¹ window of selected peak {existing_x:.3f}."
+                    f"Rejected: {x_new:.3f} cm⁻¹ is too close to selected peak {existing_x:.3f}. "
+                    f"Must be ≥ {required_sep:.2f} cm⁻¹ away (2× window)."
                 )
                 return
         # Compute session-effective window vs existing peaks and store
@@ -18752,7 +18910,7 @@ def export_material_output_csv(
         except Exception:
             palpha = 0.0
         # Title format: Peak 1_name=""_center=#,sigma=#,alpha=#
-        return f"Peak{idx_key}_name=\{pname}\_center={pcenter},sigma={psigma},alpha={palpha}"
+        return f"Peak{idx_key}_name={pname}_center={pcenter},sigma={psigma},alpha={palpha}"
 
     peak_keys_sorted = sorted(peaks_def.keys(), key=lambda s: int(str(s)) if str(s).isdigit() else str(s))
     peak_headers = [_peak_header(k) for k in peak_keys_sorted]
@@ -18921,6 +19079,13 @@ def trim_DataFrame(FTIR_DataFrame):
     except Exception:
         times_unique = []
 
+    # Safe import for display/clear_output (avoid re-importing widgets)
+    try:
+        from IPython.display import display, clear_output  # type: ignore
+    except Exception:
+        display = None  # type: ignore
+        clear_output = None  # type: ignore
+
     # Widgets
     use_index_toggle = widgets.ToggleButton(
         value=False,
@@ -18965,6 +19130,11 @@ def trim_DataFrame(FTIR_DataFrame):
     close_btn = widgets.Button(description="Close", button_style="danger")
 
     msg_out = widgets.Output()
+    # Persistent status area that remains visible after Close
+    top_status_out = widgets.Output()
+    # Session tracking for summary output
+    session_lines = []
+    session_changes = {}
 
     # Dynamic containers for filter vs index-only mode
     filter_row = widgets.HBox([material_dd, conditions_dd, time_dd, include_bad_cb])
@@ -18978,7 +19148,28 @@ def trim_DataFrame(FTIR_DataFrame):
     actions = widgets.HBox([apply_btn, close_btn])
     ui = widgets.VBox([controls, col_box, actions, msg_out])
 
-    display(ui)
+    # Seed initial instruction in persistent area
+    try:
+        _emit_function_summary(
+            top_status_out,
+            [
+                "Select filters or toggle to Index mode.",
+                "Check columns to clear, then click Apply.",
+                "Click Close to view session summary.",
+            ],
+            title="Trim DataFrame",
+        )
+    except Exception:
+        pass
+
+    if display is not None:
+        display(ui, top_status_out)
+    else:
+        # Fallback: at least show UI; summary will print on close via msg_out
+        try:
+            print("Trim DataFrame UI loaded. Close to see summary.")
+        except Exception:
+            pass
 
     # Helper: build mask based on mode
     def _mask_for_selection():
@@ -19038,8 +19229,8 @@ def trim_DataFrame(FTIR_DataFrame):
             if rows.empty:
                 print("No rows match the current selection; nothing to clear.")
                 return
-            # Perform clearing
-            FTIR_DataFrame.loc[mask, selected_cols] = None
+            # Perform clearing: set cells to NaN
+            FTIR_DataFrame.loc[mask, selected_cols] = np.nan
 
             # Persist session defaults when using filters
             if not use_index_toggle.value:
@@ -19051,7 +19242,7 @@ def trim_DataFrame(FTIR_DataFrame):
                 f"Cleared {len(rows)} row(s) in columns: {', '.join(selected_cols)}"
             )
             try:
-                _emit_function_summary(msg_out, session_lines, title="Session Summary")
+                _emit_function_summary(top_status_out, session_lines, title="Session Summary")
             except Exception:
                 for line in session_lines:
                     print(line)
@@ -19065,17 +19256,21 @@ def trim_DataFrame(FTIR_DataFrame):
             ui.layout.display = "none"
         except Exception:
             pass
-        # Keep msg_out visible with any previous summary
-        with msg_out:
+        # Replace persistent area content with a consolidated session summary
+        try:
+            if clear_output is not None:
+                with top_status_out:
+                    clear_output()
+        except Exception:
+            pass
+        with top_status_out:
             try:
                 if session_lines:
-                    _emit_function_summary(msg_out, session_lines, title="Session Summary")
-                print("Closed trim_DataFrame UI. Summary remains above.")
+                    _emit_function_summary(top_status_out, session_lines, title="Session Summary")
             except Exception:
                 # Fallback to printing accumulated lines
                 for line in session_lines:
                     print(line)
-                print("Closed trim_DataFrame UI. Summary remains above.")
 
     close_btn.on_click(_on_close)
 
