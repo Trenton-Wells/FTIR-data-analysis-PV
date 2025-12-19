@@ -1,0 +1,13 @@
+fit_material needs customizable optimization
+    Suggested method:
+    Change the Optimize button to be in its own container just below the other buttons, with checkboxes next to it for center, alpha, sigma, and A. Optimization should be ran for whichever parameter boxes are checked, when the optimize button is clicked.
+
+Add fit results to plot_spectra
+
+Make sure things work in Colab
+
+Add ability to pull in RH & temperature values from files
+
+Add a "Mark as good/bad" button setup to find_peak_info
+
+Add a peak lookup tool so that users can get suggested peak names without searching online

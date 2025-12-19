@@ -756,6 +756,7 @@ def extract_file_info(
         "Peak Absorbances",
         "Using Canon Peaks",
         "Deconvolution Results",
+        "Deconvolution X-Ranges",
         "Material Fit Results",
     ]
     for column in required_columns:
@@ -1125,6 +1126,7 @@ def extract_file_info(
             "Peak Absorbances",
             "Using Canon Peaks",
             "Deconvolution Results",
+            "Deconvolution X-Ranges",
             "Material Fit Results",
         ]
         ordered = [c for c in desired_order if c in existing_cols]
@@ -1360,7 +1362,7 @@ def _session_summary_lines(changes: dict, *, context: str = ""):
             try:
                 sf = changes.get("saved_file") or []
                 if sf:
-                    head = ", ".join([f"{i}:{n}" for i, n in sf[:5]])
+                    head = ", ".join([f"{i}" for i in sf[:5]])
                     tail = " ..." if len(sf) > 5 else ""
                     lines.append(
                         f"Saved results for {len(sf)} spectra (first 5: {head}{tail})"
@@ -9075,12 +9077,25 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         except Exception:
             pass
 
-    # Ensure destination column exists for saving results
+    # Ensure destination columns exist for saving results
     results_col = "Deconvolution Results"
+    x_ranges_col = "Deconvolution X-Ranges"
     if results_col not in FTIR_DataFrame.columns:
         FTIR_DataFrame[results_col] = None
     try:
         FTIR_DataFrame[results_col] = FTIR_DataFrame[results_col].astype(object)
+    except Exception:
+        pass
+
+    # Insert X-ranges column adjacent to results when possible
+    if x_ranges_col not in FTIR_DataFrame.columns:
+        try:
+            loc = int(list(FTIR_DataFrame.columns).index(results_col)) + 1
+            FTIR_DataFrame.insert(loc, x_ranges_col, None)
+        except Exception:
+            FTIR_DataFrame[x_ranges_col] = None
+    try:
+        FTIR_DataFrame[x_ranges_col] = FTIR_DataFrame[x_ranges_col].astype(object)
     except Exception:
         pass
 
@@ -9098,6 +9113,20 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         except Exception:
             try:
                 FTIR_DataFrame.loc[idx, results_col] = payload
+            except Exception:
+                pass
+
+    def _persist_deconv_x_ranges(idx, x_ranges):
+        """Store a deep copy of *x_ranges* in the DataFrame x-ranges column."""
+        try:
+            payload = copy.deepcopy(x_ranges)
+        except Exception:
+            payload = x_ranges
+        try:
+            FTIR_DataFrame.at[idx, x_ranges_col] = payload
+        except Exception:
+            try:
+                FTIR_DataFrame.loc[idx, x_ranges_col] = payload
             except Exception:
                 pass
 
@@ -9184,8 +9213,92 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         options=options,
         value=first_idx,
         description="Spectrum",
-        layout=widgets.Layout(width="70%"),
+        layout=widgets.Layout(width="60%"),
     )
+
+    prev_spectrum_btn = widgets.Button(
+        description="Previous spectrum",
+        button_style="",
+        tooltip="Select the previous spectrum in the Spectrum dropdown list.",
+        layout=widgets.Layout(width="170px"),
+    )
+    next_spectrum_btn = widgets.Button(
+        description="Next spectrum",
+        button_style="",
+        tooltip="Select the next spectrum in the Spectrum dropdown list.",
+        layout=widgets.Layout(width="140px"),
+    )
+
+    spectrum_counter = widgets.HTML(
+        value="",
+        layout=widgets.Layout(width="70px"),
+    )
+
+    def _spectrum_dropdown_values():
+        try:
+            opts = list(spectrum_sel.options) if spectrum_sel.options else []
+        except Exception:
+            opts = []
+
+        values = []
+        for opt in opts:
+            try:
+                _lbl, _v = opt
+            except Exception:
+                _v = opt
+            if _v is None:
+                continue
+            values.append(_v)
+        return values
+
+    def _update_spectrum_counter():
+        values = _spectrum_dropdown_values()
+        total = len(values)
+        cur = getattr(spectrum_sel, "value", None)
+        pos = 0
+        if total and (cur in values):
+            try:
+                pos = values.index(cur) + 1
+            except Exception:
+                pos = 0
+        try:
+            spectrum_counter.value = f"<b>{pos}/{total}</b>"
+        except Exception:
+            pass
+
+    def _step_spectrum_selection(delta: int):
+        values = _spectrum_dropdown_values()
+        if not values:
+            return
+
+        cur = getattr(spectrum_sel, "value", None)
+        try:
+            i = values.index(cur)
+        except Exception:
+            try:
+                spectrum_sel.value = values[0]
+            except Exception:
+                pass
+            return
+
+        new_i = i + int(delta)
+        if new_i < 0:
+            new_i = 0
+        elif new_i >= len(values):
+            new_i = len(values) - 1
+
+        if values[new_i] != cur:
+            try:
+                spectrum_sel.value = values[new_i]
+            except Exception:
+                pass
+        try:
+            _update_spectrum_counter()
+        except Exception:
+            pass
+
+    prev_spectrum_btn.on_click(lambda _b=None: _step_spectrum_selection(-1))
+    next_spectrum_btn.on_click(lambda _b=None: _step_spectrum_selection(1))
 
     def _refresh_spectrum_options_deconv(*_):
         opts_local = _build_options_for_filters()
@@ -9193,6 +9306,10 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             spectrum_sel.options = [("<no spectra>", None)]
             try:
                 spectrum_sel.value = None
+            except Exception:
+                pass
+            try:
+                _update_spectrum_counter()
             except Exception:
                 pass
             return
@@ -9209,6 +9326,10 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                 spectrum_sel.value = valid_values[0]
             except Exception:
                 pass
+        try:
+            _update_spectrum_counter()
+        except Exception:
+            pass
 
     material_dd.observe(_refresh_spectrum_options_deconv, names="value")
     conditions_dd.observe(_refresh_spectrum_options_deconv, names="value")
@@ -9227,6 +9348,10 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
 
     # Dynamic range slider list (initial contains Range 1). Limit to 3 total to mirror previous functionality.
     range_sliders = [fit_range]
+
+    # Persist the most recently chosen Fit X-ranges across spectrum switches.
+    # Stored as a list of (lo, hi) floats, length 1..3.
+    persisted_fit_ranges = None
 
     add_range_btn = widgets.Button(
         description="Add another range",
@@ -9247,6 +9372,81 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             readout_format=".1f",
             layout=widgets.Layout(width="90%"),
         )
+
+    def _clamp_ranges_to_span(ranges, x_min: float, x_max: float):
+        """Clamp ranges to [x_min, x_max]; fall back to full-span if collapsed."""
+        out = []
+        if ranges is None:
+            ranges = []
+        for lo, hi in ranges:
+            try:
+                lo_f = float(lo)
+                hi_f = float(hi)
+            except Exception:
+                continue
+            lo_f, hi_f = (min(lo_f, hi_f), max(lo_f, hi_f))
+            lo_f = max(float(x_min), lo_f)
+            hi_f = min(float(x_max), hi_f)
+            # If a range collapses after clamping, use the full span.
+            if not (hi_f > lo_f):
+                lo_f, hi_f = float(x_min), float(x_max)
+            out.append((lo_f, hi_f))
+            if len(out) >= 3:
+                break
+        if not out:
+            out = [(float(x_min), float(x_max))]
+        return out
+
+    def _apply_ranges_to_sliders(ranges, x_min: float, x_max: float):
+        """Ensure slider count matches ranges and apply limits/values."""
+        nonlocal range_sliders
+        safe = _clamp_ranges_to_span(ranges, x_min, x_max)
+
+        target_n = max(1, min(3, len(safe)))
+        # Remove extras
+        try:
+            while len(range_sliders) > target_n:
+                range_sliders.pop()
+        except Exception:
+            pass
+        # Add missing
+        try:
+            while len(range_sliders) < target_n:
+                sl_new = _make_range_slider(len(range_sliders) + 1)
+                range_sliders.append(sl_new)
+                try:
+                    sl_new.observe(_on_fit_range_change, names="value")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        step = (x_max - x_min) / 1000 or 1.0
+        for sl, (lo, hi) in zip(range_sliders, safe[:target_n]):
+            try:
+                sl.min = float(x_min)
+                sl.max = float(x_max)
+                sl.step = float(step)
+                sl.value = [float(lo), float(hi)]
+            except Exception:
+                pass
+
+        try:
+            _renumber_range_sliders()
+        except Exception:
+            pass
+        try:
+            add_range_btn.disabled = len(range_sliders) >= 3
+            add_range_btn.tooltip = (
+                "Maximum of 3 ranges reached" if len(range_sliders) >= 3
+                else "Insert an additional fit range (up to 3)."
+            )
+        except Exception:
+            pass
+        try:
+            _refresh_range_box()
+        except Exception:
+            pass
 
     range_sliders_box = widgets.VBox([widgets.HBox([fit_range])])
 
@@ -9355,7 +9555,6 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             return CENTER_MODE_EXACT
         return CENTER_MODE_WINDOW
     default_fit_range_value = (float(fit_range.value[0]), float(fit_range.value[1]))
-    # Add peaks workflow controls
     # Fit button (manual trigger for fitting)
     fit_btn = widgets.Button(
         description="Fit",
@@ -9800,6 +9999,7 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
 
     def _on_fit_range_change(*_):
         """Only Fit X-range changes should rebuild the per-peak controls."""
+        nonlocal persisted_fit_ranges
         try:
             if iterating_in_progress or bulk_update_in_progress:
                 return
@@ -9807,6 +10007,10 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             pass
         # Snapshot first so states persist across rebuild
         _snapshot_current_controls()
+        try:
+            persisted_fit_ranges = _current_fit_ranges()
+        except Exception:
+            pass
         try:
             _update_fit_range_indicator()
         except Exception:
@@ -9855,6 +10059,100 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
     def _show(w):
         try:
             w.layout.display = ""
+        except Exception:
+            pass
+
+    def _hide_controls_during_fit_or_opt():
+        """Hide the same controls during Fit and optimization."""
+        try:
+            _hide(fit_btn)
+        except Exception:
+            pass
+        try:
+            _hide(add_peaks_btn)
+        except Exception:
+            pass
+        try:
+            _hide(canonize_btn)
+        except Exception:
+            pass
+        try:
+            _hide(canonize_confirm_btn)
+        except Exception:
+            pass
+        try:
+            _hide(canonize_cancel_btn)
+        except Exception:
+            pass
+        try:
+            _hide(load_canon_btn)
+        except Exception:
+            pass
+        try:
+            delete_peaks_btn.layout.display = "none"
+        except Exception:
+            pass
+        try:
+            _hide(iter_btn)
+        except Exception:
+            pass
+        try:
+            _hide(reset_all_row)
+        except Exception:
+            pass
+        try:
+            _hide(save_btn)
+        except Exception:
+            pass
+        try:
+            _hide(fit_range_row)
+        except Exception:
+            pass
+
+    def _show_controls_after_fit_or_opt():
+        """Restore controls hidden by _hide_controls_during_fit_or_opt."""
+        try:
+            _show(fit_btn)
+        except Exception:
+            pass
+        try:
+            _show(add_peaks_btn)
+        except Exception:
+            pass
+        try:
+            _show(canonize_btn)
+        except Exception:
+            pass
+        try:
+            _hide(canonize_confirm_btn)
+        except Exception:
+            pass
+        try:
+            _hide(canonize_cancel_btn)
+        except Exception:
+            pass
+        try:
+            _show(load_canon_btn)
+        except Exception:
+            pass
+        try:
+            delete_peaks_btn.layout.display = ""
+        except Exception:
+            pass
+        try:
+            _show(iter_btn)
+        except Exception:
+            pass
+        try:
+            _show(reset_all_row)
+        except Exception:
+            pass
+        try:
+            _show(save_btn)
+        except Exception:
+            pass
+        try:
+            _show(fit_range_row)
         except Exception:
             pass
 
@@ -10286,6 +10584,7 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         nonlocal amplitude_mode_toggles, center_mode_toggles, sigma_mode_toggles
         nonlocal lock_alpha_checkboxes, lock_center_checkboxes, lock_sigma_checkboxes
         nonlocal peak_center_state_by_idx, previous_in_range_indices
+        nonlocal center_slider_peak_indices
         # Build controls only for peaks within any active Fit X-range (lazy creation).
         # Out-of-range peak widgets (headers) are created only when the excluded toggle is enabled.
         try:
@@ -10688,6 +10987,10 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                             pass
                     include_checkbox = widgets.Checkbox(value=include_val_local, description="Include peak in Fit", indent=False,
                                                        layout=widgets.Layout(width="200px"))
+                    try:
+                        setattr(include_checkbox, '_original_idx', peak_idx)
+                    except Exception:
+                        pass
                     # Restore saved modes if available
                     amp_mode_val_local = 'Auto'
                     center_mode_val_local = CENTER_MODE_WINDOW
@@ -11168,6 +11471,10 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                         except Exception:
                             pass
                         include_checkbox = widgets.Checkbox(value=include_val_local, description="Include peak in Fit", indent=False, layout=widgets.Layout(width="200px"))
+                        try:
+                            setattr(include_checkbox, '_original_idx', peak_idx)
+                        except Exception:
+                            pass
                         amp_mode_val_local = 'Auto'; center_mode_val_local = CENTER_MODE_WINDOW; sigma_mode_val_local = 'Auto'
                         try:
                             if saved_modes and isinstance(saved_modes.get('amplitude'), list) and peak_idx < len(saved_modes.get('amplitude')):
@@ -11638,6 +11945,10 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         # explicitly trigger one update to refresh controls/plot exactly once.
         if not value_changed:
             _on_spectrum_change()
+        try:
+            _update_spectrum_counter()
+        except Exception:
+            pass
         # If no valid values remain, hide mark row until user selects something later
         try:
             if not valid_values and ('mark_row' in locals() or 'mark_row' in globals()):
@@ -11732,41 +12043,9 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                     )
                 except Exception:
                     _log_once("Fitting...")
-            # Hide controls while a Fit is running
+            # Hide the same controls during Fit and optimization
             try:
-                _hide(fit_btn)
-            except Exception:
-                pass
-            try:
-                _hide(add_peaks_btn)
-            except Exception:
-                pass
-            try:
-                _hide(canonize_btn)
-            except Exception:
-                pass
-            try:
-                _hide(load_canon_btn)
-            except Exception:
-                pass
-            try:
-                delete_peaks_btn.layout.display = "none"
-            except Exception:
-                pass
-            try:
-                _hide(iter_btn)
-            except Exception:
-                pass
-            try:
-                _hide(reset_all_row)
-            except Exception:
-                pass
-            try:
-                _hide(save_btn)
-            except Exception:
-                pass
-            try:
-                _hide(fit_range_row)
+                _hide_controls_during_fit_or_opt()
             except Exception:
                 pass
 
@@ -13156,41 +13435,8 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                     except Exception:
                         pass
                     if update_controls and (not iterating_in_progress):
-                        # Restore controls hidden during Fit
                         try:
-                            _show(fit_btn)
-                        except Exception:
-                            pass
-                        try:
-                            _show(add_peaks_btn)
-                        except Exception:
-                            pass
-                        try:
-                            _show(canonize_btn)
-                        except Exception:
-                            pass
-                        try:
-                            _show(load_canon_btn)
-                        except Exception:
-                            pass
-                        try:
-                            delete_peaks_btn.layout.display = ""
-                        except Exception:
-                            pass
-                        try:
-                            _show(iter_btn)
-                        except Exception:
-                            pass
-                        try:
-                            _show(reset_all_row)
-                        except Exception:
-                            pass
-                        try:
-                            _show(save_btn)
-                        except Exception:
-                            pass
-                        try:
-                            _show(fit_range_row)
+                            _show_controls_after_fit_or_opt()
                         except Exception:
                             pass
 
@@ -13235,19 +13481,8 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                     except Exception:
                         pass
                     if update_controls and (not iterating_in_progress):
-                        # Restore controls hidden during Fit
                         try:
-                            _show(fit_btn)
-                            _show(add_peaks_btn)
-                            _show(iter_btn)
-                            _show(reset_all_row)
-                            _show(save_btn)
-                            _show(fit_range_row)
-                        except Exception:
-                            pass
-                        try:
-                            _show(canonize_btn)
-                            _show(load_canon_btn)
+                            _show_controls_after_fit_or_opt()
                         except Exception:
                             pass
                         try:
@@ -13355,6 +13590,8 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         nonlocal adding_mode, new_peak_xs, new_peak_windows
         nonlocal previous_in_range_indices
         nonlocal xmin, xmax
+        nonlocal default_fit_range_value
+        nonlocal persisted_fit_ranges
         # Debounce/guard: prevent rapid double invocation
         try:
             now_ts = time.time()
@@ -13369,11 +13606,36 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             idx = spectrum_sel.value
             nonlocal current_idx_deconv
             current_idx_deconv = idx
+            try:
+                _update_spectrum_counter()
+            except Exception:
+                pass
+            # Reset canonize confirmation UI on spectrum switch
+            try:
+                _show(canonize_btn)
+                _hide(canonize_confirm_btn)
+                _hide(canonize_cancel_btn)
+            except Exception:
+                pass
+            # Persist current Fit X-ranges before switching.
+            try:
+                persisted_fit_ranges = _current_fit_ranges()
+            except Exception:
+                pass
+
+            # Immediately clear the displayed peak list so no prior spectrum's peaks linger
+            # if something fails during rebuild.
+            try:
+                peak_controls_box.children = [widgets.HTML("<b>Loading spectrum . . .</b>")]
+            except Exception:
+                pass
+
             # Hard reset any transient UI state so NOTHING carries over between spectra.
             # New spectrum should initialize from defaults and the DataFrame only.
             try:
-                if isinstance(peak_box_cache, dict):
-                    peak_box_cache.clear()
+                # Use a fresh dict so cached widget objects cannot be reused.
+                global peak_box_cache
+                peak_box_cache = {}
             except Exception:
                 pass
             cache_owner_idx = None
@@ -13397,6 +13659,21 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                 included_index_map.clear()
             except Exception:
                 pass
+
+            # Force-exit delete mode (if it was active) and clear any markers/staging.
+            try:
+                nonlocal deleting_mode
+                deleting_mode = False
+            except Exception:
+                pass
+            try:
+                staged_delete_indices.clear()
+            except Exception:
+                pass
+            try:
+                _clear_delete_peak_shapes()
+            except Exception:
+                pass
             # Exit add-peak mode and clear any temporary markers
             try:
                 adding_mode = False
@@ -13409,7 +13686,7 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             except Exception:
                 pass
 
-            # Reset fit ranges to defaults for this spectrum (full x-span, single range)
+            # Update x-span for this spectrum, then restore persisted Fit X-ranges (clamped).
             try:
                 x_arr, y_arr = _get_xy(idx)
             except Exception:
@@ -13423,20 +13700,17 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                 except Exception:
                     pass
             try:
-                fit_range.min = xmin
-                fit_range.max = xmax
-                fit_range.step = (xmax - xmin) / 1000 or 1.0
-                fit_range.value = [xmin, xmax]
+                default_fit_range_value = (float(xmin), float(xmax))
             except Exception:
                 pass
+
+            # Avoid triggering expensive rebuilds while updating sliders.
+            bulk_prev = bulk_update_in_progress
+            bulk_update_in_progress = True
             try:
-                # Drop any extra ranges and re-enable the add button
-                range_sliders = [fit_range]
-                add_range_btn.disabled = False
-                add_range_btn.tooltip = "Insert an additional fit range (up to 3)."
-                _refresh_range_box()
-            except Exception:
-                pass
+                _apply_ranges_to_sliders(persisted_fit_ranges, xmin, xmax)
+            finally:
+                bulk_update_in_progress = bulk_prev
 
             # Update plot data for the new spectrum and clear any prior fit
             try:
@@ -13519,6 +13793,33 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         all_peaks_x, _ = _get_peaks(idx)
         state_for_save = peak_center_state_by_idx.get(idx, {})
 
+        def _resolve_original_peak_index(cb, pos: int):
+            """Return 0-based original peak index for a checkbox row."""
+            orig = getattr(cb, "_original_idx", None)
+            if orig is not None:
+                try:
+                    return int(orig)
+                except Exception:
+                    pass
+            # Fallback: parse from the visible label (e.g., "Include 19")
+            try:
+                import re
+
+                desc = str(getattr(cb, "description", ""))
+                m = re.search(r"(\d+)", desc)
+                if m:
+                    # UI labels are 1-based
+                    return max(0, int(m.group(1)) - 1)
+            except Exception:
+                pass
+            # Fallback: use the peak-index mapping list when available (in-range subset UIs)
+            try:
+                if pos < len(center_slider_peak_indices):
+                    return int(center_slider_peak_indices[pos])
+            except Exception:
+                pass
+            return int(pos)
+
         included_original = []
         for pos, cb in enumerate(include_checkboxes):
             try:
@@ -13526,17 +13827,47 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                     continue
             except Exception:
                 continue
-            orig_idx = getattr(cb, "_original_idx", pos)
             try:
-                orig_idx = int(orig_idx)
+                orig_idx = _resolve_original_peak_index(cb, pos)
             except Exception:
-                continue
+                orig_idx = pos
             included_original.append(orig_idx)
         if not included_original:
             _log_once("No peaks selected. Select peaks then Save.")
             return
         # Preserve ordering by original peak index and remove duplicates
         included_original = sorted(dict.fromkeys(included_original))
+
+        def _coerce_ranges(ranges_in):
+            """Return list of [lo, hi] floats for the current Fit X-ranges."""
+            out = []
+            if not ranges_in:
+                return out
+            for pair in ranges_in:
+                try:
+                    lo_v, hi_v = pair
+                except Exception:
+                    continue
+                try:
+                    lo_f = float(lo_v)
+                    hi_f = float(hi_v)
+                except Exception:
+                    continue
+                try:
+                    if 'np' in globals():
+                        if not (bool(np.isfinite(lo_f)) and bool(np.isfinite(hi_f))):
+                            continue
+                except Exception:
+                    pass
+                if hi_f < lo_f:
+                    lo_f, hi_f = hi_f, lo_f
+                out.append([lo_f, hi_f])
+            return out
+
+        try:
+            selected_x_ranges = _coerce_ranges(_current_fit_ranges())
+        except Exception:
+            selected_x_ranges = []
 
         def _coerce_float(val):
             try:
@@ -13558,6 +13889,17 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             except Exception:
                 pass
             return None
+
+        def _slider_value_for(orig_idx: int, sliders, default=None):
+            """Return the slider.value corresponding to orig_idx, if available."""
+            try:
+                pos = center_slider_peak_indices.index(orig_idx)
+            except Exception:
+                return default
+            try:
+                return sliders[pos].value
+            except Exception:
+                return default
 
         out = []
         for orig_idx in included_original:
@@ -13623,10 +13965,53 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                 final_center = d['center']
             if final_center is not None:
                 d['center'] = final_center
-            # Include the original peak index for downstream reference
-            d['peak_index'] = orig_idx
+
+            # Ensure sigma, alpha, and A are always saved.
+            # - lmfit uses 'fraction' for pseudo-Voigt Lorentz fraction; we expose it as 'alpha'
+            # - lmfit uses 'amplitude'; we persist it as 'A'
+            try:
+                sigma_fit = _coerce_float(d.get('sigma'))
+            except Exception:
+                sigma_fit = None
+            if sigma_fit is None:
+                sigma_fit = _coerce_float(_slider_value_for(orig_idx, sigma_sliders))
+            if sigma_fit is not None:
+                d['sigma'] = float(sigma_fit)
+
+            try:
+                alpha_fit = _coerce_float(d.get('fraction'))
+            except Exception:
+                alpha_fit = None
+            if alpha_fit is None:
+                alpha_fit = _coerce_float(d.get('alpha'))
+            if alpha_fit is None:
+                alpha_fit = _coerce_float(_slider_value_for(orig_idx, alpha_sliders))
+            if alpha_fit is not None:
+                # Keep both keys for compatibility
+                d['alpha'] = float(alpha_fit)
+                d['fraction'] = float(alpha_fit)
+
+            try:
+                amp_fit = _coerce_float(d.get('amplitude'))
+            except Exception:
+                amp_fit = None
+            if amp_fit is None:
+                amp_fit = _coerce_float(_slider_value_for(orig_idx, amplitude_sliders))
+            if amp_fit is not None:
+                d['A'] = float(amp_fit)
+            # Avoid saving redundant 'amplitude' alongside 'A'
+            try:
+                d.pop('amplitude', None)
+            except Exception:
+                pass
+            # Persist the original peak number (1-based, matches UI)
+            d['peak_number'] = int(orig_idx) + 1
             out.append(d)
         _persist_deconv_results(idx, out)
+        try:
+            _persist_deconv_x_ranges(idx, selected_x_ranges)
+        except Exception:
+            pass
         try:
             file_label = FTIR_DataFrame.loc[idx, "File Name"]
         except Exception:
@@ -14248,6 +14633,13 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                     _on_main_thread(_force_cancel_fit_hidden)
                 except Exception:
                     pass
+                try:
+                    _on_main_thread(_show_controls_after_fit_or_opt)
+                except Exception:
+                    try:
+                        _show_controls_after_fit_or_opt()
+                    except Exception:
+                        pass
                 return
         except Exception:
             pass
@@ -14314,6 +14706,13 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                 _on_main_thread(_force_cancel_fit_hidden)
             except Exception:
                 pass
+            try:
+                _on_main_thread(_show_controls_after_fit_or_opt)
+            except Exception:
+                try:
+                    _show_controls_after_fit_or_opt()
+                except Exception:
+                    pass
             return
 
         def _clamp(val, lo, hi):
@@ -14429,6 +14828,13 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                 _on_main_thread(_force_cancel_fit_hidden)
             except Exception:
                 pass
+            try:
+                _on_main_thread(_show_controls_after_fit_or_opt)
+            except Exception:
+                try:
+                    _show_controls_after_fit_or_opt()
+                except Exception:
+                    pass
             return
 
         current_rc = base_rc
@@ -14455,6 +14861,13 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
                 _on_main_thread(_force_cancel_fit_hidden)
             except Exception:
                 pass
+            try:
+                _on_main_thread(_show_controls_after_fit_or_opt)
+            except Exception:
+                try:
+                    _show_controls_after_fit_or_opt()
+                except Exception:
+                    pass
             return
 
         improvement_threshold = 1e-6
@@ -14723,6 +15136,11 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             pass
         iterating_in_progress = True
         cancel_fit_btn_frozen = True
+        # Hide the same controls as during Fit while optimization runs
+        try:
+            _hide_controls_during_fit_or_opt()
+        except Exception:
+            pass
         try:
             _set_cancel_button_mode("optimize")
         except Exception:
@@ -14806,8 +15224,14 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
     # Defer wiring mark_bad_btn until after it's instantiated below
 
     # Layout
-    controls_row_filters = widgets.HBox([material_dd, conditions_dd])
-    controls_row_spectrum = widgets.HBox([spectrum_sel, include_bad_cb])
+    controls_row_filters = widgets.HBox(
+        [material_dd, conditions_dd, include_bad_cb],
+        layout=widgets.Layout(align_items="center"),
+    )
+    controls_row_spectrum = widgets.HBox(
+        [spectrum_sel, prev_spectrum_btn, next_spectrum_btn, spectrum_counter],
+        layout=widgets.Layout(align_items="center"),
+    )
     # We'll place the Fit X-ranges section AFTER the primary action rows
     fit_range_row = widgets.VBox([
         widgets.HTML("<b>Fit X-ranges</b>"),
@@ -14892,6 +15316,23 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         tooltip="Save current spectrum's peak centers as canonical for this material",
         layout=widgets.Layout(width="260px"),
     )
+    canonize_confirm_btn = widgets.Button(
+        description="Confirm canonization",
+        button_style="warning",
+        tooltip="Confirm saving the current peak centers as canonical for this material",
+        layout=widgets.Layout(width="200px"),
+    )
+    canonize_cancel_btn = widgets.Button(
+        description="Cancel canonization",
+        button_style="",
+        tooltip="Cancel and return without changing materials.json",
+        layout=widgets.Layout(width="190px"),
+    )
+    try:
+        canonize_confirm_btn.layout.display = "none"
+        canonize_cancel_btn.layout.display = "none"
+    except Exception:
+        pass
     load_canon_btn = widgets.Button(
         description="Load canon peaks",
         button_style="info",
@@ -14899,7 +15340,14 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         layout=widgets.Layout(width="190px"),
     )
     edit_actions_row = widgets.HBox(
-        [add_peaks_btn, delete_peaks_btn, canonize_btn, load_canon_btn],
+        [
+            add_peaks_btn,
+            delete_peaks_btn,
+            canonize_btn,
+            canonize_confirm_btn,
+            canonize_cancel_btn,
+            load_canon_btn,
+        ],
         layout=widgets.Layout(
             flex_flow="row wrap", align_items="center", justify_content="flex-start", width="100%"
         ),
@@ -15141,6 +15589,14 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         except Exception as e:
             _append_status(f"Failed to write materials.json: {e}")
 
+        # Restore canonize UI after a canonization attempt
+        try:
+            _show(canonize_btn)
+            _hide(canonize_confirm_btn)
+            _hide(canonize_cancel_btn)
+        except Exception:
+            pass
+
     def _load_canon_peaks(_b=None):
         mat_name = _current_material_name()
         if not mat_name:
@@ -15228,7 +15684,26 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             pass
         _append_status(f"Loaded {len(centers)} canonical peak(s) for '{mat_name}'.")
 
-    canonize_btn.on_click(_canonize_peaks_for_material)
+    def _begin_canonize_confirmation(_b=None):
+        # Replace the canonize button with Confirm/Cancel
+        try:
+            _hide(canonize_btn)
+            _show(canonize_confirm_btn)
+            _show(canonize_cancel_btn)
+        except Exception:
+            pass
+
+    def _cancel_canonize_confirmation(_b=None):
+        try:
+            _show(canonize_btn)
+            _hide(canonize_confirm_btn)
+            _hide(canonize_cancel_btn)
+        except Exception:
+            pass
+
+    canonize_btn.on_click(_begin_canonize_confirmation)
+    canonize_confirm_btn.on_click(_canonize_peaks_for_material)
+    canonize_cancel_btn.on_click(_cancel_canonize_confirmation)
     load_canon_btn.on_click(_load_canon_peaks)
 
     # --- Add-peaks workflow callbacks ---
@@ -15249,6 +15724,15 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         # Hide Delete peaks if present
         try:
             delete_peaks_btn.layout.display = "none"
+        except Exception:
+            pass
+        # Hide canon buttons during add-peaks mode
+        try:
+            _hide(canonize_btn)
+        except Exception:
+            pass
+        try:
+            _hide(load_canon_btn)
         except Exception:
             pass
         # Hide non-relevant controls in Peak Addition mode
@@ -15383,6 +15867,15 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
             delete_peaks_btn.layout.display = "none"
         except Exception:
             pass
+        # Hide canon buttons during delete-peaks mode
+        try:
+            _hide(canonize_btn)
+        except Exception:
+            pass
+        try:
+            _hide(load_canon_btn)
+        except Exception:
+            pass
         # Snapshot current state
         try:
             idx = spectrum_sel.value
@@ -15447,6 +15940,15 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         except Exception:
             pass
         _show(add_peaks_btn)
+        # Restore canon buttons when leaving delete mode
+        try:
+            _show(canonize_btn)
+        except Exception:
+            pass
+        try:
+            _show(load_canon_btn)
+        except Exception:
+            pass
         # Restore the Delete Peaks button visibility when leaving delete mode
         try:
             delete_peaks_btn.layout.display = ""
@@ -15805,6 +16307,15 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         _show(save_btn)
         _show(close_btn)
         _show(peak_controls_box)
+        # Restore canon buttons when leaving add-peaks mode
+        try:
+            _show(canonize_btn)
+        except Exception:
+            pass
+        try:
+            _show(load_canon_btn)
+        except Exception:
+            pass
         # Exit add mode and restore Add peaks button
         try:
             adding_mode = False
@@ -15921,6 +16432,15 @@ def deconvolute_peaks(FTIR_DataFrame, filepath=None):
         _show(save_btn)
         _show(close_btn)
         _show(peak_controls_box)
+        # Restore canon buttons when leaving add-peaks mode
+        try:
+            _show(canonize_btn)
+        except Exception:
+            pass
+        try:
+            _show(load_canon_btn)
+        except Exception:
+            pass
         if _IN_COLAB:
             try:
                 colab_add_row.layout.display = "none"
@@ -16097,6 +16617,7 @@ def fit_material(FTIR_DataFrame):
         "Material",
         "Time",
         "Deconvolution Results",
+        "Deconvolution X-Ranges",
         "X-Axis",
         "Normalized and Corrected Data",
         "Material Fit Results",
@@ -16114,13 +16635,23 @@ def fit_material(FTIR_DataFrame):
     except Exception:
         pass
 
-    # --- New behavior: fit across all spectra of selected material ---
+    # --- Fit across all spectra of selected material ---
+    # Important: this tool uses ONLY peaks from 'Deconvolution Results' and
+    # uses ONLY the union of 'Deconvolution X-Ranges' for fitting/optimization.
     import json, ast, os, numpy as np
 
     # Shared (per-session) canonical parameters sourced from materials.json or computed
     shared_centers_list = None  # list[float]
     shared_sigma_list = None    # list[float]
     shared_alpha_list = None    # list[float]
+    shared_peak_numbers_list = None  # list[int|None] (source: Deconvolution Results)
+
+    # Active union of X-Ranges for the current selection (material + include_bad)
+    current_union_x_ranges = []  # list[tuple[float, float]]
+
+    # Row indices actually used in the most recent Fit/Optimize (i.e., had usable
+    # Deconvolution Results that were incorporated into the canonical peak set).
+    last_used_fit_row_indices = set()
 
     # materials.json helpers
     def _load_materials_json():
@@ -16184,157 +16715,8 @@ def fit_material(FTIR_DataFrame):
             pass
         return centers, sigmas, alphas
 
-    def _parse_deconv(val):
-        if val is None:
-            return None
-        v = val
-        if isinstance(v, str):
-            try:
-                v = ast.literal_eval(v)
-            except Exception:
-                return None
-        if isinstance(v, list):
-            try:
-                items = [dict(d) for d in v if isinstance(d, dict)]
-            except Exception:
-                return None
-            try:
-                items = sorted(items, key=lambda d: float(d.get("center", float("nan"))))
-            except Exception:
-                pass
-            return items
-        return None
-
-    def _parse_xy(row):
-        x = row.get("X-Axis")
-        y = row.get("Normalized and Corrected Data")
-        if isinstance(x, str):
-            try:
-                x = ast.literal_eval(x)
-            except Exception:
-                return None, None
-        if isinstance(y, str):
-            try:
-                y = ast.literal_eval(y)
-            except Exception:
-                return None, None
-        try:
-            xa = np.asarray(x, dtype=float)
-            ya = np.asarray(y, dtype=float)
-            if xa.ndim != 1 or ya.ndim != 1 or xa.size != ya.size:
-                return None, None
-            return xa, ya
-        except Exception:
-            return None, None
-
-    # Selected material from session; if 'any', process all materials
-    try:
-        target_mat = str((_SESSION_SELECTIONS.get("material") or "any")).strip()
-    except Exception:
-        target_mat = "any"
-
-    mats = sorted({str(m) for m in FTIR_DataFrame.get("Material", []).astype(str).dropna().unique().tolist()})
-    materials_to_run = mats if target_mat.lower() == "any" else [target_mat]
-
-    results_by_material = {}
-    for mat in materials_to_run:
-        try:
-            sub = FTIR_DataFrame[FTIR_DataFrame["Material"].astype(str) == str(mat)].copy()
-        except Exception:
-            sub = FTIR_DataFrame.copy()
-        # require normalized and deconvolution present
-        try:
-            sub = sub[sub["Normalized and Corrected Data"].notna()]
-        except Exception:
-            pass
-        # Gather deconvolution results and align to canonical centers from JSON
-        peak_lists = []
-        entries = []
-        for idx, row in sub.iterrows():
-            peaks = _parse_deconv(row.get("Deconvolution Results"))
-            if peaks:
-                peak_lists.append(peaks)
-                entries.append((idx, row, peaks))
-        if not peak_lists:
-            continue
-        # Canon centers from materials.json for this material
-        canon_centers, _canon_sigmas, _canon_alphas = _canon_from_json(mat)
-        # Fallback: if no canon present, infer by collecting all centers and sorting unique
-        if not canon_centers:
-            try:
-                allc = []
-                for _pk in peak_lists:
-                    for p in _pk:
-                        try:
-                            allc.append(float(p.get("center", p.get("center_wavenumber", np.nan))))
-                        except Exception:
-                            pass
-                canon_centers = sorted({c for c in allc if np.isfinite(c)})
-            except Exception:
-                canon_centers = []
-        k = len(canon_centers)
-        if k <= 0:
-            continue
-        # Compute series sigma/alpha aligned to canonical centers
-        sigma_samples_by_peak = [[] for _ in range(k)]
-        alpha_samples_by_peak = [[] for _ in range(k)]
-        amplitude_by_idx = {}
-        for idx, row, peaks in entries:
-            # initialize amplitude vector for this spectrum
-            amps_i = [0.0] * k
-            used = set()
-            for i, ccan in enumerate(canon_centers):
-                # find nearest deconv peak to this canon center
-                best_j = None
-                best_d = float("inf")
-                for j, p in enumerate(peaks):
-                    if j in used:
-                        continue
-                    try:
-                        cval = float(p.get("center", p.get("center_wavenumber", np.nan)))
-                    except Exception:
-                        cval = np.nan
-                    if not np.isfinite(cval):
-                        continue
-                    d = abs(cval - ccan)
-                    if d < best_d:
-                        best_d = d
-                        best_j = j
-                if best_j is not None:
-                    used.add(best_j)
-                    p = peaks[best_j]
-                    # collect sigma/alpha samples
-                    try:
-                        sval = float(p.get("sigma", p.get("σ", np.nan)))
-                        if np.isfinite(sval):
-                            sigma_samples_by_peak[i].append(sval)
-                    except Exception:
-                        pass
-                    try:
-                        aval = float(p.get("alpha", p.get("fraction", np.nan)))
-                        if np.isfinite(aval):
-                            alpha_samples_by_peak[i].append(aval)
-                    except Exception:
-                        pass
-                    try:
-                        amps_i[i] = float(p.get("amplitude", 0.0))
-                    except Exception:
-                        amps_i[i] = 0.0
-            amplitude_by_idx[idx] = amps_i
-
-        # Aggregate sigma/alpha across spectra
-        with np.errstate(all="ignore"):
-            avg_sigma = [
-                (float(np.nanmean(s)) if len(s) else 10.0) for s in sigma_samples_by_peak
-            ]
-            avg_alpha = [
-                (float(np.nanmean(a)) if len(a) else 0.5) for a in alpha_samples_by_peak
-            ]
-
-        # Store shared parameters for plotting and Save
-        shared_centers_list = canon_centers[:]
-        shared_sigma_list = avg_sigma[:]
-        shared_alpha_list = [float(np.clip(a, 0.0, 1.0)) for a in avg_alpha]
+    # Shared parameters are computed on-demand in _compute_for_selection / _optimize_centers_for_selection
+    # from the DataFrame's 'Deconvolution Results' (no dependency on materials.json for peak selection).
 
     # -------------------------- Backend helpers --------------------------- #
     def _parse_deconv(val):
@@ -16363,6 +16745,87 @@ def fit_material(FTIR_DataFrame):
                 pass
             return items
         return None
+
+    def _parse_x_ranges(val):
+        """Parse a Deconvolution X-Ranges cell to list[(lo, hi)] in ascending order."""
+        if val is None:
+            return []
+        v = val
+        if isinstance(v, str):
+            try:
+                v = ast.literal_eval(v)
+            except Exception:
+                return []
+        if not isinstance(v, (list, tuple)):
+            return []
+        out = []
+        for item in v:
+            if not isinstance(item, (list, tuple)) or len(item) < 2:
+                continue
+            try:
+                a = float(item[0])
+                b = float(item[1])
+            except Exception:
+                continue
+            if not (np.isfinite(a) and np.isfinite(b)):
+                continue
+            lo = min(a, b)
+            hi = max(a, b)
+            # ignore degenerate intervals
+            if hi <= lo:
+                continue
+            out.append((lo, hi))
+        out.sort(key=lambda t: (t[0], t[1]))
+        return out
+
+    def _union_ranges(ranges):
+        """Merge overlapping/adjacent (lo, hi) pairs."""
+        if not ranges:
+            return []
+        rs = sorted([(float(lo), float(hi)) for lo, hi in ranges if np.isfinite(lo) and np.isfinite(hi)], key=lambda t: (t[0], t[1]))
+        if not rs:
+            return []
+        merged = [list(rs[0])]
+        for lo, hi in rs[1:]:
+            cur = merged[-1]
+            # merge if overlapping or touching
+            if lo <= cur[1]:
+                cur[1] = max(cur[1], hi)
+            else:
+                merged.append([lo, hi])
+        return [(float(a), float(b)) for a, b in merged]
+
+    def _collect_union_x_ranges(df_series):
+        all_rs = []
+        try:
+            for _idx, _row in df_series.iterrows():
+                all_rs.extend(_parse_x_ranges(_row.get("Deconvolution X-Ranges")))
+        except Exception:
+            pass
+        return _union_ranges(all_rs)
+
+    def _slice_to_union_ranges(x_arr, y_arr, union_ranges):
+        if not union_ranges:
+            return x_arr, y_arr
+        try:
+            x_np = np.asarray(x_arr, dtype=float)
+            y_np = np.asarray(y_arr, dtype=float)
+            n = min(x_np.size, y_np.size)
+            if n <= 1:
+                return x_np[:0], y_np[:0]
+            x_np = x_np[:n]
+            y_np = y_np[:n]
+        except Exception:
+            return None, None
+        mask = np.zeros(x_np.shape, dtype=bool)
+        for lo, hi in union_ranges:
+            try:
+                mask |= (x_np >= lo) & (x_np <= hi)
+            except Exception:
+                pass
+        if not np.any(mask):
+            return x_np[:0], y_np[:0]
+        return x_np[mask], y_np[mask]
 
     def _parse_xy(row):
         """Return (x_arr, y_arr) as 1D float arrays or (None, None)."""
@@ -16398,6 +16861,79 @@ def fit_material(FTIR_DataFrame):
         candidates = [v for v, c in zip(vals, counts) if c == max_count]
         return int(max(candidates))
 
+    def _parse_peak_number(v):
+        """Coerce a peak_number field to int when possible."""
+        if v is None:
+            return None
+        try:
+            if isinstance(v, (int, np.integer)):
+                return int(v)
+            if isinstance(v, float) and np.isfinite(v):
+                return int(v)
+        except Exception:
+            pass
+        try:
+            s = str(v).strip()
+            if not s:
+                return None
+            # Accept "18", "Peak 18", "peak_18" etc
+            m = re.search(r"(\d+)", s)
+            if not m:
+                return None
+            return int(m.group(1))
+        except Exception:
+            return None
+
+    def _compute_shared_peak_numbers_from_aligned(aligned_by_idx, k):
+        """Return list length k of most-common peak_number per canonical peak."""
+        nums_out = []
+        for i in range(int(k)):
+            candidates = []
+            try:
+                for _idx, aligned in (aligned_by_idx or {}).items():
+                    if not isinstance(aligned, list) or i >= len(aligned):
+                        continue
+                    p = aligned[i]
+                    if not isinstance(p, dict):
+                        continue
+                    pn = _parse_peak_number(p.get("peak_number"))
+                    if pn is not None:
+                        candidates.append(int(pn))
+            except Exception:
+                candidates = []
+            if not candidates:
+                nums_out.append(None)
+                continue
+            try:
+                vals, counts = np.unique(np.asarray(candidates, dtype=int), return_counts=True)
+                # Most frequent; tie -> smallest (stable)
+                max_count = int(np.max(counts))
+                best_vals = [int(v) for v, c in zip(vals.tolist(), counts.tolist()) if int(c) == max_count]
+                nums_out.append(int(min(best_vals)) if best_vals else None)
+            except Exception:
+                try:
+                    nums_out.append(int(candidates[0]))
+                except Exception:
+                    nums_out.append(None)
+        return nums_out
+
+    def _peak_labels_from_numbers(peak_numbers, k):
+        """Return unique column labels (length k) like 'Peak 18'."""
+        labels = []
+        seen = {}
+        for i in range(int(k)):
+            pn = None
+            try:
+                if isinstance(peak_numbers, list) and i < len(peak_numbers):
+                    pn = peak_numbers[i]
+            except Exception:
+                pn = None
+            base = f"Peak {int(pn)}" if pn is not None else f"Peak {i+1}"
+            n = seen.get(base, 0) + 1
+            seen[base] = n
+            labels.append(base if n == 1 else f"{base} ({n})")
+        return labels
+
     def _is_unexposed(val):
         try:
             return str(val).strip().lower() == "unexposed"
@@ -16421,6 +16957,13 @@ def fit_material(FTIR_DataFrame):
             print("No spectra found for the selected material.")
             return
 
+        # Compute the union of all saved X-Ranges for this selection
+        nonlocal current_union_x_ranges
+        try:
+            current_union_x_ranges = _collect_union_x_ranges(series_df)
+        except Exception:
+            current_union_x_ranges = []
+
         # Collect deconvolution peak lists for this series
         peak_lists = []
         peak_lists_by_idx = {}
@@ -16436,7 +16979,7 @@ def fit_material(FTIR_DataFrame):
         for peaks in peak_lists:
             for p in peaks:
                 try:
-                    sval = float(p.get("sigma", np.nan))
+                    sval = float(p.get("sigma", p.get("σ", np.nan)))
                     if np.isfinite(sval):
                         sigma_samples.append(sval)
                 except Exception:
@@ -16496,19 +17039,30 @@ def fit_material(FTIR_DataFrame):
                 else:
                     aligned[i] = {
                         "amplitude": 0.0,
+                        "A": 0.0,
                         "center": float(ccan),
                         "alpha": 0.5,
+                        "fraction": 0.5,
+                        "α": 0.5,
                         "sigma": float(np.nanmedian(sigma_samples)) if np.isfinite(np.nanmedian(sigma_samples)) else 10.0,
+                        "σ": float(np.nanmedian(sigma_samples)) if np.isfinite(np.nanmedian(sigma_samples)) else 10.0,
                     }
             aligned_by_idx[idx] = aligned
+
+        # Track which rows were actually used (had usable deconvolution results)
+        nonlocal last_used_fit_row_indices
+        try:
+            last_used_fit_row_indices = set(aligned_by_idx.keys())
+        except Exception:
+            last_used_fit_row_indices = set()
 
         # Compute averages over aligned peaks
         centers, sigmas, alphas = [], [], []
         for idx, aligned in aligned_by_idx.items():
             try:
                 centers.append([float(p.get("center", p.get("center_wavenumber", np.nan))) for p in aligned])
-                sigmas.append([float(p.get("sigma", np.nan)) for p in aligned])
-                alphas.append([float(p.get("alpha", p.get("fraction", np.nan))) for p in aligned])
+                sigmas.append([float(p.get("sigma", p.get("σ", np.nan))) for p in aligned])
+                alphas.append([float(p.get("alpha", p.get("fraction", p.get("α", np.nan)))) for p in aligned])
             except Exception:
                 continue
         centers = np.asarray(centers, dtype=float)
@@ -16528,6 +17082,25 @@ def fit_material(FTIR_DataFrame):
             if not np.isfinite(avg_alpha[i]):
                 vals = alphas[:, i]
                 avg_alpha[i] = np.nanmedian(vals) if np.isfinite(np.nanmedian(vals)) else 0.5
+
+        # Update shared parameters for plotting and downstream fitting
+        nonlocal shared_centers_list, shared_sigma_list, shared_alpha_list, shared_peak_numbers_list
+        try:
+            shared_centers_list = [float(v) for v in avg_center.tolist()]
+        except Exception:
+            shared_centers_list = [float(c) for c in canonical_centers]
+        try:
+            shared_sigma_list = [float(v) if np.isfinite(v) else 10.0 for v in avg_sigma.tolist()]
+        except Exception:
+            shared_sigma_list = [10.0] * k
+        try:
+            shared_alpha_list = [float(np.clip(v, 0.0, 1.0)) if np.isfinite(v) else 0.5 for v in avg_alpha.tolist()]
+        except Exception:
+            shared_alpha_list = [0.5] * k
+        try:
+            shared_peak_numbers_list = _compute_shared_peak_numbers_from_aligned(aligned_by_idx, k)
+        except Exception:
+            shared_peak_numbers_list = [None] * k
 
         # Using averaged parameters, refit amplitudes per spectrum with lmfit.
         assigned = 0
@@ -16574,7 +17147,7 @@ def fit_material(FTIR_DataFrame):
                 p[f"p{i}_fraction"].set(value=float(shared_alpha_list[i]), min=0.0, max=1.0, vary=False)
                 # Seed amplitude from aligned peak or a heuristic
                 try:
-                    amp0 = float(aligned[i].get("amplitude", 1.0))
+                    amp0 = float(aligned[i].get("amplitude", aligned[i].get("A", 1.0)))
                     if not np.isfinite(amp0):
                         raise ValueError()
                 except Exception:
@@ -16607,11 +17180,17 @@ def fit_material(FTIR_DataFrame):
                     raise ValueError("No finite data points for fitting")
                 x_np = x_np[mask]
                 y_np = y_np[mask]
+
+                # Restrict fit to the UNION of the saved Deconvolution X-Ranges
+                try:
+                    x_np, y_np = _slice_to_union_ranges(x_np, y_np, current_union_x_ranges)
+                except Exception:
+                    pass
+                if x_np is None or y_np is None or x_np.size <= 1 or y_np.size <= 1:
+                    raise ValueError("No data points in selected Deconvolution X-Ranges")
                 # Log heavy sanitization
                 try:
                     removed = int(n - x_np.size)
-                    if removed > 0:
-                        refit_logs.append(f"Row {idx}: removed {removed} non-finite point(s) before fitting.")
                 except Exception:
                     pass
                 # Guard: centers outside x-range -> fix amplitude to 0 and do not vary
@@ -16657,7 +17236,7 @@ def fit_material(FTIR_DataFrame):
                 out_amps = []
                 for i in range(k):
                     try:
-                        out_amps.append(float(aligned[i].get("amplitude", 0.0)))
+                        out_amps.append(float(aligned[i].get("amplitude", aligned[i].get("A", 0.0))))
                     except Exception:
                         out_amps.append(0.0)
                 try:
@@ -16704,46 +17283,138 @@ def fit_material(FTIR_DataFrame):
         if series_df.empty:
             return "No spectra found for the selected material.", None
 
-        # Seed shared parameters from deconvolution results
+        # Compute union of X-Ranges for this selection (used throughout optimization)
+        nonlocal current_union_x_ranges
+        try:
+            current_union_x_ranges = _collect_union_x_ranges(series_df)
+        except Exception:
+            current_union_x_ranges = []
+
+        # Seed shared parameters by aligning deconvolution peaks to canonical centers
         peak_lists = []
+        peak_lists_by_idx = {}
         for _idx, _row in series_df.iterrows():
             pk = _parse_deconv(_row.get("Deconvolution Results"))
-            if pk:
+            if pk is not None and len(pk) > 0:
                 peak_lists.append(pk)
-        k = _mode_peak_count(peak_lists)
-        if k <= 0:
+                peak_lists_by_idx[_idx] = pk
+
+        if not peak_lists:
             return "Selected series has no usable deconvolution results.", None
 
-        centers, sigmas_l, fracs = [], [], []
-        for pk in peak_lists:
-            if len(pk) != k:
+        sigma_samples = []
+        all_centers = []
+        for _pk in peak_lists:
+            for p in _pk:
+                try:
+                    sval = float(p.get("sigma", p.get("σ", np.nan)))
+                    if np.isfinite(sval):
+                        sigma_samples.append(sval)
+                except Exception:
+                    pass
+                try:
+                    cval = float(p.get("center", p.get("center_wavenumber", np.nan)))
+                    if np.isfinite(cval):
+                        all_centers.append(cval)
+                except Exception:
+                    pass
+        try:
+            tol = float(np.nanmedian(sigma_samples)) if np.isfinite(np.nanmedian(sigma_samples)) else 8.0
+        except Exception:
+            tol = 8.0
+
+        try:
+            centers_sorted = sorted(set([float(c) for c in all_centers if np.isfinite(c)]))
+        except Exception:
+            centers_sorted = []
+
+        canonical_centers = []
+        for c in centers_sorted:
+            if not canonical_centers:
+                canonical_centers.append(c)
                 continue
+            if abs(c - canonical_centers[-1]) <= tol:
+                canonical_centers[-1] = (canonical_centers[-1] + c) / 2.0
+            else:
+                canonical_centers.append(c)
+
+        k = len(canonical_centers)
+        if k <= 0:
+            return "Could not establish canonical peaks for the series.", None
+
+        # Align each spectrum to the canonical centers; add missing peaks with amplitude 0
+        aligned_by_idx = {}
+        try:
+            sigma_default = float(np.nanmedian(sigma_samples)) if np.isfinite(np.nanmedian(sigma_samples)) else 10.0
+        except Exception:
+            sigma_default = 10.0
+        for _idx, peaks in peak_lists_by_idx.items():
+            aligned = [None] * k
+            used = set()
+            for i, ccan in enumerate(canonical_centers):
+                best_j = None
+                best_d = float("inf")
+                for j, p in enumerate(peaks):
+                    if j in used:
+                        continue
+                    try:
+                        cval = float(p.get("center", p.get("center_wavenumber", np.nan)))
+                    except Exception:
+                        cval = float("nan")
+                    if not np.isfinite(cval):
+                        continue
+                    d = abs(cval - ccan)
+                    if d < best_d:
+                        best_d = d
+                        best_j = j
+                if best_j is not None and best_d <= tol:
+                    aligned[i] = dict(peaks[best_j])
+                    used.add(best_j)
+                else:
+                    aligned[i] = {
+                        "amplitude": 0.0,
+                        "center": float(ccan),
+                        "alpha": 0.5,
+                        "fraction": 0.5,
+                        "sigma": float(sigma_default),
+                    }
+            aligned_by_idx[_idx] = aligned
+
+        # Track which rows are actually used (usable deconvolution results)
+        nonlocal last_used_fit_row_indices
+        try:
+            last_used_fit_row_indices = set(aligned_by_idx.keys())
+        except Exception:
+            last_used_fit_row_indices = set()
+
+        # Aggregate initial shared params (centers/sigma/alpha)
+        centers_mat, sigmas_mat, fracs_mat = [], [], []
+        for _idx, aligned in aligned_by_idx.items():
             try:
-                centers.append([float(p.get("center", np.nan)) for p in pk])
-                sigmas_l.append([float(p.get("sigma", np.nan)) for p in pk])
-                fracs.append([float(p.get("fraction", np.nan)) for p in pk])
+                centers_mat.append([float(p.get("center", np.nan)) for p in aligned])
+                sigmas_mat.append([float(p.get("sigma", p.get("σ", np.nan))) for p in aligned])
+                fracs_mat.append([float(p.get("fraction", p.get("alpha", np.nan))) for p in aligned])
             except Exception:
                 continue
-        if not centers:
-            return "Selected series has inconsistent peak counts; cannot average.", None
-        centers = np.asarray(centers, dtype=float)
-        sigmas_l = np.asarray(sigmas_l, dtype=float)
-        fracs = np.asarray(fracs, dtype=float)
+        if not centers_mat:
+            return "No usable aligned peaks for optimization.", None
+
+        centers_arr = np.asarray(centers_mat, dtype=float)
+        sigmas_arr = np.asarray(sigmas_mat, dtype=float)
+        fracs_arr = np.asarray(fracs_mat, dtype=float)
         with np.errstate(all="ignore"):
-            cen = np.nanmean(centers, axis=0)
-            sig_l = np.nanmean(sigmas_l, axis=0)
-            frc = np.nanmean(fracs, axis=0)
+            cen = np.nanmean(centers_arr, axis=0)
+            sig_l = np.nanmean(sigmas_arr, axis=0)
+            frc = np.nanmean(fracs_arr, axis=0)
         for i in range(k):
             if not np.isfinite(cen[i]):
-                vals = centers[:, i]
-                cen[i] = np.nanmedian(vals) if np.isfinite(np.nanmedian(vals)) else 0.0
+                vals = centers_arr[:, i]
+                cen[i] = np.nanmedian(vals) if np.isfinite(np.nanmedian(vals)) else float(canonical_centers[i])
             if not np.isfinite(sig_l[i]):
-                vals = sigmas_l[:, i]
-                sig_l[i] = (
-                    np.nanmedian(vals) if np.isfinite(np.nanmedian(vals)) else 10.0
-                )
+                vals = sigmas_arr[:, i]
+                sig_l[i] = np.nanmedian(vals) if np.isfinite(np.nanmedian(vals)) else float(sigma_default)
             if not np.isfinite(frc[i]):
-                vals = fracs[:, i]
+                vals = fracs_arr[:, i]
                 frc[i] = np.nanmedian(vals) if np.isfinite(np.nanmedian(vals)) else 0.5
 
         # Determine global x-bounds across the series
@@ -16809,16 +17480,22 @@ def fit_material(FTIR_DataFrame):
                         continue
                 except Exception:
                     continue
+                # Restrict to union x-ranges
+                try:
+                    x_use, y_use = _slice_to_union_ranges(x_arr, y_arr, current_union_x_ranges)
+                except Exception:
+                    x_use, y_use = x_arr, y_arr
+                if x_use is None or y_use is None or np.asarray(x_use).size <= 1 or np.asarray(y_use).size <= 1:
+                    continue
+                x_arr = np.asarray(x_use, dtype=float)
+                y_arr = np.asarray(y_use, dtype=float)
+
                 p = base.copy()
-                peaks_row = _parse_deconv(_row.get("Deconvolution Results"))
-                if isinstance(peaks_row, list) and len(peaks_row) == k:
+                aligned = aligned_by_idx.get(_idx)
+                if isinstance(aligned, list) and len(aligned) == k:
                     for i in range(k):
                         try:
-                            ai = float(
-                                peaks_row[i].get(
-                                    "amplitude", p[f"p{i}_amplitude"].value
-                                )
-                            )
+                            ai = float(aligned[i].get("amplitude", aligned[i].get("A", p[f"p{i}_amplitude"].value)))
                             p[f"p{i}_amplitude"].set(value=max(0.0, ai))
                         except Exception:
                             pass
@@ -16827,9 +17504,7 @@ def fit_material(FTIR_DataFrame):
                         try:
                             ci = float(cen_arr[i])
                             nearest = int(np.argmin(np.abs(x_arr - ci)))
-                            ai0 = max(
-                                0.0, float(y_arr[nearest]) * max(1.0, float(sig_l[i]))
-                            )
+                            ai0 = max(0.0, float(y_arr[nearest]) * max(1.0, float(sig_l[i])))
                             p[f"p{i}_amplitude"].set(value=ai0)
                         except Exception:
                             pass
@@ -16840,30 +17515,25 @@ def fit_material(FTIR_DataFrame):
                     total += float(np.nansum(err * err))
                     if assign:
                         fit_list = []
+                        amps_only = []
                         for j in range(k):
                             try:
                                 amp = float(res.params.get(f"p{j}_amplitude").value)
                             except Exception:
                                 amp = float("nan")
-                            fit_list.append(
-                                {
-                                    "amplitude": amp,
-                                    "center": float(cen_arr[j]),
-                                    "alpha": float(frc[j]),
-                                    "sigma_l": float(sig_l[j]),
-                                    "sigma_g": float(sig_l[j])
-                                    / float(np.sqrt(2.0 * np.log(2.0))),
-                                }
-                            )
+                            fit_list.append({"amplitude": amp})
+                            try:
+                                amps_only.append(float(amp) if np.isfinite(amp) else 0.0)
+                            except Exception:
+                                amps_only.append(0.0)
                         cache[_idx] = fit_list
+                        try:
+                            FTIR_DataFrame.at[_idx, "Material Fit Results"] = amps_only
+                        except Exception:
+                            pass
                 except Exception:
                     total += 1e12
             if assign:
-                for _idx, fit_list in cache.items():
-                    try:
-                        FTIR_DataFrame.at[_idx, "Material Fit Results"] = fit_list
-                    except Exception:
-                        pass
                 if capture is not None:
                     try:
                         capture.clear()
@@ -16924,6 +17594,25 @@ def fit_material(FTIR_DataFrame):
         # Ensure we evaluate and assign using the best centers discovered
         cen_curr = best_centers.copy()
         final_sse = _fit_and_sse(cen_curr, assign=True, capture=final_cache)
+
+        # Update shared params to reflect optimized centers
+        nonlocal shared_centers_list, shared_sigma_list, shared_alpha_list, shared_peak_numbers_list
+        try:
+            shared_centers_list = [float(v) for v in cen_curr.tolist()]
+        except Exception:
+            shared_centers_list = cen_curr.tolist() if hasattr(cen_curr, "tolist") else list(cen_curr)
+        try:
+            shared_sigma_list = [float(v) if np.isfinite(v) else 10.0 for v in sig_l.tolist()]
+        except Exception:
+            shared_sigma_list = [10.0] * k
+        try:
+            shared_alpha_list = [float(np.clip(v, 0.0, 1.0)) if np.isfinite(v) else 0.5 for v in frc.tolist()]
+        except Exception:
+            shared_alpha_list = [0.5] * k
+        try:
+            shared_peak_numbers_list = _compute_shared_peak_numbers_from_aligned(aligned_by_idx, k)
+        except Exception:
+            shared_peak_numbers_list = [None] * k
         # Report delta: negative means decreased SSE
         delta = final_sse - initial_sse
         msg = (
@@ -16986,6 +17675,10 @@ def fit_material(FTIR_DataFrame):
                 init_list = init_cache.get(_idx)
                 final_list = final_cache.get(_idx)
                 label = f"T={_row.get('Time')}"
+                try:
+                    file_name = _row.get("File Name", "")
+                except Exception:
+                    file_name = ""
                 deltas = []
                 if isinstance(init_list, list) and isinstance(final_list, list):
                     for j in range(k):
@@ -17006,7 +17699,7 @@ def fit_material(FTIR_DataFrame):
                         except Exception:
                             d = float("nan")
                         deltas.append(d)
-                amp_delta_by_spectrum.append({"label": label, "deltas": deltas})
+                amp_delta_by_spectrum.append({"label": label, "file_name": file_name, "deltas": deltas})
         except Exception:
             amp_delta_by_spectrum = []
         summary = {
@@ -17018,6 +17711,7 @@ def fit_material(FTIR_DataFrame):
             "initial_centers": cen_init.tolist(),
             "final_centers": cen_curr.tolist(),
             "center_deltas": center_deltas,
+            "peak_numbers": shared_peak_numbers_list,
             "amp_initial_means": amp_init_means,
             "amp_final_means": amp_final_means,
             "amp_delta_means": amp_delta_means,
@@ -17206,6 +17900,7 @@ def fit_material(FTIR_DataFrame):
     )
     close_btn = widgets.Button(description="Close", button_style="danger")
     status_html = widgets.HTML(value="")
+    x_ranges_html = widgets.HTML(value="")
     optimize_status_html = widgets.HTML(value="")
     # Tables: Peak Areas (per-time amplitudes) and Peak Wavenumbers (shared centers)
     A_table_html = widgets.HTML(value="")
@@ -17282,6 +17977,7 @@ def fit_material(FTIR_DataFrame):
                 centers_list = shared_centers_list or []
                 sigmas_list = shared_sigma_list or []
                 fracs_list = shared_alpha_list or []
+                peak_numbers_list = shared_peak_numbers_list or []
 
                 if centers_list and len(centers_list) > 0:
                     try:
@@ -17289,7 +17985,7 @@ def fit_material(FTIR_DataFrame):
 
                         # Build a table with rows: Center, Sigma (σ), Alpha (Lorentz); columns: Peak 1..N
                         k = len(centers_list)
-                        header = [f"Peak {i+1}" for i in range(k)]
+                        header = _peak_labels_from_numbers(peak_numbers_list, k)
 
                         def _fmt(v, fmt=".6g"):
                             try:
@@ -17342,7 +18038,7 @@ def fit_material(FTIR_DataFrame):
                         k = len(centers_list or [])
                         header_cells_wn = "".join(
                             [f"<th>Parameter</th>"]
-                            + [f"<th>Peak {i+1}</th>" for i in range(k)]
+                            + [f"<th>{h}</th>" for h in _peak_labels_from_numbers(peak_numbers_list, k)]
                         )
 
                         def _cell(v, fmt=".6g"):
@@ -17409,6 +18105,10 @@ def fit_material(FTIR_DataFrame):
                             cond_val = _row.get("Condition")
                     except Exception:
                         cond_val = None
+                    try:
+                        file_name_val = _row.get("File Name")
+                    except Exception:
+                        file_name_val = None
                     res = _row.get("Material Fit Results")
                     if isinstance(res, str):
                         try:
@@ -17436,16 +18136,18 @@ def fit_material(FTIR_DataFrame):
                         amps = None
                         # If no fit list, row will be padded; add explanatory note
                         notes = "no fit results; padded"
-                    series_rows.append((t_val, cond_val, amps, notes))
+                    series_rows.append((t_val, cond_val, file_name_val, amps, notes))
 
                 if k_max > 0:
                     try:
                         import pandas as pd  # local import safe here
 
                         table_records = []
-                        for t_val, cond_val, amps, notes in series_rows:
+                        peak_headers = _peak_labels_from_numbers(peak_numbers_list, k_max)
+                        for t_val, cond_val, file_name_val, amps, notes in series_rows:
                             # Build record with Time, Conditions, Peaks..., Notes
-                            rec = {"Time": t_val if t_val is not None else ""}
+                            rec = {"File Name": file_name_val if file_name_val is not None else ""}
+                            rec["Time"] = t_val if t_val is not None else ""
                             rec["Conditions"] = cond_val if cond_val is not None else ""
                             # Pad missing amplitudes with zeros to keep table dense
                             padded = []
@@ -17464,7 +18166,7 @@ def fit_material(FTIR_DataFrame):
                                         val = f"{a:.6g}"
                                 except Exception:
                                     val = ""
-                                rec[f"Peak {i+1}"] = val
+                                rec[peak_headers[i] if i < len(peak_headers) else f"Peak {i+1}"] = val
                             # Append Notes last to explain zero rows
                             rec["Notes"] = notes if isinstance(notes, str) else ""
                             table_records.append(rec)
@@ -17481,14 +18183,19 @@ def fit_material(FTIR_DataFrame):
                             last_table_df = df_table
                     except Exception:
                         # Fallback manual HTML
+                        peak_headers = _peak_labels_from_numbers(peak_numbers_list, k_max)
                         header_cells = "".join(
-                            ["<th>Time</th>", "<th>Conditions</th>"]
-                            + [f"<th>Peak {i+1}</th>" for i in range(k_max)]
+                            ["<th>File Name</th>", "<th>Time</th>", "<th>Conditions</th>"]
+                            + [f"<th>{peak_headers[i] if i < len(peak_headers) else f'Peak {i+1}'}</th>" for i in range(k_max)]
                             + ["<th>Notes</th>"]
                         )
                         body_rows = []
-                        for t_val, cond_val, amps, notes in series_rows:
-                            cells = [f"<td>{t_val}</td>", f"<td>{cond_val if cond_val is not None else ''}</td>"]
+                        for t_val, cond_val, file_name_val, amps, notes in series_rows:
+                            cells = [
+                                f"<td>{file_name_val if file_name_val is not None else ''}</td>",
+                                f"<td>{t_val}</td>",
+                                f"<td>{cond_val if cond_val is not None else ''}</td>",
+                            ]
                             for i in range(k_max):
                                 try:
                                     if (
@@ -17526,6 +18233,20 @@ def fit_material(FTIR_DataFrame):
                 if not with_fits
                 else "<span style='color:#000;'>Displayed material fits (amplitudes vary; centers/σ/α shared).</span>"
             )
+        except Exception:
+            pass
+
+        # X-Range message (shown directly under the 'Displayed material fits...' line)
+        try:
+            if not with_fits:
+                x_ranges_html.value = ""
+            else:
+                rs = current_union_x_ranges or []
+                if rs:
+                    rs_txt = ", ".join([f"[{lo:.6g}, {hi:.6g}]" for lo, hi in rs])
+                    x_ranges_html.value = f"<span style='color:#000;'><b>X-Ranges used:</b> {rs_txt}</span>"
+                else:
+                    x_ranges_html.value = "<span style='color:#a00;'><b>X-Ranges used:</b> none found in 'Deconvolution X-Ranges' for this material (using full spectrum).</span>"
         except Exception:
             pass
 
@@ -17598,7 +18319,23 @@ def fit_material(FTIR_DataFrame):
                     mask = np.isfinite(y_arr) & np.isfinite(y_fit_arr)
                     if not np.any(mask):
                         continue
-                    err = y_arr[mask] - y_fit_arr[mask]
+                    # Restrict SSE computation to current union x-ranges
+                    try:
+                        x_np = np.asarray(x_arr, dtype=float)
+                        y_np = np.asarray(y_arr, dtype=float)
+                        yfit_np = np.asarray(y_fit_arr, dtype=float)
+                        n2 = min(x_np.size, y_np.size, yfit_np.size)
+                        x_np = x_np[:n2]
+                        y_np = y_np[:n2]
+                        yfit_np = yfit_np[:n2]
+                        x_s, y_s = _slice_to_union_ranges(x_np, y_np, current_union_x_ranges)
+                        x_s2, yfit_s = _slice_to_union_ranges(x_np, yfit_np, current_union_x_ranges)
+                        if x_s is None or y_s is None or yfit_s is None or y_s.size <= 1 or yfit_s.size <= 1:
+                            continue
+                        # y_s and yfit_s correspond to the same x mask because both sliced by x_np
+                        err = y_s - yfit_s
+                    except Exception:
+                        err = y_arr[mask] - y_fit_arr[mask]
                     total += float(np.sum(err * err))
                     any_added = True
                 except Exception:
@@ -17647,6 +18384,8 @@ def fit_material(FTIR_DataFrame):
                         centers0 = summary.get("initial_centers", []) or []
                         centers1 = summary.get("final_centers", []) or []
                         deltas = summary.get("center_deltas", []) or []
+                        peak_nums = summary.get("peak_numbers", []) or []
+                        peak_labels = _peak_labels_from_numbers(peak_nums, klen)
                         amp0 = summary.get("amp_initial_means", []) or []
                         amp1 = summary.get("amp_final_means", []) or []
                         ampd = summary.get("amp_delta_means", []) or []
@@ -17664,7 +18403,7 @@ def fit_material(FTIR_DataFrame):
                                     return ""
 
                             rows.append(
-                                f"<tr><td>Peak {i+1}</td><td>{_fmt(c0)}</td><td>{_fmt(c1)}</td><td>{_fmt(dd)}</td></tr>"
+                                f"<tr><td>{peak_labels[i] if i < len(peak_labels) else f'Peak {i+1}'}</td><td>{_fmt(c0)}</td><td>{_fmt(c1)}</td><td>{_fmt(dd)}</td></tr>"
                             )
                         table_html = (
                             "<table style='border-collapse:collapse'>"
@@ -17682,8 +18421,8 @@ def fit_material(FTIR_DataFrame):
                                 pass
                         # Build header and body rows
                         header_cells = "".join(
-                            ["<th>Series</th>"]
-                            + [f"<th>Peak {i+1} Δ</th>" for i in range(kmax)]
+                            ["<th>File Name</th>", "<th>Series</th>"]
+                            + [f"<th>{(peak_labels[i] if i < len(peak_labels) else f'Peak {i+1}')} Δ</th>" for i in range(kmax)]
                         )
                         body_rows = []
 
@@ -17695,8 +18434,9 @@ def fit_material(FTIR_DataFrame):
 
                         for item in delta_by_spec:
                             label = item.get("label", "")
+                            file_name = item.get("file_name", "")
                             deltas = item.get("deltas", []) or []
-                            cells = [f"<td>{label}</td>"]
+                            cells = [f"<td>{file_name}</td>", f"<td>{label}</td>"]
                             for i in range(kmax):
                                 val = deltas[i] if i < len(deltas) else None
                                 cells.append(f"<td>{_fmtd(val)}</td>")
@@ -17775,11 +18515,40 @@ def fit_material(FTIR_DataFrame):
             except Exception:
                 pass
             return
+
+        # Only save for rows that were actually used in the fit/optimization.
+        # (i.e., had usable Deconvolution Results that contributed to the canonical peak set)
+        nonlocal last_used_fit_row_indices
+        used_idx = set()
+        try:
+            used_idx = set(int(i) for i in (last_used_fit_row_indices or set()))
+        except Exception:
+            used_idx = set()
+
+        # Fallback inference when user clicks Save without running Fit/Optimize this session
+        if not used_idx:
+            try:
+                for _idx, _row in df_series.iterrows():
+                    pk = _parse_deconv(_row.get("Deconvolution Results"))
+                    if pk is not None and len(pk) > 0:
+                        used_idx.add(int(_idx))
+            except Exception:
+                used_idx = set()
+
+        try:
+            df_series = df_series.loc[df_series.index.intersection(sorted(used_idx))]
+        except Exception:
+            pass
+
+        if df_series.empty:
+            try:
+                status_html.value = "<span style='color:#a00;'>Nothing to save: no rows with usable Deconvolution Results were used in the fit.</span>"
+            except Exception:
+                pass
+            return
         # Determine peak count and build records for areas
         k_max = 0
-        series_rows = []  # (time, amplitudes | None)
         for _idx, _row in df_series.iterrows():
-            t_val = _row.get("Time")
             res = _row.get("Material Fit Results")
             if isinstance(res, str):
                 try:
@@ -17795,7 +18564,6 @@ def fit_material(FTIR_DataFrame):
                     amps = None
             else:
                 amps = None
-            series_rows.append((t_val, amps))
         if k_max <= 0:
             try:
                 status_html.value = "<span style='color:#a00;'>No fitted peaks to save for this selection.</span>"
@@ -17823,21 +18591,6 @@ def fit_material(FTIR_DataFrame):
                         res = ast.literal_eval(res)
                     except Exception:
                         res = None
-                # Ensure it's a list of amplitudes; if missing, attempt to map by time from series_rows
-                if not (isinstance(res, list) and len(res) > 0):
-                    try:
-                        t_val = _row.get("Time")
-                        amps = None
-                        for t_it, a_it in series_rows:
-                            if t_it == t_val:
-                                amps = a_it
-                                break
-                        if isinstance(amps, list) and len(amps) > 0:
-                            res = [float(a) for a in amps]
-                        else:
-                            res = None
-                    except Exception:
-                        res = None
                 if isinstance(res, list) and len(res) > 0:
                     try:
                         FTIR_DataFrame.at[idx, dest_col] = [float(a) for a in res]
@@ -17845,7 +18598,7 @@ def fit_material(FTIR_DataFrame):
                     except Exception:
                         pass
             try:
-                status_html.value = f"<span style='color:#0a0;'>Saved per-row peak amplitudes to '{dest_col}' for {updated} row(s).</span>"
+                status_html.value = f"<span style='color:#0a0;'>Saved per-row peak amplitudes to '{dest_col}' for {updated} row(s) used in the fit.</span>"
             except Exception:
                 pass
             # --- JSON update: write σ and α for canon peaks of this material --- #
@@ -17861,10 +18614,20 @@ def fit_material(FTIR_DataFrame):
                     mat_payload = top.get(code_key, {}) or {}
                     peaks_payload = mat_payload.get("peaks", {}) or {}
                     kjson = len(shared_centers_list or [])
+                    # Use peak numbers sourced from Deconvolution Results, falling back to 1..N
+                    peak_nums = shared_peak_numbers_list or [None] * kjson
                     for i in range(kjson):
-                        key = str(i + 1)
+                        try:
+                            pn = peak_nums[i] if i < len(peak_nums) else None
+                        except Exception:
+                            pn = None
+                        key = str(int(pn)) if pn is not None else str(i + 1)
                         entry = peaks_payload.get(key, {})
-                        # Update only σ and α, leave centers as-is (canon)
+                        # Update center/σ/α using the newest shared fit values
+                        try:
+                            entry["center_wavenumber"] = float(shared_centers_list[i])
+                        except Exception:
+                            entry["center_wavenumber"] = entry.get("center_wavenumber", 0.0)
                         try:
                             entry["σ"] = float(shared_sigma_list[i])
                         except Exception:
@@ -17982,7 +18745,7 @@ def fit_material(FTIR_DataFrame):
     # Keep dropdowns/checkbox in one row; buttons in a separate row
     controls = widgets.HBox([material_dd, include_bad_cb])
     buttons = widgets.HBox([fit_btn, opt_btn, save_btn, close_btn])
-    ui = widgets.VBox([controls, buttons, status_html, optimize_status_html])
+    ui = widgets.VBox([controls, buttons, status_html, x_ranges_html, optimize_status_html])
     display(ui, WN_table_html, A_table_html)
     # Ensure options reflect current include_bad state
     _refresh_materials_and_conditions()
